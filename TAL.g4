@@ -19,6 +19,21 @@ sourceItem
     | commentedSourceAssignment
     | preprocessorDirective
     | talSqlStatement
+    | structMemberExpression  // Add support for standalone struct expressions
+    | SEMI
+    | errorRecoveryItem
+    ;
+
+// Add standalone struct member expression support
+structMemberExpression
+    : STRUCT PERIOD IDENTIFIER SEMI?
+    | IDENTIFIER PERIOD IDENTIFIER PERIOD IDENTIFIER SEMI?  // nested struct access
+    ;
+
+
+errorRecoveryItem
+    : QUESTION_MARK (~(SEMI | EOF))* SEMI?
+    | (~(SEMI | EOF | QUESTION_MARK | PROC_UPPER | PROC_LOWER | STRUCT | INT | STRING | BEGIN | END))+ SEMI?
     ;
 
 namePart: NAME IDENTIFIER SEMI;
@@ -47,13 +62,13 @@ conditionalCompilation
     ;
 
 defineDirective
-    : QUESTION_MARK DEFINE IDENTIFIER (ASSIGN | SIMPLE_EQ) preprocessorExpression SEMI
-    | QUESTION_MARK DEFINE IDENTIFIER LPAREN identifierList? RPAREN (ASSIGN | SIMPLE_EQ) preprocessorExpression SEMI
+    : QUESTION_MARK DEFINE IDENTIFIER (ASSIGN | SIMPLE_EQ) preprocessorExpression SEMI?
+    | QUESTION_MARK DEFINE IDENTIFIER LPAREN identifierList? RPAREN (ASSIGN | SIMPLE_EQ) preprocessorExpression SEMI?
     ;
 
 includeDirective
-    : QUESTION_MARK INCLUDE STRING_LITERAL SEMI
-    | QUESTION_MARK SOURCE STRING_LITERAL SEMI
+    : QUESTION_MARK INCLUDE STRING_LITERAL SEMI?
+    | QUESTION_MARK SOURCE STRING_LITERAL SEMI?
     ;
 
 preprocessorBody
@@ -89,23 +104,23 @@ talSqlStatement
     ;
 
 sqlExecStatement
-    : EXEC SQL sqlCommand SEMI
+    : EXEC SQL sqlCommand SEMI?
     ;
 
 sqlFetchStatement
-    : EXEC SQL FETCH IDENTIFIER INTO variableList SEMI
+    : EXEC SQL FETCH IDENTIFIER INTO variableList SEMI?
     ;
 
 sqlOpenStatement
-    : EXEC SQL OPEN IDENTIFIER SEMI
+    : EXEC SQL OPEN IDENTIFIER SEMI?
     ;
 
 sqlCloseStatement
-    : EXEC SQL CLOSE IDENTIFIER SEMI
+    : EXEC SQL CLOSE IDENTIFIER SEMI?
     ;
 
 sqlDeclareStatement
-    : EXEC SQL DECLARE IDENTIFIER CURSOR FOR sqlSelectStatement SEMI
+    : EXEC SQL DECLARE IDENTIFIER CURSOR FOR sqlSelectStatement SEMI?
     ;
 
 sqlCommand
@@ -198,7 +213,7 @@ keywordAsIdentifier
     ;
 
 pragmaDirective
-    : PRAGMA IDENTIFIER (LPAREN pragmaArgList? RPAREN)? SEMI
+    : PRAGMA IDENTIFIER (LPAREN pragmaArgList? RPAREN)? SEMI?
     ;
 pragmaArgList
     : pragmaArg (COMMA pragmaArg)*
@@ -227,7 +242,7 @@ globalDeclarationItem
 
 // Guardian file system declarations
 guardianDeclaration
-    : GUARDIAN fileDeclaration SEMI
+    : GUARDIAN fileDeclaration SEMI?
     ;
 
 fileDeclaration
@@ -236,7 +251,7 @@ fileDeclaration
 
 // Enscribe file declarations
 enscribeDeclaration
-    : ENSCRIBE fileAttribute* fileDeclaration SEMI
+    : ENSCRIBE fileAttribute* fileDeclaration SEMI?
     ;
 
 fileAttribute
@@ -269,8 +284,8 @@ varDef
     ;
 
 blockDeclaration
-    : BLOCK blockName SEMI globalDeclarationItem* END BLOCK SEMI?
-    | BLOCK PRIVATE SEMI globalDeclarationItem* END BLOCK SEMI?
+    : BLOCK blockName SEMI? globalDeclarationItem* END BLOCK SEMI?
+    | BLOCK PRIVATE SEMI? globalDeclarationItem* END BLOCK SEMI?
     ;
 
 blockName: IDENTIFIER;
@@ -282,7 +297,7 @@ defineDeclaration
 
 // Trap declaration for exception handling
 trapDeclaration
-    : TRAP IDENTIFIER SEMI
+    : TRAP IDENTIFIER SEMI?
     ;
 
 // ----------------------
@@ -292,6 +307,7 @@ dataDeclaration
     : simpleVariableDeclaration
     | arrayDeclaration
     | structureDeclaration
+    | structInstanceDeclaration
     | pointerDeclaration
     | readOnlyArrayDeclaration
     | structurePointerDeclaration
@@ -303,9 +319,15 @@ dataDeclaration
     | stackGroupDeclaration
     ;
 
+// to handle struct instance creation e.g., struct .EXT data^stack (codeword^stack^def);
+structInstanceDeclaration
+    : STRUCT indirection? IDENTIFIER LPAREN IDENTIFIER RPAREN (LBRACK indexRange RBRACK)? SEMI?
+    | STRUCT IDENTIFIER IDENTIFIER SEMI?  // For simple struct variables
+    ;
+
 // Extended addressing declarations
 extendedAddressDeclaration
-    : typeSpecification EXTADDR IDENTIFIER (ASSIGN extendedAddress)? (COMMA EXTADDR IDENTIFIER (ASSIGN extendedAddress)?)* SEMI
+    : typeSpecification EXTADDR IDENTIFIER (ASSIGN extendedAddress)? (COMMA EXTADDR IDENTIFIER (ASSIGN extendedAddress)?)* SEMI?
     ;
 
 extendedAddress
@@ -315,7 +337,7 @@ extendedAddress
 
 // Stack group declarations
 stackGroupDeclaration
-    : typeSpecification SGADDR IDENTIFIER (ASSIGN stackGroupAddress)? (COMMA SGADDR IDENTIFIER (ASSIGN stackGroupAddress)?)* SEMI
+    : typeSpecification SGADDR IDENTIFIER (ASSIGN stackGroupAddress)? (COMMA SGADDR IDENTIFIER (ASSIGN stackGroupAddress)?)* SEMI?
     ;
 
 stackGroupAddress
@@ -325,34 +347,45 @@ stackGroupAddress
 
 // Base-address equivalencing declaration
 baseAddressEquivDeclaration
-    : typeSpecification (GCONTROL | LCONTROL | SCONTROL | SGCONTROL) IDENTIFIER (ASSIGN initialization)? SEMI
+    : typeSpecification (GCONTROL | LCONTROL | SCONTROL | SGCONTROL) IDENTIFIER (ASSIGN initialization)? SEMI?
     ;
 
 // Enhanced TAL pointer declarations with proper PERIOD prefix support
 talPointerDeclaration
-    : typeSpecification PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI
-    | IDENTIFIER PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI
-    | typeSpecification DOT_EXT IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA DOT_EXT IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI
-    | typeSpecification DOT_SG IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA DOT_SG IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI
+    : typeSpecification PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI?
+    | typeSpecification DOT_EXT IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA DOT_EXT IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI?
+    | typeSpecification DOT_SG IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA DOT_SG IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI?
+    | IDENTIFIER PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA PERIOD IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI?  // Move this last
     ;
 
 simpleVariableDeclaration
-    : typeSpecification IDENTIFIER (ASSIGN initialization)? (COMMA IDENTIFIER (ASSIGN initialization)?)* SEMI
+    : typeSpecification (indirection? IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?) 
+      (COMMA (indirection? IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?))* SEMI?
     ;
 
 arrayDeclaration
-    : typeSpecification standardIndirectSymbol? IDENTIFIER LBRACK indexRange RBRACK (ASSIGN initialization)? (COMMA standardIndirectSymbol? IDENTIFIER LBRACK indexRange RBRACK (ASSIGN initialization)?)* SEMI
+    : typeSpecification indirection? IDENTIFIER LBRACK complexExpression RBRACK 
+      (ASSIGN initialization)? 
+      (COMMA indirection? IDENTIFIER (LBRACK complexExpression RBRACK)? (ASSIGN initialization)?)*
+      SEMI?
     ;
+
+complexExpression
+    : expression (COLON expression)?  // Handle range expressions like [0:255]
+    ;
+
 
 // STRUCT variable declarations
 structVariableDeclaration
-    : STRUCT IDENTIFIER IDENTIFIER SEMI
-    | STRUCT IDENTIFIER (PERIOD IDENTIFIER)+ SEMI
-    | IDENTIFIER PERIOD IDENTIFIER SEMI
+    : STRUCT IDENTIFIER IDENTIFIER SEMI?
+    | STRUCT IDENTIFIER (PERIOD IDENTIFIER)+ SEMI?
+    | IDENTIFIER PERIOD IDENTIFIER SEMI?
+    | STRUCT PERIOD IDENTIFIER SEMI?  // Add support for STRUCT.field declarations
     ;
 
+
 structureDeclaration
-    : STRUCT IDENTIFIER (LPAREN MUL RPAREN)? (LBRACK indexRange RBRACK)? SEMI structureBody
+    : STRUCT IDENTIFIER (LPAREN MUL RPAREN)? (LBRACK indexRange RBRACK)? SEMI? structureBody
     ;
 
 structureBody: BEGIN structureItem* END SEMI?;
@@ -371,7 +404,7 @@ structureItem
 
 // Union declarations within structures
 unionDeclaration
-    : UNION BEGIN unionItem+ END SEMI
+    : UNION BEGIN unionItem+ END SEMI?
     ;
 
 unionItem
@@ -385,42 +418,42 @@ inlineCommentItem
     ;
 
 structPointerFieldDeclaration
-    : typeSpecification PERIOD IDENTIFIER SEMI
-    | typeSpecification DOT_EXT IDENTIFIER SEMI
-    | typeSpecification DOT_SG IDENTIFIER SEMI
+    : typeSpecification PERIOD IDENTIFIER SEMI?
+    | typeSpecification DOT_EXT IDENTIFIER SEMI?
+    | typeSpecification DOT_SG IDENTIFIER SEMI?
     ;
 
-fieldDeclaration: typeSpecification IDENTIFIER (LBRACK indexRange RBRACK)? (COMMA IDENTIFIER (LBRACK indexRange RBRACK)?)* SEMI;
-nestedStructureDeclaration: STRUCT IDENTIFIER (LBRACK indexRange RBRACK)? SEMI structureBody;
-fillerDeclaration: FILLER expression SEMI;
-equivalencedFieldDeclaration: typeSpecification IDENTIFIER (LBRACK expression RBRACK)? ASSIGN IDENTIFIER SEMI;
+fieldDeclaration: typeSpecification IDENTIFIER (LBRACK indexRange RBRACK)? (COMMA IDENTIFIER (LBRACK indexRange RBRACK)?)* SEMI?;
+nestedStructureDeclaration: STRUCT IDENTIFIER (LBRACK indexRange RBRACK)? SEMI? structureBody;
+fillerDeclaration: FILLER expression SEMI?;
+equivalencedFieldDeclaration: typeSpecification IDENTIFIER (LBRACK expression RBRACK)? ASSIGN IDENTIFIER SEMI?;
 
 pointerDeclaration
-    : typeSpecification indirection IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA indirection IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI
-    | typeSpecification MUL IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA MUL IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI
+    : typeSpecification indirection IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA indirection IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI?
+    | typeSpecification MUL IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)? (COMMA MUL IDENTIFIER (LBRACK indexRange RBRACK)? (ASSIGN initialization)?)* SEMI?
     ;
 
 structurePointerDeclaration
-    : typeSpecification indirection IDENTIFIER LPAREN IDENTIFIER RPAREN (ASSIGN initialization)? (COMMA indirection IDENTIFIER LPAREN IDENTIFIER RPAREN (ASSIGN initialization)?)* SEMI
+    : typeSpecification indirection IDENTIFIER LPAREN IDENTIFIER RPAREN (ASSIGN initialization)? (COMMA indirection IDENTIFIER LPAREN IDENTIFIER RPAREN (ASSIGN initialization)?)* SEMI?
     ;
 
 systemGlobalPointerDeclaration
-    : typeSpecification SGINDIRECT IDENTIFIER (ASSIGN initialization)? (COMMA SGINDIRECT IDENTIFIER (ASSIGN initialization)?)* SEMI
+    : typeSpecification SGINDIRECT IDENTIFIER (ASSIGN initialization)? (COMMA SGINDIRECT IDENTIFIER (ASSIGN initialization)?)* SEMI?
     ;
 
 readOnlyArrayDeclaration
-    : typeSpecification IDENTIFIER (LBRACK indexRange RBRACK)? ASSIGN PCONTROL ASSIGN initialization (COMMA IDENTIFIER (LBRACK indexRange RBRACK)? ASSIGN PCONTROL ASSIGN initialization)* SEMI
+    : typeSpecification IDENTIFIER (LBRACK indexRange RBRACK)? ASSIGN PCONTROL ASSIGN initialization (COMMA IDENTIFIER (LBRACK indexRange RBRACK)? ASSIGN PCONTROL ASSIGN initialization)* SEMI?
     ;
 
 equivalencedVarDeclaration
-    : typeSpecification IDENTIFIER ASSIGN equivalencedReference (LBRACK expression RBRACK)? offsetSpec? (COMMA IDENTIFIER ASSIGN equivalencedReference (LBRACK expression RBRACK)? offsetSpec?)* SEMI
+    : typeSpecification IDENTIFIER ASSIGN equivalencedReference (LBRACK expression RBRACK)? offsetSpec? (COMMA IDENTIFIER ASSIGN equivalencedReference (LBRACK expression RBRACK)? offsetSpec?)* SEMI?
     ;
 
 equivalencedReference: IDENTIFIER | SGCONTROL | GCONTROL | LCONTROL | SCONTROL;
 offsetSpec: (PLUS | MINUS) expression;
 
 literalDeclaration
-    : LITERAL IDENTIFIER ASSIGN expression (COMMA IDENTIFIER ASSIGN expression)* SEMI
+    : LITERAL IDENTIFIER ASSIGN expression (COMMA IDENTIFIER ASSIGN expression)* SEMI?
     ;
 
 // ----------------------
@@ -480,7 +513,7 @@ recordType
     : RECORD fieldDecl+ END
     ;
 fieldDecl
-    : identList COLON typeSpec SEMI
+    : identList COLON typeSpec SEMI?
     ;
 
 // Enhanced TAL data type support with all variations
@@ -525,7 +558,7 @@ identList
 // ----------------------
 
 procedureDeclaration
-    : procHeader SEMI procBody?
+    : procHeader SEMI? procBody?
     ;
 
 procHeader
@@ -551,13 +584,13 @@ formalParamList
     | LPAREN formalParam (COMMA formalParam)* RPAREN  #nonEmptyParams
     ;
 
-// Restructured formalParam to avoid conflicts - order matters for disambiguation
+
 formalParam
     : VAR identList COLON typeSpec                     #varParameter
     | REF identList COLON typeSpec                     #refParameter  
+    | STRUCT IDENTIFIER IDENTIFIER                     #structParameter
     | dataType pointerOrIndirect IDENTIFIER structureReferral? #typedPointerParam
     | dataType IDENTIFIER (LBRACK expression? RBRACK)?         #typedParam
-    | STRUCT IDENTIFIER IDENTIFIER                     #structParameter
     | IDENTIFIER pointerOrIndirect IDENTIFIER structureReferral? #forwardPointerParam
     | IDENTIFIER IDENTIFIER                            #forwardParam
     | IDENTIFIER                                       #simpleParam
@@ -590,8 +623,8 @@ procAttribute
 // Enhanced procedure body handling with error recovery
 procBody
     : procBodyContent
-    | FORWARD SEMI
-    | EXTERNAL SEMI
+    | FORWARD SEMI?
+    | EXTERNAL SEMI?
     | errorRecovery
     ;
 
@@ -630,10 +663,10 @@ declarationOrStatement
     ;
 
 // Case-insensitive subprocedure handling
-subprocedureDeclaration: (SUBPROC_UPPER | SUBPROC_LOWER) procName formalParamList? SEMI procBody;
-entryPointDeclaration: ENTRY IDENTIFIER SEMI;
-labelDeclaration: LABEL IDENTIFIER (COMMA IDENTIFIER)* SEMI;
-forwardSubprocedureDeclaration: (SUBPROC_UPPER | SUBPROC_LOWER) procName formalParamList? SEMI FORWARD SEMI;
+subprocedureDeclaration: (SUBPROC_UPPER | SUBPROC_LOWER) procName formalParamList? SEMI? procBody;
+entryPointDeclaration: ENTRY IDENTIFIER SEMI?;
+labelDeclaration: LABEL IDENTIFIER (COMMA IDENTIFIER)* SEMI?;
+forwardSubprocedureDeclaration: (SUBPROC_UPPER | SUBPROC_LOWER) procName formalParamList? SEMI? FORWARD SEMI?;
 
 statementList: statement+;
 
@@ -641,18 +674,18 @@ statementList: statement+;
 // Forward and External Declarations
 // ----------------------
 forwardDeclaration
-    : FORWARD (PROC_UPPER | PROC_LOWER) procName formalParamList? SEMI            #forwardProcDeclaration
-    | FORWARD STRUCT IDENTIFIER SEMI                                              #forwardStructDeclaration
-    | FORWARD IDENTIFIER SEMI                                                     #forwardTypeDeclaration
-    | FORWARD typeDeclaration SEMI                                                #forwardTypeDeclWithType
+    : FORWARD (PROC_UPPER | PROC_LOWER) procName formalParamList? SEMI?            #forwardProcDeclaration
+    | FORWARD STRUCT IDENTIFIER SEMI?                                              #forwardStructDeclaration
+    | FORWARD IDENTIFIER SEMI?                                                     #forwardTypeDeclaration
+    | FORWARD typeDeclaration SEMI?                                                #forwardTypeDeclWithType
     ;
 
 typeDeclaration: dataType IDENTIFIER | forwardTypeName IDENTIFIER;
 
 externalDeclaration
-    : EXTERNAL (PROC_UPPER | PROC_LOWER) IDENTIFIER languageSpecifier? SEMI
-    | EXTERNAL STRUCT IDENTIFIER languageSpecifier? SEMI
-    | EXTERNAL identList (COLON typeSpec)? SEMI
+    : EXTERNAL (PROC_UPPER | PROC_LOWER) IDENTIFIER languageSpecifier? SEMI?
+    | EXTERNAL STRUCT IDENTIFIER languageSpecifier? SEMI?
+    | EXTERNAL identList (COLON typeSpec)? SEMI?
     ;
 
 languageSpecifier: LANGUAGE languageNameChoice;
@@ -661,7 +694,7 @@ languageNameChoice: IDENTIFIER | COBOL85 | FORTRAN | PASCAL | UNSPECIFIED | C | 
 // ----------------------
 // Module Import
 // ----------------------
-moduleImport: IMPORT moduleIdentifier SEMI | IMPORT moduleIdentifier LPAREN importedItems RPAREN SEMI;
+moduleImport: IMPORT moduleIdentifier SEMI? | IMPORT moduleIdentifier LPAREN importedItems RPAREN SEMI?;
 moduleIdentifier: IDENTIFIER (PERIOD IDENTIFIER)*;
 importedItems: IDENTIFIER (COMMA IDENTIFIER)* | MUL;
 
@@ -669,43 +702,43 @@ importedItems: IDENTIFIER (COMMA IDENTIFIER)* | MUL;
 // Enhanced Statements with Error Recovery
 // ----------------------
 statement
-    : assignmentStatement SEMI                       #assignStmt
+    : assignmentStatement SEMI?                       #assignStmt
     | localDeclarationStatement                      #localDeclStmt
     | bitDepositStatement                            #bitDepositStmt
-    | bitFieldAssignmentStatement SEMI               #bitFieldAssignStmt
-    | pointerAssignmentStatement SEMI                #pointerAssignStmt
-    | pointerDereferenceStatement SEMI               #pointerDerefStmt
-    | stringMoveStatement SEMI                       #stringMoveStmt
-    | moveStatement SEMI                             #moveStmt
-    | scanStatement SEMI                             #scanStmt
-    | rscanStatement SEMI                            #rscanStmt
-    | callStatement SEMI                             #callStmt
+    | bitFieldAssignmentStatement SEMI?               #bitFieldAssignStmt
+    | pointerAssignmentStatement SEMI?               #pointerAssignStmt
+    | pointerDereferenceStatement SEMI?               #pointerDerefStmt
+    | stringMoveStatement SEMI?                       #stringMoveStmt
+    | moveStatement SEMI?                             #moveStmt
+    | scanStatement SEMI?                             #scanStmt
+    | rscanStatement SEMI?                            #rscanStmt
+    | callStatement SEMI?                             #callStmt
     | ifStatement                                    #ifStmt
     | caseStatement                                  #caseStmt
     | whileStatement                                 #whileStmt
-    | doUntilStatement SEMI                          #doUntilStmt
+    | doUntilStatement SEMI?                          #doUntilStmt
     | forStatement                                   #forStmt
-    | gotoStatement SEMI                             #gotoStmt
+    | gotoStatement SEMI?                             #gotoStmt
     | returnStatement                                #returnStmt
-    | assertStatement SEMI                           #assertStmt
-    | useStatement SEMI                              #useStmt
-    | dropStatement SEMI                             #dropStmt
-    | stackStatement SEMI                            #stackStmt
-    | storeStatement SEMI                            #storeStmt
-    | codeStatement SEMI                             #codeStmt
+    | assertStatement SEMI?                           #assertStmt
+    | useStatement SEMI?                              #useStmt
+    | dropStatement SEMI?                             #dropStmt
+    | stackStatement SEMI?                            #stackStmt
+    | storeStatement SEMI?                            #storeStmt
+    | codeStatement SEMI?                             #codeStmt
     | labeledStatement                               #labeledStmt
-    | expressionStatement SEMI                       #exprStmt
+    | expressionStatement SEMI?                       #exprStmt
     | blockStatement                                 #nestedBlockStmt
     | SEMI                                           #emptyStmt
     | block                                          #blockStmt
     | varSection                                     #localVarSection
     | constSection                                   #localConstSection
     | typeSection                                    #localTypeSection
-    | fileOperationStatement SEMI                    #fileOpStmt
-    | trapHandlingStatement SEMI                     #trapStmt
-    | processControlStatement SEMI                   #processStmt
-    | guardianFileStatement SEMI                     #guardianFileStmt
-    | enscribeFileStatement SEMI                     #enscribeFileStmt
+    | fileOperationStatement SEMI?                    #fileOpStmt
+    | trapHandlingStatement SEMI?                     #trapStmt
+    | processControlStatement SEMI?                   #processStmt
+    | guardianFileStatement SEMI?                     #guardianFileStmt
+    | enscribeFileStatement SEMI?                     #enscribeFileStmt
     | talSqlStatement                                #talSqlStmt
     ;
 
@@ -781,12 +814,15 @@ enscribeKeyStatement
     : KEYPOSITION fileExpr TO expression (NOWAIT)?
     ;
 
-// Enhanced assignment statements for TAL with string moves
+// Enhanced assignment statements for TAL with string moves and pointer operations
 assignmentStatement
     : variableExpr ASSIGN expression                 #simpleAssign
     | variableExpr STRINGMOVE expression             #stringAssign
     | variableExpr LBRACK expression RBRACK STRINGMOVE expression #arrayStringAssign
     | variableExpr QUOTED_STRINGMOVE expression      #quotedStringAssign
+    | variableExpr STRINGMOVE expression FOR expression IDENTIFIER #stringMoveWithLength  // Add this
+    | variableExpr ASSIGN ADDRESS variableExpr (TAL_SHIFT_LEFT expression)? #pointerAssign
+    | variableExpr ASSIGN expression TAL_SHIFT_LEFT expression #shiftAssign
     ;
 
 expressionStatement
@@ -837,9 +873,14 @@ moveStatement
     | MOVE LPAREN variableExpr COMMA variableExpr COMMA expression RPAREN
     ;
 
+bitField
+    : BITFIELD_OPEN expression (COLON expression)? GT
+    | LT expression (COLON expression)? GT  // Direct <n:m> syntax
+    ;
+
 // Enhanced bit deposit statements
 bitDepositStatement
-    : BITDEPOSIT expression TO variableExpr BITFIELD_OPEN bitPosition (COLON bitPosition)? GT SEMI
+    : BITDEPOSIT expression TO variableExpr BITFIELD_OPEN bitPosition (COLON bitPosition)? GT SEMI?
     ;
 
 // Enhanced scan statements with proper comparison operators and arrow syntax
@@ -1031,12 +1072,12 @@ localDeclarationStatement
 
 // Enhanced control flow statements with inline comment support and error recovery
 ifStatement
-    : IF expression THEN statementSequence (ELSE statementSequence)? ENDIF SEMI
+    : IF expression THEN statementSequence (ELSE statementSequence)? ENDIF SEMI?
     | IF expression THEN statement (ELSE statement)?  // Single statement form
     ;
 
 caseStatement
-    : CASE expression OF BEGIN caseArm* otherwiseArm? END SEMI
+    : CASE expression OF BEGIN caseArm* otherwiseArm? END SEMI?
     ;
 
 otherwiseArm: OTHERWISE COLON statement;
@@ -1104,7 +1145,13 @@ systemProcedureCall
 procedureNameCall: IDENTIFIER;
 
 callParameters: callParameter (COMMA callParameter)*;
-callParameter: expression | IDENTIFIER | MUL;
+callParameter: 
+    expression 
+    | IDENTIFIER 
+    | MUL
+    | TAL_INLINE_COMMENT expression TAL_INLINE_COMMENT  // Embedded comments
+    ;
+
 argList: expression (COMMA expression)*;
 
 // Other Statements
@@ -1112,7 +1159,7 @@ gotoStatement: GOTO IDENTIFIER;
 
 // Enhanced return statements with bit field support
 returnStatement
-    : RETURN (expression (COMMA expression)?)? SEMI
+    : RETURN (expression (COMMA expression)?)? SEMI?
     ;
 
 // Enhanced assert statements with levels
@@ -1133,27 +1180,37 @@ machineOperand: (INT_LITERAL | INTEGER_VALUE | TAL_LIT_BINARY | TAL_LIT_OCTAL | 
 labeledStatement: IDENTIFIER COLON statement;
 
 // ----------------------
-// Enhanced Compiler Directives
+// Enhanced Compiler Directives - Now with better error recovery and flexible parsing
 // ----------------------
 directiveLine
     : QUESTION_MARK sourceDirective SEMI?
-    | QUESTION_MARK listingDirective SEMI
-    | QUESTION_MARK pageDirective SEMI
-    | QUESTION_MARK sectionDirective SEMI
+    | QUESTION_MARK listingDirective SEMI?
+    | QUESTION_MARK pageDirective SEMI?
+    | QUESTION_MARK sectionDirective SEMI?
     | QUESTION_MARK ifDirective
-    | QUESTION_MARK compilerOptionDirective SEMI
+    | QUESTION_MARK compilerOptionDirective SEMI?
     | QUESTION_MARK precompiledHeaderImport
-    | QUESTION_MARK SYMBOLS SEMI
-    | QUESTION_MARK IDENTIFIER SEMI
-    | QUESTION_MARK directiveArgument (COMMA directiveArgument)* (LPAREN directiveArgumentList RPAREN)? SEMI
-    | QUESTION_MARK creDirective SEMI
-    | QUESTION_MARK heapDirective SEMI
-    | QUESTION_MARK envDirective SEMI
-    | QUESTION_MARK searchDirective SEMI
-    | QUESTION_MARK largestackDirective SEMI
-    | QUESTION_MARK toggleDirective SEMI
-    | QUESTION_MARK errorDirective SEMI
-    | QUESTION_MARK warningDirective SEMI
+    | QUESTION_MARK SYMBOLS SEMI?
+    | QUESTION_MARK IDENTIFIER SEMI?
+    | QUESTION_MARK directiveArgument (COMMA directiveArgument)* (LPAREN directiveArgumentList RPAREN)? SEMI?
+    | QUESTION_MARK creDirective SEMI?
+    | QUESTION_MARK heapDirective SEMI?
+    | QUESTION_MARK envDirective SEMI?
+    | QUESTION_MARK searchDirective SEMI?
+    | QUESTION_MARK largestackDirective SEMI?
+    | QUESTION_MARK toggleDirective SEMI?
+    | QUESTION_MARK errorDirective SEMI?
+    | QUESTION_MARK warningDirective SEMI?
+    | QUESTION_MARK globalsSectionMarker SEMI?
+    | QUESTION_MARK ~SEMI* SEMI?  // Generic fallback for unrecognized directives
+    ;
+
+// Add support for GLOBALS section markers like "?page"<><> GLOBALS <><>""
+globalsSectionMarker
+    : PAGE STRING_LITERAL? GLOBALS_MARKER
+    | IDENTIFIER STRING_LITERAL? GLOBALS_MARKER
+    | PAGE GLOBALS_MARKER
+    | IDENTIFIER GLOBALS_MARKER
     ;
 
 errorDirective
@@ -1166,9 +1223,12 @@ warningDirective
     | WARNING IDENTIFIER
     ;
 
+// Enhanced source directive to handle various assignment patterns and parentheses
 sourceDirective
-    : SOURCE ((ASSIGN | COMMA)? STRING_LITERAL | (ASSIGN | COMMA)? IDENTIFIER (LPAREN directiveSourceParams RPAREN)? | INCLUDE STRING_LITERAL)
+    : SOURCE ((ASSIGN | COMMA)? STRING_LITERAL | (ASSIGN | COMMA)? IDENTIFIER (LPAREN directiveSourceParams? RPAREN)? | INCLUDE STRING_LITERAL)
     | SOURCE ASSIGN directiveSourceExpression
+    | SOURCE (SIMPLE_EQ | ASSIGN) directiveSourceExpression LPAREN directiveSourceParams? RPAREN
+    | SOURCE // Allow bare SOURCE directive
     ;
 
 directiveSourceExpression
@@ -1182,6 +1242,9 @@ directiveSourceParams
 directiveSourceParam
     : IDENTIFIER
     | QUESTION_MARK IDENTIFIER
+    | STRING_LITERAL
+    | INT_LITERAL
+    | INTEGER_VALUE
     ;
 
 listingDirective: LIST | NOLIST;
@@ -1195,7 +1258,7 @@ pageDirective:
     | PAGE SIZE INTEGER_VALUE COMMA INTEGER_VALUE  # pageSize
     ;
 sectionDirective: SECTION IDENTIFIER?;
-ifDirective: IF directiveExpression SEMI | IFNOT directiveExpression SEMI | ENDIF SEMI;
+ifDirective: IF directiveExpression SEMI? | IFNOT directiveExpression SEMI? | ENDIF SEMI?;
 directiveExpression: IDENTIFIER (ASSIGN | NEQ) (STRING_LITERAL | INT_LITERAL | INTEGER_VALUE | TAL_LIT_BINARY | TAL_LIT_OCTAL | TAL_LIT_HEX | IDENTIFIER) | IDENTIFIER;
 compilerOptionDirective: COMPACT | CHECK | INSPECT | SYMBOLS | NOLMAP | HIGHPIN | HIGHREQUESTERS | CROSSREF | GMAP | INNERLIST | NOCODE | NOMAP | LMAP;
 
@@ -1206,7 +1269,7 @@ searchDirective: SEARCH LPAREN directiveArgumentList RPAREN;
 largestackDirective: LARGESTACK expression;
 toggleDirective: SETTOG IDENTIFIER | RESETTOG IDENTIFIER | DEFINETOG IDENTIFIER | TOG IDENTIFIER;
 
-precompiledHeaderImport: PCH STRING_LITERAL SEMI;
+precompiledHeaderImport: PCH STRING_LITERAL SEMI?;
 directiveArgument: IDENTIFIER | INT_LITERAL | INTEGER_VALUE | STRING_LITERAL | TAL_LIT_BINARY | TAL_LIT_OCTAL | TAL_LIT_HEX;
 directiveArgumentList: directiveArgument (COMMA directiveArgument)*;
 
@@ -1408,6 +1471,7 @@ timeFunction
 
 functionCall
     : IDENTIFIER LPAREN parameterList? RPAREN
+    | DOLLAR IDENTIFIER LPAREN parameterList? RPAREN  // For $len style
     ;
 
 constantExpr
@@ -1420,13 +1484,32 @@ constantExpr
     | NIL
     | TRUE
     | FALSE
+    | arrayInitializer
+    | stringArrayInitializer
+    ;
+
+stringArrayInitializer
+    : LBRACK (STRING_LITERAL | expression | INTEGER_VALUE) (COMMA (STRING_LITERAL | expression | INTEGER_VALUE))* RBRACK
+    ;
+
+// Add support for TAL array initialization patterns like [6*["0"]] and [" ", 16*[" "]]
+arrayInitializer
+    : LBRACK arrayElement (COMMA arrayElement)* RBRACK
+    ;
+
+arrayElement
+    : expression
+    | INTEGER_VALUE MUL LBRACK arrayElement (COMMA arrayElement)* RBRACK  // Repetition pattern
+    | STRING_LITERAL
     ;
 
 // Enhanced variable expressions with proper bit field handling
 variableExpr
     : IDENTIFIER (arrayRef | memberAccess | bitField | functionArgs)*
+    | IDENTIFIER LT expression (COLON expression)? GT  // allow direct bit field access
     | standardIndirectSymbol IDENTIFIER (arrayRef | memberAccess | bitField | functionArgs)*
     | ADDRESS IDENTIFIER (arrayRef | memberAccess | bitField | functionArgs)*
+    | STRUCT PERIOD IDENTIFIER (arrayRef | memberAccess | bitField | functionArgs)*  // Add STRUCT.field support
     | systemGlobalAccess
     | guardianFileName
     | extendedIndirectAccess
@@ -1440,9 +1523,6 @@ extendedIndirectAccess
 
 arrayRef: LBRACK expression RBRACK;
 memberAccess: PERIOD IDENTIFIER | DOT_EXT IDENTIFIER | DOT_SG IDENTIFIER;
-
-// Fixed bit field handling with proper tokens
-bitField: BITFIELD_OPEN expression (COLON expression)? GT;
 
 functionArgs: LPAREN parameterList? RPAREN;
 
@@ -1471,12 +1551,16 @@ literal
     | NIL
     ;
 
-// REMOVED the problematic error recovery rule entirely
-// error: {notifyErrorListeners("syntax error"); recover(_input, null);} ;
-
 // ----------------------
 // ENHANCED LEXER RULES  
 // ----------------------
+
+// Add support for GLOBALS section markers
+GLOBALS_MARKER       : '<><>' [ \t]* 'GLOBALS' [ \t]* '<><>';
+
+TAL_LIT_BINARY       : '%B' [01]+ | '%b' [01]+ | '%' [01]+;
+TAL_LIT_OCTAL        : '%O' [0-7]+ | '%o' [0-7]+ | '%' [0-7]+;
+TAL_LIT_HEX          : '%H' DIGIT_HEX+ | '%h' DIGIT_HEX+ | '%' DIGIT_HEX+;
 
 // Fixed bit field tokens
 BITFIELD_OPEN        : '.<';
@@ -1497,6 +1581,8 @@ SYSFUNCDOWNSHIFT     : '__TAL_SYS_FUNC_DOWNSHIFT__';
 STRINGASSIGN         : '__TAL_OP_STRING_ASSIGN__';
 
 // Fixed TAL string move operators
+
+
 STRINGMOVE           : '\'' ':=' '\'';
 QUOTED_STRINGMOVE    : '\'\':=\'\'';
 
@@ -1506,12 +1592,13 @@ SGINDIRECT           : '__TAL_OP_SG_INDIRECT__';
 // Arrow operator for scan statements
 ARROW                : '->';
 
+// TAL-specific shift operators in quotes
+TAL_SHIFT_LEFT       : '\'' '<<' '\'';
+TAL_SHIFT_RIGHT      : '\'' '>>' '\'';
+
 MOVEREVASSIGN        : '__TAL_OP_MOVE_REV_ASSIGN_OP__';
 
-// Enhanced TAL numeric literals with type prefixes
-TAL_LIT_BINARY       : '%B' [01]+ | '%' [01]+;
-TAL_LIT_OCTAL        : '%O' [0-7]+ | '%' [0-7]+;
-TAL_LIT_HEX          : '%H' DIGIT_HEX+ | '%' DIGIT_HEX+;
+
 
 // Enhanced Standard Functions - TAL Built-ins
 LEN_FUNC             : '$LEN';
@@ -1863,6 +1950,7 @@ ULONG                : 'ULONG';
 BOOL                 : 'BOOL';
 CHAR                 : 'CHAR';
 BYTE                 : 'BYTE';
+BYTES                : 'BYTES';
 
 // Enhanced language specifiers
 C                    : 'C';
@@ -1925,7 +2013,8 @@ QUESTION_MARK        : '?';  // Fixed from DIRECTIVE
 ADDRESS              : '@';
 
 // Enhanced literals with better precedence
-INTEGER_VALUE        : DIGIT+;
+INTEGER_VALUE        : DIGIT+ 'D'? | DIGIT+;
+
 INT_LITERAL          : ('%' [0-7]+)
                      | ('%' [Xx] DIGIT_HEX+)
                      | ('%' [Bb] DIGIT_BIN+)
@@ -1963,6 +2052,7 @@ C_COMMENT            : '/*' .*? '*/' -> skip;
 
 // Whitespace
 WS                   : [ \t\r\n\f]+ -> skip;
+NEWLINE              : [\r\n]+ -> skip;
 
 // Enhanced error handling - must be last
 UNEXPECTED_CHAR      : . ;
