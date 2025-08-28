@@ -14,7 +14,8 @@ class SemanticContext {
         BLOCK,
         STRUCTURE,
         CONDITIONAL,
-        LOOP
+        LOOP,
+        STRUCT
     }
 
     private String name;
@@ -565,6 +566,7 @@ class BusinessRule {
     private String description;
     private String businessLogic;
     private String purpose;
+    private String sourceCode;
     private String modernEquivalent;
     private List<String> conditions = new ArrayList<>();
     private List<String> actions = new ArrayList<>();
@@ -600,7 +602,9 @@ class BusinessRule {
     public String getPriority() { return priority; }
     public void setPriority(String priority) { this.priority = priority; }
     
-    @Override
+    public void setSourceCode(String sourceCode) {
+        this.sourceCode = sourceCode;
+    }
     public String toString() {
         return String.format("BusinessRule{%s: %s (%s)}", 
             ruleType, description, purpose);
