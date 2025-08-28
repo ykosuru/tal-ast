@@ -3,6 +3,7 @@ import org.antlr.v4.runtime.tree.*;
 import org.antlr.v4.runtime.misc.Interval;
 import java.util.*;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 
 /**
@@ -45,9 +46,23 @@ public class TALSemanticAnalyzer extends TALBaseVisitor<Void> {
     
     private String getFullText(ParserRuleContext ctx) {
         if (tokenStream == null) return ctx.getText();
+        
         int startIndex = ctx.start.getTokenIndex();
         int stopIndex = ctx.stop.getTokenIndex();
-        return tokenStream.getText(new Interval(startIndex, stopIndex));
+        
+        // Use the token stream to preserve original spacing
+        StringBuilder result = new StringBuilder();
+        for (int i = startIndex; i <= stopIndex; i++) {
+            Token token = tokenStream.get(i);
+            if (token.getChannel() != Token.HIDDEN_CHANNEL) {
+                if (result.length() > 0) {
+                    result.append(" ");
+                }
+                result.append(token.getText());
+            }
+        }
+        
+        return result.toString();
     }
     
     // =====================================================================
@@ -350,7 +365,255 @@ public class TALSemanticAnalyzer extends TALBaseVisitor<Void> {
         
         return null;
     }
+
+    @Override
+    public Void visitBlockDeclaration(TALParser.BlockDeclarationContext ctx) {
+        System.out.println("Semantic: Processing block declaration");
+        
+        // Extract block name
+        String blockName = "UNNAMED_BLOCK";
+        if (ctx.blockName() != null && ctx.blockName().IDENTIFIER() != null) {
+            blockName = ctx.blockName().IDENTIFIER().getText();
+        }
+        
+        // Push block context
+        SemanticContext blockContext = new SemanticContext(blockName, SemanticContext.Type.BLOCK);
+        pushContext(blockContext);
+        
+        // Process all global declaration items within the block
+        if (ctx.globalDeclarationItem() != null) {
+            System.out.println("Semantic: Found " + ctx.globalDeclarationItem().size() + " global declarations in block");
+            for (TALParser.GlobalDeclarationItemContext item : ctx.globalDeclarationItem()) {
+                visit(item);
+            }
+        }
+        
+        popContext();
+        return null;
+    }
+
+    @Override
+    public Void visitGlobalDeclarationItem(TALParser.GlobalDeclarationItemContext ctx) {
+        System.out.println("Semantic: Processing global declaration item");
+        
+        // Visit all the different types of global declarations
+        return super.visitGlobalDeclarationItem(ctx);
+    }
+
+    @Override
+    public Void visitSimpleVariableDeclaration(TALParser.SimpleVariableDeclarationContext ctx) {
+        try {
+            String content = getFullText(ctx);
+            int lineNumber = getLineNumber(ctx);
+            
+            System.out.println("Semantic: Simple variable declaration at line " + lineNumber + ": '" + content + "'");
+            
+            // Try multi-variable parsing first
+            List<TALDataItem> multiItems = parseMultipleVariablesFromContent(content, lineNumber);
+            if (!multiItems.isEmpty()) {
+                for (TALDataItem item : multiItems) {
+                    item.setSection(getCurrentContext() != null ? getCurrentContext().getName() : "GLOBAL");
+                    result.getDataItems().add(item);
+                    System.out.println("Semantic: Added multi-var item: " + item.getName());
+                }
+                return super.visitSimpleVariableDeclaration(ctx);
+            }
+            
+            // Try single variable parsing
+            TALDataItem dataItem = parseDataFromContent(content, lineNumber);
+            if (dataItem != null) {
+                SemanticContext currentContext = getCurrentContext();
+                if (currentContext != null && "STRUCT".equals(currentContext.getType())) {
+                    dataItem.setSection(currentContext.getName() + "_FIELD");
+                    dataItem.setName(currentContext.getName() + "." + dataItem.getName());
+                } else {
+                    dataItem.setSection(currentContext != null ? currentContext.getName() : "GLOBAL");
+                }
+                
+                result.getDataItems().add(dataItem);
+                System.out.println("Semantic: Successfully added data item: " + dataItem.getName());
+            } else {
+                System.out.println("Semantic: Failed to parse data from: '" + content + "'");
+            }
+        } catch (Exception e) {
+            System.out.println("Semantic: Exception in simple variable declaration: " + e.getMessage());
+            result.getParseWarnings().add("Error in simple variable declaration: " + e.getMessage());
+        }
+        
+        return super.visitSimpleVariableDeclaration(ctx);
+    }
     
+    @Override
+    public Void visitStructureDeclaration(TALParser.StructureDeclarationContext ctx) {
+        try {
+            System.out.println("Semantic: Structure declaration");
+            String content = getFullText(ctx);
+            int lineNumber = getLineNumber(ctx);
+            
+            // Extract struct name
+            String structName = null;
+            if (ctx.IDENTIFIER() != null) {
+                structName = ctx.IDENTIFIER().getText();
+            }
+            
+            if (structName != null) {
+                TALDataItem structItem = new TALDataItem();
+                structItem.setName(structName);
+                structItem.setDataType("STRUCT");
+                structItem.setLineNumber(lineNumber);
+                structItem.setDefinition(content);
+                structItem.setSection(getCurrentContext() != null ? getCurrentContext().getName() : "GLOBAL");
+                result.getDataItems().add(structItem);
+                
+                System.out.println("Semantic: Added struct: " + structName);
+            }
+            
+            // Process struct body if present
+            if (ctx.structureBody() != null) {
+                visit(ctx.structureBody());
+            }
+            
+        } catch (Exception e) {
+            result.getParseWarnings().add("Error in structure declaration: " + e.getMessage());
+        }
+        
+        return null;
+    }
+
+    @Override
+    public Void visitStructureItem(TALParser.StructureItemContext ctx) {
+        System.out.println("Semantic: Processing structure item");
+        
+        // Check if this is a field declaration within a struct
+        if (ctx.fieldDeclaration() != null) {
+            return visitFieldDeclaration(ctx.fieldDeclaration());
+        }
+        
+        // Handle other structure item types
+        return super.visitStructureItem(ctx);
+    }
+
+    @Override
+    public Void visitStructureBody(TALParser.StructureBodyContext ctx) {
+        System.out.println("Semantic: Entering struct body");
+        
+        // Use the correct Type enum value - check your SemanticContext.Type enum
+        SemanticContext structContext = new SemanticContext("STRUCT_BODY", SemanticContext.Type.STRUCT);
+        pushContext(structContext);
+        
+        // Process all items in struct body
+        if (ctx.structureItem() != null) {
+            for (TALParser.StructureItemContext item : ctx.structureItem()) {
+                visit(item);
+            }
+        }
+        
+        popContext();
+        return null;
+    }
+
+    @Override
+    public Void visitFieldDeclaration(TALParser.FieldDeclarationContext ctx) {
+        try {
+            System.out.println("Semantic: Field declaration");
+            String content = getFullText(ctx);
+            int lineNumber = getLineNumber(ctx);
+            
+            // Extract field information
+            if (ctx.typeSpecification() != null && ctx.IDENTIFIER() != null) {
+                String fieldType = ctx.typeSpecification().getText();
+                
+                for (int i = 0; i < ctx.IDENTIFIER().size(); i++) {
+                    String fieldName = ctx.IDENTIFIER(i).getText();
+                    
+                    TALDataItem fieldItem = new TALDataItem();
+                    fieldItem.setName(fieldName);
+                    fieldItem.setDataType(fieldType.toUpperCase());
+                    fieldItem.setLineNumber(lineNumber);
+                    fieldItem.setDefinition(content);
+                    fieldItem.setSection(getCurrentContext() != null ? getCurrentContext().getName() + "_FIELD" : "STRUCT_FIELD");
+                    
+                    result.getDataItems().add(fieldItem);
+                    System.out.println("Semantic: Added struct field: " + fieldName + " (" + fieldType + ")");
+                }
+            }
+            
+        } catch (Exception e) {
+            result.getParseWarnings().add("Error in field declaration: " + e.getMessage());
+        }
+        
+        return null;
+    }
+
+    @Override
+    public Void visitArrayDeclaration(TALParser.ArrayDeclarationContext ctx) {
+        try {
+            System.out.println("Semantic: Array declaration");
+            String content = getFullText(ctx);
+            int lineNumber = getLineNumber(ctx);
+            
+            // Extract array information directly from grammar nodes
+            if (ctx.typeSpecification() != null && ctx.IDENTIFIER() != null) {
+                String arrayType = ctx.typeSpecification().getText();
+                
+                for (int i = 0; i < ctx.IDENTIFIER().size(); i++) {
+                    String arrayName = ctx.IDENTIFIER(i).getText();
+                    
+                    TALDataItem dataItem = new TALDataItem();
+                    dataItem.setName(arrayName);
+                    dataItem.setDataType(arrayType.toUpperCase());
+                    dataItem.setLineNumber(lineNumber);
+                    dataItem.setDefinition(content);
+                    dataItem.setSection(getCurrentContext() != null ? getCurrentContext().getName() : "GLOBAL");
+                    
+                    result.getDataItems().add(dataItem);
+                    System.out.println("Semantic: Added array: " + arrayName + " (" + arrayType + ")");
+                }
+            }
+            
+        } catch (Exception e) {
+            result.getParseWarnings().add("Error in array declaration: " + e.getMessage());
+        }
+        
+        return super.visitArrayDeclaration(ctx);
+    }
+
+    @Override
+    public Void visitLiteralDeclaration(TALParser.LiteralDeclarationContext ctx) {
+        try {
+            System.out.println("Semantic: Literal declaration");
+            String content = getFullText(ctx);
+            int lineNumber = getLineNumber(ctx);
+            
+            // Handle comma-separated literals
+            if (ctx.IDENTIFIER() != null && ctx.IDENTIFIER().size() > 1) {
+                for (int i = 0; i < ctx.IDENTIFIER().size(); i++) {
+                    TALDataItem dataItem = new TALDataItem();
+                    dataItem.setName(ctx.IDENTIFIER(i).getText());
+                    dataItem.setDataType("LITERAL");
+                    dataItem.setLineNumber(lineNumber);
+                    dataItem.setDefinition(content);
+                    dataItem.setSection(getCurrentContext() != null ? getCurrentContext().getName() : "GLOBAL");
+                    result.getDataItems().add(dataItem);
+                    System.out.println("Semantic: Added literal: " + dataItem.getName());
+                }
+            } else if (ctx.IDENTIFIER() != null && ctx.IDENTIFIER().size() == 1) {
+                TALDataItem dataItem = new TALDataItem();
+                dataItem.setName(ctx.IDENTIFIER(0).getText());
+                dataItem.setDataType("LITERAL");
+                dataItem.setLineNumber(lineNumber);
+                dataItem.setDefinition(content);
+                dataItem.setSection(getCurrentContext() != null ? getCurrentContext().getName() : "GLOBAL");
+                result.getDataItems().add(dataItem);
+                System.out.println("Semantic: Added literal: " + dataItem.getName());
+            }
+        } catch (Exception e) {
+            result.getParseWarnings().add("Error in literal declaration: " + e.getMessage());
+        }
+        
+        return super.visitLiteralDeclaration(ctx);
+    }
+
     // =====================================================================
     // STATEMENT PROCESSING - ENHANCED
     // =====================================================================
@@ -427,6 +690,60 @@ public class TALSemanticAnalyzer extends TALBaseVisitor<Void> {
         
         result.getSystemStatements().add(stmt);
         incrementStatementCount("ASSIGNMENT");
+        
+        // Handle TAL shift operations
+        if (content.contains("'<<'") || content.contains("'>>'")) {
+            BitFieldOperation shiftOp = new BitFieldOperation();
+            shiftOp.setLineNumber(lineNumber);
+            shiftOp.setRawContent(content);
+            shiftOp.setOperation("TAL_SHIFT");
+            
+            // Extract variable information
+            Pattern shiftPattern = Pattern.compile("([A-Za-z_][A-Za-z0-9_^]*(?:\\[\\d+\\])?(?:\\.[A-Za-z_][A-Za-z0-9_^]*)*?)\\s*:=\\s*(@?[A-Za-z_][A-Za-z0-9_^]*(?:\\[\\d+\\])?)\\s*'(<<|>>)'\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
+            Matcher matcher = shiftPattern.matcher(content);
+            
+            if (matcher.find()) {
+                shiftOp.setTargetVariable(matcher.group(1));
+                shiftOp.setSourceValue(matcher.group(2));
+                String shiftDir = matcher.group(3);
+                int shiftAmount = Integer.parseInt(matcher.group(4));
+                
+                shiftOp.setStartBit(shiftAmount);
+                shiftOp.setBitWidth(shiftAmount);
+                shiftOp.setBusinessPurpose("TAL " + shiftDir + " shift operation for " + 
+                    (shiftDir.equals("<<") ? "memory addressing/scaling" : "bit extraction"));
+                shiftOp.setModernEquivalent(shiftDir.equals("<<") ? 
+                    shiftOp.getSourceValue() + " << " + shiftAmount : 
+                    shiftOp.getSourceValue() + " >> " + shiftAmount);
+            } else {
+                shiftOp.setBusinessPurpose("TAL-specific shift operation for memory addressing");
+                shiftOp.setModernEquivalent("Bit shift operation");
+            }
+            
+            result.getBitFieldOperations().add(shiftOp);
+            System.out.println("Semantic: TAL shift operation detected");
+        }
+        
+        // Handle pointer assignments with @ symbol
+        if (content.contains("@")) {
+            PointerOperation ptrOp = new PointerOperation();
+            ptrOp.setLineNumber(lineNumber);
+            ptrOp.setRawContent(content);
+            ptrOp.setOperation("ADDRESS_ASSIGNMENT");
+            
+            Pattern ptrPattern = Pattern.compile("([A-Za-z_][A-Za-z0-9_^]*(?:\\.[A-Za-z_][A-Za-z0-9_^]*)*?)\\s*:=\\s*(@[A-Za-z_][A-Za-z0-9_^]*(?:\\[[^\\]]*\\])?)", Pattern.CASE_INSENSITIVE);
+            Matcher ptrMatcher = ptrPattern.matcher(content);
+            
+            if (ptrMatcher.find()) {
+                ptrOp.setTargetVariable(ptrMatcher.group(1));
+                ptrOp.setSourceVariable(ptrMatcher.group(2));
+                ptrOp.setAccessType("ADDRESS_OF");
+                ptrOp.setBusinessPurpose("Address assignment for " + ptrOp.getTargetVariable());
+            }
+            
+            result.getPointerOperations().add(ptrOp);
+            System.out.println("Semantic: Pointer assignment detected");
+        }
         
         // Extract variable references
         extractVariableReferences(content);
@@ -976,6 +1293,44 @@ public class TALSemanticAnalyzer extends TALBaseVisitor<Void> {
     // HELPER METHODS - ENHANCED
     // =====================================================================
     
+    private List<TALDataItem> parseMultipleVariablesFromContent(String content, int lineNumber) {
+        List<TALDataItem> items = new ArrayList<>();
+        
+        // Handle lines like: "rec^file := -1, .rec^buf[0:rec^len/2], any^file,"
+        if (content.contains(",") && (content.contains("int") || content.contains("string"))) {
+            String[] parts = content.split(",");
+            String baseType = "INT"; // Default assumption
+            
+            // Extract base type from first part
+            Pattern typePattern = Pattern.compile("\\b(int|string|real|fixed|byte|char)\\b", Pattern.CASE_INSENSITIVE);
+            Matcher typeMatcher = typePattern.matcher(parts[0]);
+            if (typeMatcher.find()) {
+                baseType = typeMatcher.group(1).toUpperCase();
+            }
+            
+            for (String part : parts) {
+                part = part.trim();
+                // Extract variable name from each part
+                Pattern varPattern = Pattern.compile("([A-Za-z_][A-Za-z0-9_^.]*)", Pattern.CASE_INSENSITIVE);
+                Matcher varMatcher = varPattern.matcher(part);
+                
+                if (varMatcher.find()) {
+                    String varName = varMatcher.group(1);
+                    if (!isKeyword(varName) && !varName.equals("rec") && !varName.equals("len")) {
+                        TALDataItem dataItem = new TALDataItem();
+                        dataItem.setName(varName);
+                        dataItem.setDataType(baseType);
+                        dataItem.setLineNumber(lineNumber);
+                        dataItem.setDefinition(part);
+                        items.add(dataItem);
+                    }
+                }
+            }
+        }
+        
+        return items;
+    }
+    
     private void processLocalVariableDeclaration(TALParser.SimpleVariableDeclarationContext ctx, int lineNumber) {
         String content = getFullText(ctx);
         TALDataItem dataItem = parseDataFromContent(content, lineNumber);
@@ -1005,19 +1360,188 @@ public class TALSemanticAnalyzer extends TALBaseVisitor<Void> {
     }
     
     private TALDataItem parseDataFromContent(String content, int lineNumber) {
-        Pattern pattern = Pattern.compile("\\b(INT|STRING|REAL|FIXED|BYTE|CHAR|TIMESTAMP|STRUCT|UNSIGNED|EXTADDR|SGADDR)\\s+([A-Za-z_][A-Za-z0-9_]*)", Pattern.CASE_INSENSITIVE);
-        Matcher matcher = pattern.matcher(content);
+        // Clean up the content first
+        content = content.trim().replaceAll("\\s+", " ");
         
-        if (matcher.find()) {
+        // Skip non-declaration content
+        if (content.startsWith("begin") || content.startsWith("end") || 
+            content.startsWith("not") || content.matches("^v\\d+.*")) {
+            return null;
+        }
+        
+        // PRIMARY PATTERN: Standard TAL type declarations
+        // Examples: "int third^party^cutoff^time := 18 * 60 ;"
+        //          "literal st^check^queue = 1;"
+        //          "struct fr^def(*)"
+        //          "string .ref^buf[0:420];"
+        Pattern primaryPattern = Pattern.compile(
+            "\\b(INT|STRING|REAL|FIXED|BYTE|CHAR|TIMESTAMP|STRUCT|UNSIGNED|EXTADDR|SGADDR|BOOLEAN|LITERAL|DEFINE)(?:\\([^)]*\\))?\\s+" +
+            "(?:[.@]\\s*)?" +                                    // Optional prefix (. or @)
+            "([A-Za-z_][A-Za-z0-9_^]*(?:\\.[A-Za-z_][A-Za-z0-9_^]*)?)" +  // Variable name with ^ and .
+            "(?:\\s*\\[[^\\]]*\\])?" +                           // Optional array specification
+            "(?:\\s*\\([^)]*\\))?" +                             // Optional function parameters
+            "(?:\\s*:=.*?)?(?:\\s*[,;].*?)?",                    // Optional assignment and trailing content
+            Pattern.CASE_INSENSITIVE
+        );
+        
+        Matcher primaryMatcher = primaryPattern.matcher(content);
+        
+        if (primaryMatcher.find()) {
             TALDataItem dataItem = new TALDataItem();
-            dataItem.setDataType(matcher.group(1));
-            dataItem.setName(matcher.group(2));
+            dataItem.setDataType(primaryMatcher.group(1).toUpperCase());
+            dataItem.setName(primaryMatcher.group(2));
             dataItem.setLineNumber(lineNumber);
             dataItem.setDefinition(content);
+            
+            System.out.println("Semantic: Successfully parsed (primary): " + dataItem.getName() + " (" + dataItem.getDataType() + ")");
             return dataItem;
         }
         
+        // STRUCT FIELD PATTERN: Fields inside struct begin...end blocks
+        // Examples: "string id;"
+        //          "string byte [0:34];"
+        //          "int len ;"
+        Pattern structFieldPattern = Pattern.compile(
+            "\\b(string|int|char|byte|real|fixed)\\s+" +
+            "([A-Za-z_][A-Za-z0-9_^]*)" +
+            "(?:\\s*\\[[^\\]]*\\])?",
+            Pattern.CASE_INSENSITIVE
+        );
+        
+        Matcher structFieldMatcher = structFieldPattern.matcher(content);
+        
+        if (structFieldMatcher.find()) {
+            TALDataItem dataItem = new TALDataItem();
+            dataItem.setDataType(structFieldMatcher.group(1).toUpperCase());
+            dataItem.setName(structFieldMatcher.group(2));
+            dataItem.setLineNumber(lineNumber);
+            dataItem.setDefinition(content);
+            
+            System.out.println("Semantic: Successfully parsed (struct field): " + dataItem.getName() + " (" + dataItem.getDataType() + ")");
+            return dataItem;
+        }
+        
+        // ARRAY PATTERN: Array declarations with dot prefix
+        // Examples: "string .scan^buf[0:1500];"
+        //          "string .dbt^ac[0:31],"
+        //          "int .rec^buf[0:rec^len/2],"
+        Pattern arrayPattern = Pattern.compile(
+            "\\b(string|int|char|byte)\\s+" +
+            "\\.(\\w+(?:\\^\\w+)*)" +
+            "\\s*\\[[^\\]]+\\]",
+            Pattern.CASE_INSENSITIVE
+        );
+        
+        Matcher arrayMatcher = arrayPattern.matcher(content);
+        
+        if (arrayMatcher.find()) {
+            TALDataItem dataItem = new TALDataItem();
+            dataItem.setDataType(arrayMatcher.group(1).toUpperCase());
+            dataItem.setName(arrayMatcher.group(2));
+            dataItem.setLineNumber(lineNumber);
+            dataItem.setDefinition(content);
+            
+            System.out.println("Semantic: Successfully parsed (array): " + dataItem.getName() + " (" + dataItem.getDataType() + ")");
+            return dataItem;
+        }
+        
+        // TYPED PATTERN: Type declarations with size specifiers
+        // Examples: "int(32) any^tag;"
+        //          "string(255) buffer_name"
+        //          "real(64) precision_var"
+        Pattern typedPattern = Pattern.compile(
+            "\\b(int|string|real)\\s*\\(\\d+\\)\\s+" +
+            "([A-Za-z_][A-Za-z0-9_^]*)",
+            Pattern.CASE_INSENSITIVE
+        );
+        
+        Matcher typedMatcher = typedPattern.matcher(content);
+        
+        if (typedMatcher.find()) {
+            TALDataItem dataItem = new TALDataItem();
+            dataItem.setDataType(typedMatcher.group(1).toUpperCase());
+            dataItem.setName(typedMatcher.group(2));
+            dataItem.setLineNumber(lineNumber);
+            dataItem.setDefinition(content);
+            
+            System.out.println("Semantic: Successfully parsed (typed): " + dataItem.getName() + " (" + dataItem.getDataType() + ")");
+            return dataItem;
+        }
+        
+        // DEFINE PATTERN: DEFINE statement declarations  
+        // Examples: "define PNB^FED^clearing^acct^name = \"FRB PHIL\" #"
+        //          "define drawdown = fmtrec.kt1510.subtype^code = \"31\" #"
+        if (content.toUpperCase().startsWith("DEFINE ")) {
+            Pattern definePattern = Pattern.compile("DEFINE\\s+([A-Za-z_][A-Za-z0-9_^]*)", Pattern.CASE_INSENSITIVE);
+            Matcher defineMatcher = definePattern.matcher(content);
+            if (defineMatcher.find()) {
+                TALDataItem dataItem = new TALDataItem();
+                dataItem.setDataType("DEFINE");
+                dataItem.setName(defineMatcher.group(1));
+                dataItem.setLineNumber(lineNumber);
+                dataItem.setDefinition(content);
+                
+                System.out.println("Semantic: Successfully parsed DEFINE: " + dataItem.getName());
+                return dataItem;
+            }
+        }
+        
+        // MULTI-VARIABLE PATTERN: Multiple variables on single line
+        // Examples: "rec^file := -1, .rec^buf[0:rec^len/2], any^file,"
+        //          "chips^uid^found, iban^txt^data, seqb^err,"
+        Pattern multiVarPattern = Pattern.compile(
+            "([A-Za-z_][A-Za-z0-9_^.]*)" +
+            "(?:\\s*\\[[^\\]]*\\])?" +
+            "(?:\\s*:=\\s*[^,;]+)?" +
+            "\\s*[,;]",
+            Pattern.CASE_INSENSITIVE
+        );
+        
+        Matcher multiVarMatcher = multiVarPattern.matcher(content);
+        
+        if (multiVarMatcher.find() && !isKeyword(multiVarMatcher.group(1))) {
+            TALDataItem dataItem = new TALDataItem();
+            dataItem.setDataType("INT"); // Default assumption for multi-var declarations
+            dataItem.setName(multiVarMatcher.group(1));
+            dataItem.setLineNumber(lineNumber);
+            dataItem.setDefinition(content);
+            
+            System.out.println("Semantic: Successfully parsed (multi-var): " + dataItem.getName());
+            return dataItem;
+        }
+        
+        // FALLBACK PATTERN: Any remaining variable-like declarations
+        // Examples: "parsed^4000;" "test^commlog^date := 1"
+        //          "fedben^remitter;" "stp^in^use,"
+        Pattern fallbackPattern = Pattern.compile(
+            "\\b([A-Za-z_][A-Za-z0-9_^]*)\\s*(?:,|;|:=|$)",
+            Pattern.CASE_INSENSITIVE
+        );
+        
+        Matcher fallbackMatcher = fallbackPattern.matcher(content);
+        
+        if (fallbackMatcher.find() && !isKeyword(fallbackMatcher.group(1))) {
+            TALDataItem dataItem = new TALDataItem();
+            dataItem.setDataType("UNKNOWN");
+            dataItem.setName(fallbackMatcher.group(1));
+            dataItem.setLineNumber(lineNumber);
+            dataItem.setDefinition(content);
+            
+            System.out.println("Semantic: Successfully parsed (fallback): " + dataItem.getName());
+            return dataItem;
+        }
+        
+        System.out.println("Semantic: Could not parse: '" + content + "'");
         return null;
+    }
+    
+    private boolean isKeyword(String identifier) {
+        Set<String> keywords = Set.of(
+            "BEGIN", "END", "NOT", "TRUE", "FALSE", "NULL", "NIL", 
+            "BLOCK", "MY_GLOBALS", "STRUCT", "INT", "STRING", "REAL",
+            "LITERAL", "DEFINE", "FIXED", "BYTE", "CHAR", "REC", "LEN"
+        );
+        return keywords.contains(identifier.toUpperCase());
     }
     
     private int parseBitPosition(String position) {
@@ -1108,5 +1632,6 @@ public class TALSemanticAnalyzer extends TALBaseVisitor<Void> {
         }
         return text;
     }
+
 }
 
