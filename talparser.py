@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-Enhanced TAL (Transaction Application Language) parser with comprehensive improvements.
-
 This parser converts TAL source code into Abstract Syntax Trees (ASTs) with support for:
 - Enhanced error reporting with context and source location tracking
 - Symbol table management with scoped symbol resolution  
@@ -9,15 +7,6 @@ This parser converts TAL source code into Abstract Syntax Trees (ASTs) with supp
 - Multiple output formats (S-expressions, JSON, DOT graphs)
 - Performance optimizations with packrat parsing
 - Robust error recovery mechanisms
-
-TAL Language Overview:
-TAL is a systems programming language used primarily on HP NonStop systems.
-Key constructs include:
-- Data types: INT, STRING, REAL, FIXED, BYTE, CHAR
-- Structured data with STRUCT definitions
-- Procedures with parameters and return values
-- Control flow: IF/THEN, WHILE/DO, CASE/OF, SCAN
-- Memory management with pointers and arrays
 
 FIXES APPLIED:
 1. Missing procedure definitions - procedures now properly closed and added to AST
@@ -2155,13 +2144,13 @@ class EnhancedTALParser:
             
             # Only track delimiters outside of quotes
             if not in_quotes:
-                if char in '([':
+                if char == '(':
                     paren_level += 1
-                elif char in ')]':
+                if char == ')':
                     paren_level -= 1
-                elif char == '[':
+                if char == '[':
                     bracket_level += 1
-                elif char == ']':
+                if char == ']':
                     bracket_level -= 1
                 
                 # Split only when all delimiters are balanced
@@ -2464,7 +2453,7 @@ def main():
         epilog="""
 Output formats:
   sexp    : S-expression format (default) - Human-readable tree structure
-  json    : JSON format - Machine-readable structured data  
+  json    : JSON format - JSON format - Machine-readable structured data  
   dot     : Graphviz DOT format - Graph visualization
   pretty  : Pretty-printed TAL - Formatted source code
   
