@@ -1,0 +1,169 @@
+Wire Transfer Business Capabilities Taxonomy
+This taxonomy organizes business capabilities for wire transfer and payment processing, including ISO 20022-specific capabilities from the Federal Reserve’s Fedwire Funds Service and FedNow Service, CHIPS ISO 20022, and SWIFT ISO 20022. It supports use cases like code generation, requirements extraction, and process analysis. New capabilities from FedISO 20022 are marked with [FedISO], from CHIPS ISO with [CHIPS ISO], and from SWIFT ISO with [SWIFT ISO].
+1. Payment Initiation and Execution
+Capabilities related to starting, prioritizing, and completing payment transactions.
+1.1. Initiation
+
+Payment Initiation: Starting a wire transfer or payment instruction.
+Method of Payment: Specifying payment methods (e.g., wire, ACH).
+Payment Tier Assignment: Assigning priority tiers to payments.
+Payment Prioritization: Determining processing order based on urgency or rules.
+Customer Credit Transfer Initiation: Initiating credit transfers using pain.001 messages [FedISO] [SWIFT ISO].
+Request for Payment: Sending payment requests via pain.013 messages [FedISO] [SWIFT ISO].
+Customer Payment Initiation: Using pain.001 for customer-initiated payments, with structured data for originator details [SWIFT ISO] [CHIPS ISO].
+
+1.2. Routing
+
+Payment Routing: Determining the path for payment transfer (e.g., via SWIFT, Fedwire, CHIPS).
+Message Routing: Directing payment messages to appropriate systems or networks.
+Intermediary Banks: Managing banks facilitating transfers between originator and beneficiary.
+Correspondent Banks: Handling relationships with banks for cross-border payments.
+Financial Institution Credit Transfer: Routing credit transfers via pacs.009 messages [FedISO] [SWIFT ISO] [CHIPS ISO].
+High-Value Payment Routing: Routing high-value USD payments via CHIPS with ISO 20022 interoperability [CHIPS ISO].
+
+1.3. Processing
+
+Straight Through Processing: Automating payment processing without manual intervention.
+Pay Through Payment: Processing payments through intermediary accounts.
+Book Transfer Payment: Transferring funds within the same financial institution.
+Payment Warehousing: Storing payments for scheduled or future processing.
+Real-Time Payment Processing: Processing payments instantly using FedNow ISO 20022 messages [FedISO].
+High-Value Payment Processing: Processing high-value payments with richer data and transparency [CHIPS ISO].
+
+1.4. Advising
+
+Pre Advise: Sending preliminary payment notifications.
+Split Advice: Dividing payment notifications into multiple messages.
+Split Advising: Distributing advice messages across parties.
+Cover Payments: Managing payments that involve cover instructions for intermediaries.
+Payment Status Report: Sending status updates via pacs.002 messages [FedISO] [SWIFT ISO] [CHIPS ISO].
+
+2. Validation and Verification
+Capabilities for ensuring payments and parties meet regulatory and operational requirements.
+2.1. Party Validation
+
+Credit Party Validation: Verifying beneficiary details (e.g., name, account, Creditor element in pacs.008 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Debit Party Validation: Verifying originator details (e.g., account, authorization, Debtor element in pacs.008 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Beneficiary: Validating the recipient of funds.
+Creditor: Confirming creditor details for payment obligations.
+Debtor: Validating the party initiating the payment.
+Party Identification: Validating structured party identifiers (e.g., LEI, BIC) per ISO 20022, including sanctions screening support [FedISO] [SWIFT ISO] [CHIPS ISO].
+
+2.2. Account Validation
+
+Account Validation: Checking account details (e.g., IBAN, routing number, AccountIdentification in pacs.008 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Account Lookup: Retrieving account information for validation or processing.
+
+2.3. Payment Validation
+
+Payment Validation: Ensuring payment instructions are complete and valid.
+Business Rule Validation: Applying business-specific rules to payments.
+Business Duplicate Check: Detecting duplicate payment instructions (e.g., via TransactionIdentification [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Value Date Validation: Verifying the date for payment settlement.
+Future Date Validation: Checking validity of future-dated payments.
+
+2.4. Message Validation
+
+Message Schema Validation: Ensuring message structure complies with ISO 20022 schemas (e.g., pacs.008, pain.001) [FedISO] [SWIFT ISO] [CHIPS ISO].
+Message Format Validation: Validating message format for Fedwire/FedNow/CHIPS/SWIFT compliance, including CBPR+ guidelines and error codes [SWIFT ISO] [CHIPS ISO].
+Remittance Information Validation: Checking structured remittance data in RemittanceInformation element, with extended data support [FedISO] [SWIFT ISO] [CHIPS ISO].
+
+3. Messaging and Integration
+Capabilities for handling payment messages and integrating with external networks.
+3.1. Message Generation
+
+Message ID Generation: Creating unique identifiers for payment messages (e.g., MessageIdentification in ISO 20022 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Message Format Transformation: Converting messages between formats (e.g., SWIFT MT to ISO 20022 pacs.008 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Payment Cancellation Request: Generating camt.056 messages for payment cancellation [FedISO] [SWIFT ISO] [CHIPS ISO].
+Resolution of Investigation: Generating camt.029 messages for investigation responses [FedISO] [SWIFT ISO] [CHIPS ISO].
+MT to MX Translation: Converting legacy MT messages (e.g., MT103 to pacs.008, MT202 to pacs.009) during coexistence [SWIFT ISO] [CHIPS ISO].
+
+3.2. Network Integration
+
+Fed Integration: Connecting with Fedwire/FedNow for domestic payments [FedISO].
+SWIFT Integration: Interfacing with SWIFT for cross-border payments, including CBPR+ and HVPS+ guidelines [SWIFT ISO].
+CHIPS Integration: Integrating with CHIPS for clearinghouse payments, with ISO 20022 for high-value USD [CHIPS ISO].
+Inbound Fed: Processing incoming Fedwire/FedNow payments using ISO 20022 [FedISO].
+Outbound Fed: Sending payments via Fedwire/FedNow using ISO 20022 [FedISO].
+Inbound SWIFT: Handling incoming SWIFT messages [SWIFT ISO].
+Outbound SWIFT: Sending SWIFT messages [SWIFT ISO].
+Inbound CHIPS: Processing incoming CHIPS payments [CHIPS ISO].
+Outbound CHIPS: Sending payments via CHIPS [CHIPS ISO].
+Network: Managing connectivity with payment networks, including translation without truncation for interoperability [CHIPS ISO] [SWIFT ISO].
+
+3.3. Acknowledgements
+
+Channel Acknowledgement: Confirming receipt of payment instructions via channels.
+Confirmations: Sending confirmation of payment processing or completion.
+Payment Status Notification: Notifying status via camt.054 messages [FedISO] [SWIFT ISO] [CHIPS ISO].
+
+4. Compliance and Fraud Prevention
+Capabilities for regulatory compliance and fraud detection.
+4.1. Regulatory Compliance
+
+Dodd Frank: Complying with Dodd-Frank Act regulations for payments.
+Anti Money Laundering: Implementing AML checks for transactions.
+Sanctions Screening: Checking payments against sanctions lists (e.g., OFAC, using RegulatoryReporting element [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Sanctions Ring Fencing: Isolating transactions to comply with sanctions.
+
+4.2. Fraud Detection
+
+Fraud Monitoring: Monitoring transactions for fraudulent activity.
+Anomaly Detection: Identifying unusual payment patterns (e.g., via TransactionInformation analysis [FedISO] [SWIFT ISO] [CHIPS ISO]).
+
+5. Liquidity and Funds Management
+Capabilities for managing funds availability and financial institution liquidity.
+5.1. Liquidity Checks
+
+Intraday Bank Liquidity Check: Verifying intraday liquidity for transactions.
+Liquidity Check: Ensuring sufficient funds for payment processing.
+Liquidity Authorization: Authorizing payments based on liquidity availability.
+Funds Control: Managing fund allocation for payments.
+
+5.2. Foreign Exchange
+
+FX: Handling foreign exchange for cross-border payments.
+FX Rates: Applying exchange rates to transactions (e.g., CurrencyAmount in pacs.008 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+FXAC: Managing foreign exchange account conversions.
+
+5.3. Posting
+
+Account Posting: Recording transactions to accounts.
+Memo Posting: Temporary recording of transactions.
+Hard Posting: Finalizing transaction postings.
+General Ledger: Updating the general ledger with transaction data (e.g., using camt.053 for account statements [FedISO] [SWIFT ISO] [CHIPS ISO]).
+
+6. Operations and Exceptions
+Capabilities for operational processes, exception handling, and pricing.
+6.1. Operational Processes
+
+Start of Day (SOD): Initiating daily payment processing activities.
+End of Day (EOD): Completing daily payment processing and reconciliation.
+Payment Tracking: Monitoring payment status across systems (e.g., via GroupHeader tracking fields [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Reference Data: Managing data for payment processing (e.g., BIC, IBAN).
+Operator UI: Providing interfaces for manual payment operations.
+
+6.2. Exception Handling
+
+Payment Return: Processing returned payments (e.g., via pacs.004 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Payment Investigation: Investigating payment issues or disputes (e.g., using camt.029 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Exceptions: Managing payment exceptions.
+Manual Repair: Manually correcting payment issues.
+Auto Repair: Automatically resolving payment errors.
+Message Replay: Re-sending payment messages.
+Repairs: General correction of payment issues.
+Killswitch: Emergency stop for payment processing.
+Payment Cancel: Canceling payment instructions (e.g., via camt.056 [FedISO] [SWIFT ISO] [CHIPS ISO]).
+
+6.3. Payment Rules
+
+Payment Rules: Applying rules for payment processing.
+Routing: Determining routing paths based on rules.
+
+6.4. Pricing and Billing
+
+Pricing: Determining payment processing fees.
+Fee Calculation: Calculating transaction fees (e.g., using ChargesInformation [FedISO] [SWIFT ISO] [CHIPS ISO]).
+Billing: Generating invoices for payment services.
+Product Lookup: Retrieving product details for pricing.
+Product Qualification: Determining eligibility for payment products.
