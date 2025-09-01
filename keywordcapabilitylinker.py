@@ -1,5 +1,39 @@
 #!/usr/bin/env python3
 
+"""
+TAL Code to Business Capability Linking System
+=============================================
+
+This system analyzes TAL (Tandem Application Language) payments functionality and maps them to 
+standardized business capabilities defined in a keywords.json taxonomy. It bridges the gap 
+between low-level code implementation and high-level business functions.
+
+CONCEPT OVERVIEW:
+The linking process works in multiple stages:
+
+1. PARSING: Extract TAL procedures, function calls, and code patterns
+2. KEYWORD MATCHING: Match code elements against taxonomy keywords using TF-IDF and fuzzy matching
+3. SEMANTIC ANALYSIS: Use LLM to understand business intent beyond keyword matching
+4. CAPABILITY MAPPING: Assign specific business capabilities with confidence scores
+5. DOMAIN CLASSIFICATION: Group capabilities into business domains (payment-processing, compliance, etc.)
+
+BUSINESS VALUE:
+- Convert technical TAL code into business capability inventory
+- Identify which regulatory/compliance capabilities are implemented  
+- Understand system capabilities across large codebases
+- Find gaps between required and implemented capabilities
+- Support modernization and compliance initiatives
+
+ARCHITECTURE:
+- BusinessCapabilityExtractor: Manages the capability taxonomy from keywords.json
+- EnhancedProcedureParser: Extracts and analyzes TAL procedure structures
+- DynamicCapabilityMatcher: Core matching engine using multiple analysis methods
+- LLMProvider: Optional semantic analysis using GPT-4 for complex mappings
+
+The system is designed to be fully data-driven - all mappings derive from keywords.json
+rather than hard-coded rules, making it adaptable to different banking domains.
+"""
+
 import json
 import argparse
 from pathlib import Path
@@ -16,105 +50,179 @@ import numpy as np
 from collections import defaultdict, Counter
 import logging
 
-# Configure logging
+# Configure logging for debugging and monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 @dataclass
 class BusinessCapabilityMatch:
-    """Enhanced match result with business capability focus"""
-    procedure_name: str
-    source_file: str
-    business_capabilities: List[str]
-    primary_keyword_matches: List[str]
-    related_keyword_matches: List[str]
-    fuzzy_matches: List[str]
-    semantic_matches: List[str]
-    confidence_score: float
-    domain_context: str
-    procedural_patterns: List[str]
-    reasoning: str
-    validation_score: float
-    evidence_strength: Dict[str, float]
+    """
+    Represents the result of mapping a TAL procedure to business capabilities.
+    
+    Contains all analysis results including confidence scores, evidence sources,
+    and reasoning for the mapping decisions.
+    """
+    procedure_name: str                    # Name of the TAL procedure
+    source_file: str                       # Source file containing the procedure
+    business_capabilities: List[str]       # List of mapped business capabilities
+    primary_keyword_matches: List[str]     # Primary keywords that matched
+    related_keyword_matches: List[str]     # Related keywords that matched
+    fuzzy_matches: List[str]              # Fuzzy string matches found
+    semantic_matches: List[str]           # Capabilities found via LLM analysis
+    confidence_score: float               # Overall confidence (0.0-1.0)
+    domain_context: str                   # Primary business domain
+    procedural_patterns: List[str]        # Code patterns detected
+    reasoning: str                        # Human-readable explanation
+    validation_score: float               # Quality score for the mapping
+    evidence_strength: Dict[str, float]   # Breakdown of evidence sources
 
 class BusinessCapabilityExtractor:
-    """Extracts business capabilities from keywords.json structure with validation"""
+    """
+    Manages the business capability taxonomy loaded from keywords.json.
+    
+    This class builds the core data structures that drive the entire linking process:
+    - Capability to domain mappings
+    - Domain to capability relationships  
+    - Capability specificity scoring (how unique a capability is)
+    
+    The taxonomy validation helps identify potential issues with over-assigned
+    capabilities that appear in too many domains.
+    """
     
     def __init__(self, keywords_data: List[Dict]):
+        """
+        Initialize the capability extractor with keywords.json data.
+        
+        Args:
+            keywords_data: List of dictionaries from keywords.json, each containing:
+                - keywords: Primary keywords for matching
+                - related_keywords: Secondary keywords for matching
+                - business_capability: List of capabilities this entry defines
+                - metadata: Domain classification
+        """
         self.keywords_data = keywords_data
-        self.capability_to_domain = {}
-        self.domain_to_capabilities = {}
-        self.all_capabilities = set()
-        self.capability_hierarchy = {}
+        
+        # Core mapping structures - these drive all capability detection
+        self.capability_to_domain = {}      # capability_name -> [domain1, domain2, ...]
+        self.domain_to_capabilities = {}    # domain_name -> [cap1, cap2, ...]
+        self.all_capabilities = set()       # All unique capability names
+        self.capability_hierarchy = {}      # For future hierarchical relationships
+        
+        # Build the core mappings from the taxonomy
         self._build_capability_mappings()
+        
+        # Validate taxonomy structure and warn about potential issues
         self._validate_taxonomy()
     
     def _build_capability_mappings(self):
-        """Build mappings between domains and business capabilities"""
+        """
+        Build the core data structures from keywords.json.
+        
+        This creates bidirectional mappings between capabilities and domains,
+        which are essential for:
+        - Finding all capabilities in a domain
+        - Determining which domains contain a capability
+        - Calculating capability specificity scores
+        """
         for entry in self.keywords_data:
             domain = entry.get('metadata', 'unknown')
             capabilities = entry.get('business_capability', [])
             
-            # Map capabilities to domains
+            # Map each capability to its domains (for specificity calculation)
             for capability in capabilities:
                 self.all_capabilities.add(capability)
                 if capability not in self.capability_to_domain:
                     self.capability_to_domain[capability] = []
                 self.capability_to_domain[capability].append(domain)
             
-            # Map domains to capabilities
+            # Map each domain to its capabilities (for domain analysis)
             if domain not in self.domain_to_capabilities:
                 self.domain_to_capabilities[domain] = []
             self.domain_to_capabilities[domain].extend(capabilities)
     
     def _validate_taxonomy(self):
-        """Validate the taxonomy structure and log potential issues"""
+        """
+        Validate the taxonomy structure and identify potential issues.
+        
+        This helps maintain taxonomy quality by identifying:
+        - Orphaned capabilities (no domain assignments)
+        - Over-assigned capabilities (appear in too many domains)
+        
+        Over-assignment often indicates capabilities that are too generic
+        and may dilute the precision of the matching algorithm.
+        """
         issues = []
         
-        # Check for orphaned capabilities
+        # Check for orphaned capabilities (shouldn't happen with proper taxonomy)
         orphaned_caps = [cap for cap in self.all_capabilities 
                         if len(self.capability_to_domain[cap]) == 0]
         if orphaned_caps:
             issues.append(f"Orphaned capabilities: {orphaned_caps[:5]}")
         
-        # Check for capabilities in too many domains (potential over-assignment)
+        # Check for over-assigned capabilities (potential precision issues)
         overassigned_caps = [cap for cap in self.all_capabilities 
                            if len(self.capability_to_domain[cap]) > 3]
         if overassigned_caps:
             issues.append(f"Over-assigned capabilities (>3 domains): {overassigned_caps[:5]}")
         
-        # Log validation results
+        # Log validation results for taxonomy maintenance
         if issues:
             logger.warning(f"Taxonomy validation issues: {'; '.join(issues)}")
         else:
             logger.info("Taxonomy validation passed")
     
     def get_capability_specificity_score(self, capability: str) -> float:
-        """Calculate how specific/unique a capability is across domains"""
+        """
+        Calculate how specific/unique a capability is across domains.
+        
+        More specific capabilities (appearing in fewer domains) get higher scores.
+        This is used to prioritize specific capabilities over generic ones.
+        
+        Args:
+            capability: The capability name to score
+            
+        Returns:
+            Float between 0.0-1.0, where 1.0 is most specific
+        """
         if capability not in self.capability_to_domain:
             return 0.0
         
         domain_count = len(self.capability_to_domain[capability])
-        # More specific capabilities are in fewer domains
+        # Inverse relationship: fewer domains = more specific = higher score
         return 1.0 / (1.0 + domain_count)
     
     def get_capabilities_for_domain(self, domain: str) -> List[str]:
-        """Get business capabilities for a specific domain"""
+        """Get all business capabilities defined for a specific domain."""
         return self.domain_to_capabilities.get(domain, [])
     
     def get_domains_for_capability(self, capability: str) -> List[str]:
-        """Get domains that contain a specific capability"""
+        """Get all domains that contain a specific capability."""
         return self.capability_to_domain.get(capability, [])
     
     def get_all_capabilities(self) -> Set[str]:
-        """Get all unique business capabilities"""
+        """Get all unique business capabilities in the taxonomy."""
         return self.all_capabilities.copy()
 
 class EnhancedProcedureParser:
-    """Enhanced TAL procedure parser with better pattern matching and validation"""
+    """
+    Parses TAL source code to extract procedure definitions and analyze their structure.
+    
+    This parser handles the complexities of TAL syntax including:
+    - Nested BEGIN/END blocks
+    - Various procedure declaration formats (PROC, SUBPROC, FUNCTION)
+    - Function call extraction
+    - Utility function detection
+    - Complexity scoring for better capability matching
+    
+    The parser is designed to be robust against syntax variations and provides
+    rich metadata about each procedure for the matching algorithms.
+    """
     
     def __init__(self):
-        # Enhanced regex patterns for TAL procedure detection
+        """Initialize the TAL parser with regex patterns for procedure detection."""
+        
+        # Enhanced regex patterns for different TAL procedure types
+        # These cover the most common TAL procedure declaration formats
         self.proc_patterns = [
             re.compile(r'(?i)^\s*(?:INT\s+)?PROC\s+([\w_]+)\s*\((.*?)\)\s*;', re.MULTILINE | re.DOTALL),
             re.compile(r'(?i)^\s*(?:INT\s+)?SUBPROC\s+([\w_]+)\s*\((.*?)\)\s*;', re.MULTILINE | re.DOTALL),
@@ -122,80 +230,107 @@ class EnhancedProcedureParser:
             re.compile(r'(?i)^\s*(?:INT\s+)?FUNCTION\s+([\w_]+)\s*\((.*?)\)\s*;', re.MULTILINE | re.DOTALL)
         ]
         
-        # Enhanced body extraction with nested BEGIN/END handling
+        # Patterns for extracting procedure body content
         self.body_pattern = re.compile(r'(?i)BEGIN\s*(.*?)\s*END\s*;', re.DOTALL)
         self.nested_begin_pattern = re.compile(r'(?i)BEGIN', re.MULTILINE)
         self.nested_end_pattern = re.compile(r'(?i)END', re.MULTILINE)
         
-        # Enhanced function call patterns
+        # Patterns for finding function calls within procedures
         self.call_patterns = [
-            re.compile(r'(?i)CALL\s+([\w_]+)', re.MULTILINE),
-            re.compile(r'(?i)([\w_]+)\s*\(', re.MULTILINE),
+            re.compile(r'(?i)CALL\s+([\w_]+)', re.MULTILINE),        # Explicit CALL statements
+            re.compile(r'(?i)([\w_]+)\s*\(', re.MULTILINE),          # Function calls with parentheses
         ]
         
-        # Dynamic utility pattern detection (no hard-coding)
+        # Dynamic utility function detection (no hard-coded lists)
         self.utility_indicators = ['error', 'warning', 'debug', 'trace', 'log', 'format', 'normalize']
     
     def _extract_balanced_body(self, content: str, start_pos: int) -> Tuple[str, int]:
-        """Extract procedure body handling nested BEGIN/END blocks"""
+        """
+        Extract procedure body handling nested BEGIN/END blocks.
+        
+        TAL procedures can have complex nested structures, so we need to
+        properly balance BEGIN/END pairs to extract the complete procedure body.
+        """
         remaining = content[start_pos:]
         
-        # Find first BEGIN
+        # Look for the first BEGIN to start the procedure body
         begin_match = self.nested_begin_pattern.search(remaining)
         if not begin_match:
+            # No explicit BEGIN/END structure, use heuristic extraction
             return self._extract_implicit_body(remaining), len(remaining)
         
-        # Count nested BEGIN/END pairs
+        # Balance nested BEGIN/END pairs to find the complete procedure
         begin_pos = begin_match.start()
         current_pos = begin_pos + len("BEGIN")
-        depth = 1
+        depth = 1  # Track nesting depth
         
+        # Walk through the content balancing BEGIN/END pairs
         while depth > 0 and current_pos < len(remaining):
             next_begin = self.nested_begin_pattern.search(remaining, current_pos)
             next_end = self.nested_end_pattern.search(remaining, current_pos)
             
             if next_end is None:
+                # No more END statements found, break out
                 break
             
+            # Process the next keyword (BEGIN or END)
             if next_begin and next_begin.start() < next_end.start():
+                # Found nested BEGIN, increase depth
                 depth += 1
                 current_pos = next_begin.end()
             else:
+                # Found END, decrease depth
                 depth -= 1
                 current_pos = next_end.end()
                 if depth == 0:
+                    # Found the matching END for our procedure
                     body_content = remaining[begin_match.end():next_end.start()]
                     return body_content.strip(), start_pos + current_pos
         
+        # Fallback if balancing failed
         return self._extract_implicit_body(remaining), len(remaining)
     
     def _extract_implicit_body(self, remaining: str) -> str:
-        """Extract procedure body without explicit BEGIN/END"""
+        """
+        Extract procedure body when no explicit BEGIN/END structure exists.
+        
+        This handles cases where procedures don't follow strict BEGIN/END
+        patterns by looking for the next procedure declaration or taking
+        a reasonable chunk of code.
+        """
         next_proc_pos = len(remaining)
         
+        # Find the start of the next procedure to bound this one
         for pattern in self.proc_patterns:
-            next_match = pattern.search(remaining, 1)
+            next_match = pattern.search(remaining, 1)  # Skip current position
             if next_match:
                 next_proc_pos = min(next_proc_pos, next_match.start())
         
-        body_end = min(next_proc_pos, 3000)
+        # Extract content up to next procedure or reasonable limit
+        body_end = min(next_proc_pos, 3000)  # Cap at 3000 chars for performance
         return remaining[:body_end]
     
     def _is_utility_function(self, proc_name: str, proc_body: str) -> bool:
-        """Determine if a procedure is a utility function using dynamic detection"""
+        """
+        Determine if a procedure is a utility function using dynamic detection.
+        
+        Utility functions typically provide support services (logging, formatting, etc.)
+        rather than core business functionality. Identifying them helps focus
+        capability mapping on business-relevant procedures.
+        """
         name_lower = proc_name.lower()
         body_lower = proc_body.lower()
         
-        # Check for utility prefixes
+        # Check for common utility prefixes in procedure names
         utility_prefixes = ['add_', 'log_', 'format_', 'normalize_', 'get_', 'set_', 'init_', 'cleanup_']
         if any(name_lower.startswith(prefix) for prefix in utility_prefixes):
             return True
         
-        # Check for utility suffixes
+        # Check for utility suffixes in procedure names
         if any(name_lower.endswith(suffix) for suffix in self.utility_indicators):
             return True
         
-        # Check body characteristics
+        # Analyze body content for utility characteristics
         utility_indicators_in_body = sum(1 for indicator in self.utility_indicators if indicator in body_lower)
         simple_operations = ['return', 'printf', 'sprintf', 'strlen', 'strcmp']
         simple_count = sum(1 for op in simple_operations if op in body_lower)
@@ -207,11 +342,25 @@ class EnhancedProcedureParser:
         return False
     
     def extract_procedures(self, content: str, source_file: str) -> List[Dict]:
-        """Enhanced procedure extraction with better validation"""
-        procedures = []
-        found_procedures = set()
-        extraction_stats = {'total_found': 0, 'duplicates': 0, 'utilities': 0, 'parsed': 0}
+        """
+        Main procedure extraction method.
         
+        Processes TAL source code to extract all procedure definitions along with
+        rich metadata for capability matching. Handles deduplication and provides
+        statistics for monitoring the parsing process.
+        """
+        procedures = []
+        found_procedures = set()  # Global deduplication
+        
+        # Statistics for monitoring and debugging
+        extraction_stats = {
+            'total_found': 0,     # Total procedure declarations found
+            'duplicates': 0,      # Duplicate procedures skipped
+            'utilities': 0,       # Utility functions identified
+            'parsed': 0          # Successfully parsed procedures
+        }
+        
+        # Process each procedure pattern type
         for pattern in self.proc_patterns:
             matches = list(pattern.finditer(content))
             extraction_stats['total_found'] += len(matches)
@@ -219,28 +368,34 @@ class EnhancedProcedureParser:
             for match in matches:
                 proc_name = match.group(1).strip()
                 
+                # Skip duplicates (can occur across files in large repos)
                 if proc_name in found_procedures:
                     extraction_stats['duplicates'] += 1
                     continue
                 found_procedures.add(proc_name)
                 
+                # Extract procedure parameters
                 parameters = match.group(2).strip() if match.group(2) else ""
                 
+                # Extract procedure body using balanced parsing
                 body_content, body_end = self._extract_balanced_body(content, match.end())
                 
-                # Extract function calls
+                # Extract function calls from the procedure body
                 function_calls = set()
                 for call_pattern in self.call_patterns:
                     calls = call_pattern.findall(body_content)
                     function_calls.update(calls)
                 
-                function_calls.discard(proc_name)
+                # Clean up function calls (remove self-references and short names)
+                function_calls.discard(proc_name)  # Remove self-references
                 function_calls = [call for call in function_calls if len(call) > 2]
                 
+                # Determine if this is a utility function
                 is_utility = self._is_utility_function(proc_name, body_content)
                 if is_utility:
                     extraction_stats['utilities'] += 1
                 
+                # Create comprehensive procedure metadata
                 procedures.append({
                     'name': proc_name,
                     'source_file': source_file,
@@ -254,70 +409,107 @@ class EnhancedProcedureParser:
                 })
                 extraction_stats['parsed'] += 1
         
+        # Log extraction statistics for monitoring
         logger.info(f"Extraction stats for {Path(source_file).name}: {extraction_stats}")
         return procedures
     
     def _calculate_complexity_score(self, body: str, function_calls: List[str]) -> float:
-        """Calculate procedure complexity score"""
+        """
+        Calculate a complexity score for the procedure.
+        
+        This score is used by the matching algorithm to:
+        - Determine appropriate confidence thresholds
+        - Limit capability assignments based on procedure sophistication
+        - Identify procedures likely to implement multiple capabilities
+        """
         score = 0.0
         
+        # Length-based complexity (normalized)
         score += min(len(body) / 1000.0, 3.0)
+        
+        # Function call complexity
         score += len(function_calls) * 0.3
         
+        # Control flow complexity
         control_keywords = ['if', 'while', 'for', 'case', 'loop']
         for keyword in control_keywords:
             score += body.lower().count(keyword) * 0.2
         
-        return min(score, 10.0)
+        return min(score, 10.0)  # Cap at 10.0 for normalization
 
 class DynamicCapabilityMatcher:
-    """Fully dynamic matcher that derives everything from keywords.json"""
+    """
+    Core matching engine that maps TAL procedures to business capabilities.
+    
+    This is the heart of the linking system, implementing a multi-stage analysis:
+    
+    1. DIRECT NAME MATCHING: Semantic alignment between procedure names and capabilities
+    2. CODE ANALYSIS: Pattern matching within procedure bodies using keywords
+    3. LLM SEMANTIC BRIDGE: Advanced semantic understanding via GPT-4
+    4. VALIDATION & COMBINATION: Intelligent merging with confidence scoring
+    
+    The matcher is fully data-driven - all logic derives from keywords.json
+    rather than hard-coded rules, making it adaptable to different domains.
+    """
     
     def __init__(self, keywords_data: List[Dict], fuzzy_threshold: float = 0.85):
+        """Initialize the capability matcher."""
         self.keywords_data = keywords_data
         self.fuzzy_threshold = fuzzy_threshold
         self.capability_extractor = BusinessCapabilityExtractor(keywords_data)
-        self.llm_provider = None
+        self.llm_provider = None  # Set via set_llm_provider() if LLM analysis desired
         
-        # Build dynamic mappings from keywords.json
-        self.domain_keywords = {}
-        self.domain_related_keywords = {}
-        self.keyword_importance_scores = {}
-        self.capability_keyword_map = {}
+        # Build dynamic mappings from keywords.json - these drive all matching logic
+        self.domain_keywords = {}               # domain -> [primary_keywords]
+        self.domain_related_keywords = {}       # domain -> [related_keywords]
+        self.keyword_importance_scores = {}     # keyword -> importance_score
+        self.capability_keyword_map = {}        # capability -> {primary: [], related: []}
         
+        # Build all the core data structures from the taxonomy
         self._build_dynamic_mappings()
+        
+        # Initialize TF-IDF for semantic similarity scoring
         self._init_enhanced_tfidf()
         
-        # Dynamic false positive detection
+        # Dynamic false positive detection patterns
         self.validation_cache = {}
         self.false_positive_patterns = self._build_dynamic_false_positive_patterns()
     
     def _build_dynamic_mappings(self):
-        """Build all mappings dynamically from keywords.json"""
-        keyword_frequency = Counter()
+        """
+        Build all core data structures from keywords.json.
         
-        # Build domain keyword mappings
+        This creates the mappings that drive the entire matching process:
+        - Domain to keyword relationships
+        - Capability to keyword associations
+        - Keyword importance scoring (based on inverse frequency)
+        """
+        keyword_frequency = Counter()  # Track keyword frequency for importance scoring
+        
+        # Process each entry in the taxonomy
         for entry in self.keywords_data:
             domain = entry.get('metadata', 'unknown')
             primary_kw = [kw.strip().lower() for kw in entry.get('keywords', '').split(',') if kw.strip()]
             related_kw = [kw.strip().lower() for kw in entry.get('related_keywords', '').split(',') if kw.strip()]
             capabilities = entry.get('business_capability', [])
             
+            # Build domain-keyword mappings
             self.domain_keywords[domain] = primary_kw
             self.domain_related_keywords[domain] = related_kw
             
-            # Build capability to keyword mappings
+            # Build capability-keyword mappings (crucial for direct name matching)
             for capability in capabilities:
                 if capability not in self.capability_keyword_map:
                     self.capability_keyword_map[capability] = {'primary': [], 'related': []}
                 self.capability_keyword_map[capability]['primary'].extend(primary_kw)
                 self.capability_keyword_map[capability]['related'].extend(related_kw)
             
-            # Count frequency for importance scoring
+            # Count keyword frequency for importance scoring
             for kw in primary_kw + related_kw:
                 keyword_frequency[kw] += 1
         
-        # Calculate importance scores
+        # Calculate keyword importance scores (inverse frequency)
+        # Rare keywords get higher importance scores, common ones get lower scores
         max_freq = max(keyword_frequency.values()) if keyword_frequency else 1
         for keyword, freq in keyword_frequency.items():
             self.keyword_importance_scores[keyword] = max_freq / freq
@@ -326,37 +518,45 @@ class DynamicCapabilityMatcher:
                    f"{len(self.capability_keyword_map)} capabilities")
     
     def _build_dynamic_false_positive_patterns(self) -> List[re.Pattern]:
-        """Build false positive patterns dynamically from data"""
+        """
+        Build patterns to detect likely false positives dynamically from the data.
+        
+        Rather than hard-coding utility patterns, this examines the taxonomy
+        to identify terms that typically indicate utility functions.
+        """
         patterns = []
         
-        # Extract utility-like patterns from keywords
+        # Extract utility-like terms from the taxonomy itself
         utility_terms = set()
         for entry in self.keywords_data:
             keywords = entry.get('keywords', '').lower() + ',' + entry.get('related_keywords', '').lower()
             for word in re.findall(r'\b\w+\b', keywords):
+                # Common utility indicators found in banking taxonomies
                 if word in ['error', 'warning', 'debug', 'trace', 'log', 'format', 'normalize']:
                     utility_terms.add(word)
         
-        # Create patterns for utility detection
+        # Create regex patterns for utility detection
         if utility_terms:
+            patterns.append(re.compile(r'(?i)^(add_|get_|set_|init_)'))
             utility_pattern = '|'.join(utility_terms)
-            patterns.append(re.compile(f'(?i)^(add_|get_|set_|init_)'))
             patterns.append(re.compile(f'(?i)({utility_pattern})$'))
         
         return patterns
     
     def _init_enhanced_tfidf(self):
-        """Enhanced TF-IDF initialization with better preprocessing"""
+        """Initialize TF-IDF vectorizer for semantic similarity scoring."""
         try:
             self.tfidf_docs = []
             self.tfidf_metadata = []
             
+            # Create a document for each taxonomy entry
             for entry in self.keywords_data:
+                # Combine all textual information into a single document
                 doc_parts = [
                     entry.get('keywords', ''),
                     entry.get('related_keywords', ''),
                     entry.get('description', ''),
-                    ' '.join(entry.get('business_capability', []))
+                    ' '.join(entry.get('business_capability', []))  # Include capability names
                 ]
                 doc_text = ' '.join(part for part in doc_parts if part)
                 
@@ -367,13 +567,14 @@ class DynamicCapabilityMatcher:
                     'primary_keywords': [kw.strip().lower() for kw in entry.get('keywords', '').split(',') if kw.strip()]
                 })
             
+            # Initialize the TF-IDF vectorizer with appropriate parameters
             if self.tfidf_docs:
                 self.tfidf_vectorizer = TfidfVectorizer(
-                    stop_words='english', 
-                    max_features=8000,
-                    ngram_range=(1, 3),
-                    min_df=1,
-                    max_df=0.8
+                    stop_words='english',    # Remove common English words
+                    max_features=8000,       # Limit vocabulary size for performance
+                    ngram_range=(1, 3),      # Include unigrams, bigrams, and trigrams
+                    min_df=1,                # Don't ignore rare terms (important for banking domain)
+                    max_df=0.8               # Ignore very common terms
                 )
                 self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(self.tfidf_docs)
                 logger.info(f"Enhanced TF-IDF initialized with {len(self.tfidf_docs)} documents")
@@ -388,12 +589,22 @@ class DynamicCapabilityMatcher:
             self.tfidf_matrix = None
     
     def set_llm_provider(self, llm_provider):
-        """Set LLM provider for semantic analysis"""
+        """Set the LLM provider for semantic analysis (optional component)."""
         self.llm_provider = llm_provider
     
     def match_procedure_to_capabilities(self, procedure: Dict, min_confidence: float = 0.2) -> BusinessCapabilityMatch:
-        """Main matching method using only dynamic data from keywords.json"""
+        """
+        Main matching method - maps a TAL procedure to business capabilities.
         
+        This orchestrates the multi-stage analysis process:
+        1. Early filtering for utility functions
+        2. Direct name-based capability detection
+        3. Code content analysis using keyword patterns
+        4. Optional LLM semantic analysis
+        5. Validation and combination of results
+        6. Confidence scoring and domain classification
+        """
+        # Extract procedure metadata for analysis
         proc_name = procedure['name']
         proc_body = procedure['body'].lower()
         function_calls = procedure.get('function_calls', [])
@@ -401,19 +612,24 @@ class DynamicCapabilityMatcher:
         is_utility = procedure.get('is_utility', False)
         complexity_score = procedure.get('complexity_score', 0.0)
         
-        # Early exit for utility functions with low complexity
+        # EARLY FILTERING: Skip detailed analysis for simple utility functions
         if is_utility and complexity_score < 2.0:
             return self._create_minimal_match(procedure, "Utility function - minimal capabilities")
         
-        # Check for false positive patterns
+        # FALSE POSITIVE DETECTION: Check for patterns likely to produce noise
         if self._is_likely_false_positive(proc_name, proc_body):
             return self._create_minimal_match(procedure, "Likely false positive pattern detected")
         
-        # Dynamic capability detection
+        # STAGE 1: DIRECT NAME MATCHING
+        # Look for semantic alignment between procedure names and capability names
         direct_capabilities = self._find_direct_name_matches(proc_name)
+        
+        # STAGE 2: CODE CONTENT ANALYSIS
+        # Analyze procedure body and function calls for capability indicators
         code_detected_capabilities = self._analyze_code_dynamically(proc_name, proc_body, full_context, function_calls)
         
-        # Enhanced LLM semantic analysis
+        # STAGE 3: LLM SEMANTIC ANALYSIS (Optional)
+        # Use advanced AI to find capabilities missed by algorithmic approaches
         llm_capabilities = []
         llm_reasoning = ""
         llm_confidence = 0.0
@@ -430,29 +646,39 @@ class DynamicCapabilityMatcher:
                     'primary_domain': llm_result.get('primary_domain', 'unknown')
                 }
         
-        # Validate and combine capabilities
+        # STAGE 4: VALIDATION AND COMBINATION
+        # Intelligently combine results from all analysis stages
         all_capabilities = self._validate_and_combine_capabilities(
             direct_capabilities, code_detected_capabilities, llm_capabilities, 
             proc_name, proc_body, complexity_score
         )
         
-        # Enhanced confidence calculation
+        # STAGE 5: CONFIDENCE CALCULATION
+        # Calculate detailed confidence scores based on evidence strength
         confidence_details = self._calculate_enhanced_confidence(
             proc_name, proc_body, direct_capabilities, code_detected_capabilities, 
             llm_capabilities, llm_confidence, complexity_score
         )
         
-        # Find best domain match
+        # STAGE 6: DOMAIN CLASSIFICATION
+        # Determine the primary business domain for this procedure
         best_domain = self._find_enhanced_domain_match(proc_name, proc_body, list(all_capabilities))
         
-        # Get detailed keyword matches
+        # STAGE 7: KEYWORD MATCH ANALYSIS
+        # Get detailed breakdown of keyword matches for transparency
         keyword_matches = self._get_enhanced_keyword_matches(proc_name + " " + proc_body)
         
-        # Calculate validation score
+        # STAGE 8: VALIDATION SCORING
+        # Calculate quality score for the overall mapping
         validation_score = self._calculate_validation_score(
             proc_name, all_capabilities, keyword_matches, complexity_score
         )
         
+        # STAGE 9: PATTERN DETECTION
+        # Identify procedural patterns for additional context
+        procedural_patterns = self._detect_enhanced_procedural_patterns(proc_name, proc_body)
+        
+        # Create comprehensive results object
         return BusinessCapabilityMatch(
             procedure_name=proc_name,
             source_file=procedure['source_file'],
@@ -463,7 +689,7 @@ class DynamicCapabilityMatcher:
             semantic_matches=llm_capabilities,
             confidence_score=round(confidence_details['total'], 3),
             domain_context=best_domain,
-            procedural_patterns=self._detect_enhanced_procedural_patterns(proc_name, proc_body),
+            procedural_patterns=procedural_patterns,
             reasoning=llm_reasoning or self._build_reasoning_explanation(
                 direct_capabilities, code_detected_capabilities, llm_capabilities
             ),
@@ -472,61 +698,67 @@ class DynamicCapabilityMatcher:
         )
     
     def _find_direct_name_matches(self, proc_name: str) -> List[str]:
-        """Find direct matches between procedure names and capabilities using keywords.json"""
+        """
+        Find direct semantic matches between procedure names and capabilities.
+        
+        This stage looks for alignment between procedure naming conventions
+        and capability names, using both exact matches and semantic similarity.
+        """
         name_lower = proc_name.lower()
         direct_caps = []
         
-        # Search through all capabilities and their associated keywords
+        # Iterate through all capabilities and their keyword associations
         for capability, keyword_map in self.capability_keyword_map.items():
             match_score = 0.0
             
-            # Check primary keywords
+            # KEYWORD MATCHING: Check primary keywords first (highest confidence)
             for keyword in keyword_map['primary']:
                 if self._keyword_matches_procedure_name(keyword, name_lower):
                     importance = self.keyword_importance_scores.get(keyword, 1.0)
-                    match_score += importance * 2.0
+                    match_score += importance * 2.0  # High weight for primary keywords
             
-            # Check related keywords
+            # Check related keywords (medium confidence)
             for keyword in keyword_map['related']:
                 if self._keyword_matches_procedure_name(keyword, name_lower):
                     importance = self.keyword_importance_scores.get(keyword, 1.0)
-                    match_score += importance * 1.0
+                    match_score += importance * 1.0  # Lower weight for related keywords
             
-            # Check capability name alignment with procedure name
+            # SEMANTIC ALIGNMENT: Direct capability name to procedure name matching
             cap_words = capability.lower().replace(' ', '_').split('_')
             proc_words = name_lower.replace('_', ' ').split()
             
+            # Score semantic alignment between capability and procedure names
             for cap_word in cap_words:
-                if len(cap_word) > 2:
+                if len(cap_word) > 2:  # Skip very short words
                     for proc_word in proc_words:
                         if cap_word == proc_word:  # Exact word match
                             match_score += 3.0
                         elif cap_word in proc_word or proc_word in cap_word:  # Partial match
                             match_score += 1.5
             
-            # Include capability if match score is high enough
+            # Include capability if match score exceeds threshold
             if match_score >= 2.0:
                 direct_caps.append((capability, match_score))
         
-        # Sort by match score and return capabilities
+        # Sort by match score (highest confidence first) and return capability names
         direct_caps.sort(key=lambda x: x[1], reverse=True)
         return [cap for cap, score in direct_caps]
     
     def _keyword_matches_procedure_name(self, keyword: str, proc_name_lower: str) -> bool:
-        """Check if a keyword matches a procedure name with various strategies"""
-        # Direct substring match
+        """Sophisticated keyword matching against procedure names."""
+        # STRATEGY 1: Direct substring match (highest confidence)
         if keyword in proc_name_lower:
             return True
         
-        # Word-level matching
+        # STRATEGY 2: Word-level matching for multi-word keywords
         keyword_words = keyword.replace('_', ' ').split()
         proc_words = proc_name_lower.replace('_', ' ').split()
         
-        # Check if all keyword words appear in procedure words
+        # For multi-word keywords, check if all words appear in procedure words
         if len(keyword_words) > 1:
             return all(any(kw in pw or pw in kw for pw in proc_words) for kw in keyword_words)
         
-        # Single word partial matching
+        # STRATEGY 3: Single word partial matching (for morphological variations)
         if len(keyword_words) == 1 and len(keyword_words[0]) > 3:
             return any(keyword_words[0] in pw or pw in keyword_words[0] for pw in proc_words)
         
@@ -534,73 +766,91 @@ class DynamicCapabilityMatcher:
     
     def _analyze_code_dynamically(self, proc_name: str, proc_body: str, 
                                 full_context: str, function_calls: List[str]) -> List[str]:
-        """Analyze code for capabilities using only keywords.json data"""
+        """
+        Analyze procedure code content for capability indicators.
+        
+        This stage examines the actual code implementation to find evidence
+        of business capabilities through keyword presence and function calls.
+        """
         capabilities = []
         
-        # Skip analysis for simple utility functions
+        # EARLY FILTERING: Skip detailed analysis for simple utility functions
         if len(proc_body) < 200 and any(proc_name.lower().startswith(prefix) 
                                        for prefix in ['add_', 'log_', 'format_', 'get_', 'set_']):
             return capabilities
         
+        # Combine all available text for analysis, emphasizing function calls
         all_text = f"{proc_body} {full_context} {' '.join(function_calls)}".lower()
         
-        # Analyze each entry in keywords.json
+        # Iterate through each taxonomy entry to find matching capabilities
         for entry in self.keywords_data:
             business_caps = entry.get('business_capability', [])
             if not business_caps:
-                continue
+                continue  # Skip entries without capabilities
             
+            # Extract keywords for this domain
             primary_keywords = [kw.strip().lower() for kw in entry.get('keywords', '').split(',') if kw.strip()]
             related_keywords = [kw.strip().lower() for kw in entry.get('related_keywords', '').split(',') if kw.strip()]
             
+            # SCORING: Calculate match strength for this domain
             match_score = 0.0
             found_keywords = []
             
-            # Score primary keyword matches
+            # Score primary keyword matches (high confidence indicators)
             for kw in primary_keywords:
                 if kw in all_text:
                     importance = self.keyword_importance_scores.get(kw, 1.0)
+                    
+                    # FUNCTION CALL BOOST: Keywords in function calls get higher scores
                     multiplier = 3.0 if any(kw in call.lower() for call in function_calls) else 1.0
                     match_score += importance * multiplier
                     found_keywords.append(kw)
             
-            # Score related keyword matches
+            # Score related keyword matches (medium confidence indicators)
             for kw in related_keywords:
                 if kw in all_text:
                     importance = self.keyword_importance_scores.get(kw, 1.0)
+                    
+                    # Function call boost for related keywords too, but less weight
                     multiplier = 2.0 if any(kw in call.lower() for call in function_calls) else 0.5
-                    match_score += importance * multiplier * 0.5
+                    match_score += importance * multiplier * 0.5  # Lower base weight
                     found_keywords.append(kw)
             
-            # Only add capabilities if match score exceeds threshold
-            if match_score >= 2.0:
+            # CAPABILITY FILTERING: Only include capabilities with sufficient evidence
+            if match_score >= 2.0:  # Increased threshold for quality
                 relevant_caps = self._filter_capabilities_by_relevance(
                     business_caps, found_keywords, proc_name, all_text, match_score
                 )
                 capabilities.extend(relevant_caps)
         
-        return list(set(capabilities))
+        return list(set(capabilities))  # Remove duplicates
     
     def _filter_capabilities_by_relevance(self, capabilities: List[str], found_keywords: List[str], 
                                         proc_name: str, all_text: str, match_score: float) -> List[str]:
-        """Filter capabilities based on relevance using dynamic analysis"""
+        """
+        Filter domain capabilities to only the most relevant ones for this procedure.
+        
+        When a domain matches a procedure, not all capabilities in that domain
+        are necessarily relevant. This method scores each capability based on
+        its specific relevance to the procedure.
+        """
         relevant_caps = []
         
         for capability in capabilities:
             relevance_score = 0.0
             cap_words = capability.lower().replace(' ', '_').split('_')
             
-            # Score based on capability terms in procedure name (highest weight)
+            # FACTOR 1: Capability name alignment with procedure name (highest weight)
             proc_words = proc_name.lower().replace('_', ' ').split()
             for cap_word in cap_words:
                 if len(cap_word) > 2:
                     for proc_word in proc_words:
-                        if cap_word == proc_word:  # Exact match
+                        if cap_word == proc_word:  # Exact word match
                             relevance_score += 4.0
                         elif cap_word in proc_word or proc_word in cap_word:  # Partial match
                             relevance_score += 2.0
             
-            # Score based on keyword matches
+            # FACTOR 2: Keyword-capability semantic relationships
             for keyword in found_keywords:
                 keyword_words = keyword.replace(' ', '_').split('_')
                 for kw_word in keyword_words:
@@ -611,11 +861,11 @@ class DynamicCapabilityMatcher:
                             elif kw_word in cap_word or cap_word in kw_word:
                                 relevance_score += 1.0
             
-            # Score based on capability specificity (favor more specific capabilities)
+            # FACTOR 3: Capability specificity boost (prefer specific capabilities)
             specificity = self.capability_extractor.get_capability_specificity_score(capability)
             relevance_score += specificity * 3.0
             
-            # Dynamic threshold based on match score
+            # DYNAMIC THRESHOLDS: Adjust threshold based on overall match strength
             base_threshold = 3.0
             if match_score > 8.0:
                 threshold = base_threshold * 0.6
@@ -624,72 +874,30 @@ class DynamicCapabilityMatcher:
             else:
                 threshold = base_threshold * 1.2
             
+            # Include capability if it meets the relevance threshold
             if relevance_score >= threshold:
                 relevant_caps.append((capability, relevance_score))
         
-        # Sort by relevance score and return capabilities
+        # Sort by relevance score and return capability names
         relevant_caps.sort(key=lambda x: x[1], reverse=True)
         return [cap for cap, score in relevant_caps]
     
-    def _is_likely_false_positive(self, proc_name: str, proc_body: str) -> bool:
-        """Check if procedure is likely a false positive using dynamic patterns"""
-        # Check against dynamically built false positive patterns
-        for pattern in self.false_positive_patterns:
-            if pattern.search(proc_name):
-                return True
-        
-        # Dynamic heuristics
-        if len(proc_body) < 100 and 'return' in proc_body:
-            return True
-        
-        # Check for too many generic keywords
-        generic_count = 0
-        for entry in self.keywords_data:
-            keywords = (entry.get('keywords', '') + ',' + entry.get('related_keywords', '')).lower()
-            generic_terms = ['data', 'process', 'handle', 'manage', 'system']
-            for term in generic_terms:
-                if term in keywords and term in proc_body:
-                    generic_count += 1
-        
-        if generic_count > 3 and len(proc_body) < 500:
-            return True
-        
-        return False
-    
-    def _create_minimal_match(self, procedure: Dict, reason: str) -> BusinessCapabilityMatch:
-        """Create minimal match for utility functions or false positives"""
-        return BusinessCapabilityMatch(
-            procedure_name=procedure['name'],
-            source_file=procedure['source_file'],
-            business_capabilities=[],
-            primary_keyword_matches=[],
-            related_keyword_matches=[],
-            fuzzy_matches=[],
-            semantic_matches=[],
-            confidence_score=0.0,
-            domain_context='utility',
-            procedural_patterns=[],
-            reasoning=reason,
-            validation_score=0.0,
-            evidence_strength={'direct': 0.0, 'code': 0.0, 'llm': 0.0, 'total': 0.0}
-        )
-    
     def _enhanced_llm_semantic_bridge(self, procedure: Dict, already_detected: List[str]) -> Dict:
-        """Enhanced LLM analysis using chunked keywords.json to avoid token limits"""
+        """Advanced semantic analysis using LLM with optimized token usage."""
         if not self.llm_provider or not self.llm_provider.is_available():
             return {}
         
-        # Create focused keyword entries based on procedure context
+        # TOKEN OPTIMIZATION: Create focused keyword entries based on procedure context
         proc_text = f"{procedure['name']} {procedure.get('full_context', '')[:1000]}".lower()
         
-        # Filter to most relevant keyword entries to reduce payload size
+        # SMART FILTERING: Select only relevant taxonomy entries to reduce payload size
         relevant_entries = []
         for entry in self.keywords_data:
-            # Check if any keywords from this entry appear in the procedure
+            # Extract all keywords from this entry
             all_keywords = (entry.get('keywords', '') + ',' + entry.get('related_keywords', '')).lower()
             keyword_list = [kw.strip() for kw in all_keywords.split(',') if kw.strip()]
             
-            # Include entry if any keywords match or if it has capabilities we haven't detected
+            # Include entry if it has keyword matches OR undetected capabilities
             has_keyword_match = any(kw in proc_text for kw in keyword_list if len(kw) > 3)
             has_undetected_caps = any(cap not in already_detected 
                                     for cap in entry.get('business_capability', []))
@@ -700,16 +908,17 @@ class DynamicCapabilityMatcher:
         # Limit to top 20 most relevant entries to stay under token limits
         relevant_entries = relevant_entries[:20]
         
-        # Create condensed taxonomy focused on procedure
-        focused_taxonomy = json.dumps(relevant_entries, indent=1)  # Minimal formatting
+        # Create condensed taxonomy with minimal formatting
+        focused_taxonomy = json.dumps(relevant_entries, indent=1)
         
-        # Truncate procedure context more aggressively 
-        max_code_length = 800  # Further reduced for token efficiency
+        # Truncate procedure context aggressively for token efficiency
+        max_code_length = 800
         code_context = procedure['full_context'][:max_code_length]
         if len(procedure['full_context']) > max_code_length:
             code_context += "\n... [truncated]"
         
-        prompt = f"""Analyze this TAL banking procedure against the relevant keywords taxonomy entries.
+        # STRUCTURED PROMPT: Clear instructions for consistent analysis
+        prompt = f"""Analyze this TAL payment procedure against the relevant keyword entries.
 
 RELEVANT TAXONOMY ENTRIES:
 {focused_taxonomy}
@@ -724,7 +933,7 @@ Code Context:
 ALREADY DETECTED: {', '.join(already_detected) if already_detected else 'None'}
 
 TASK:
-Review the taxonomy entries above and identify which business capabilities this procedure implements.
+Review the keword/taxonomy entries above and identify which business capabilities this procedure implements.
 Look for evidence in function calls, validation patterns, and processing logic.
 
 Focus on capabilities NOT already detected that have clear evidence in the code.
@@ -753,10 +962,11 @@ Be conservative - only high-confidence mappings with clear evidence.
 Respond with valid JSON only."""
         
         try:
+            # Make the LLM API call
             result = self.llm_provider.call_chat_completion(prompt, system_prompt)
             
             if isinstance(result, dict) and 'mapped_capabilities' in result:
-                # Extract and validate capabilities
+                # VALIDATION: Extract and validate returned capabilities
                 valid_capabilities = []
                 capability_details = []
                 
@@ -765,7 +975,7 @@ Respond with valid JSON only."""
                     confidence = mapping.get('confidence', 0.0)
                     evidence = mapping.get('evidence', '')
                     
-                    # Validate capability exists in our taxonomy
+                    # Ensure capability exists in our taxonomy and meets confidence threshold
                     all_capabilities = self.capability_extractor.get_all_capabilities()
                     if capability in all_capabilities and confidence >= 0.4:
                         valid_capabilities.append(capability)
@@ -787,7 +997,7 @@ Respond with valid JSON only."""
                     'primary_domain': result.get('primary_domain', 'unknown')
                 }
             elif isinstance(result, dict):
-                # Check for errors
+                # Handle API errors gracefully
                 if 'error' in result:
                     logger.warning(f"LLM API error for {procedure['name']}: {result['error']}")
                 else:
@@ -800,29 +1010,72 @@ Respond with valid JSON only."""
             logger.error(f"LLM semantic bridge failed for {procedure['name']}: {e}")
             return {}
     
+    def _is_likely_false_positive(self, proc_name: str, proc_body: str) -> bool:
+        """Detect procedures likely to produce false positive capability matches."""
+        # Check against dynamically built false positive patterns
+        for pattern in self.false_positive_patterns:
+            if pattern.search(proc_name):
+                return True
+        
+        # HEURISTIC 1: Very short procedures with simple return statements
+        if len(proc_body) < 100 and 'return' in proc_body:
+            return True
+        
+        # HEURISTIC 2: Procedures with too many generic keywords (potential noise)
+        generic_count = 0
+        for entry in self.keywords_data:
+            keywords = (entry.get('keywords', '') + ',' + entry.get('related_keywords', '')).lower()
+            generic_terms = ['data', 'process', 'handle', 'manage', 'system']
+            for term in generic_terms:
+                if term in keywords and term in proc_body:
+                    generic_count += 1
+        
+        if generic_count > 3 and len(proc_body) < 500:
+            return True
+        
+        return False
+    
+    def _create_minimal_match(self, procedure: Dict, reason: str) -> BusinessCapabilityMatch:
+        """Create a minimal match result for utility functions or false positives."""
+        return BusinessCapabilityMatch(
+            procedure_name=procedure['name'],
+            source_file=procedure['source_file'],
+            business_capabilities=[],
+            primary_keyword_matches=[],
+            related_keyword_matches=[],
+            fuzzy_matches=[],
+            semantic_matches=[],
+            confidence_score=0.0,
+            domain_context='utility',
+            procedural_patterns=[],
+            reasoning=reason,
+            validation_score=0.0,
+            evidence_strength={'direct': 0.0, 'code': 0.0, 'llm': 0.0, 'total': 0.0}
+        )
+    
     def _validate_and_combine_capabilities(self, direct_caps: List[str], code_caps: List[str], 
                                          llm_caps: List[str], proc_name: str, proc_body: str, 
                                          complexity_score: float) -> Set[str]:
-        """Validate and intelligently combine capabilities from different sources"""
-        
-        validated_caps = set(direct_caps)
+        """Intelligently combine capabilities from different analysis stages."""
+        validated_caps = set(direct_caps)  # Start with highest-confidence matches
         
         # Add code-detected capabilities with validation
         for cap in code_caps:
             specificity = self.capability_extractor.get_capability_specificity_score(cap)
+            # More specific capabilities get lower thresholds
             threshold = 0.3 if specificity > 0.5 else 0.6
             
             if complexity_score >= threshold:
                 validated_caps.add(cap)
         
-        # Add LLM capabilities with additional validation
+        # Add LLM capabilities with stricter validation
         for cap in llm_caps:
-            if complexity_score >= 1.0:
+            if complexity_score >= 1.0:  # LLM capabilities need higher complexity
                 validated_caps.add(cap)
         
         # Remove overly generic capabilities for simple procedures
         if complexity_score < 2.0:
-            # Dynamically identify generic capabilities based on frequency across domains
+            # Dynamically identify generic capabilities based on domain frequency
             generic_caps = set()
             for cap in validated_caps:
                 domains = self.capability_extractor.get_domains_for_capability(cap)
@@ -830,7 +1083,7 @@ Respond with valid JSON only."""
                     generic_caps.add(cap)
             validated_caps -= generic_caps
         
-        # Limit total capabilities based on complexity
+        # Limit total capabilities based on procedure complexity
         max_caps = max(3, int(complexity_score))
         if len(validated_caps) > max_caps:
             # Sort by specificity score (more specific capabilities prioritized)
@@ -838,25 +1091,24 @@ Respond with valid JSON only."""
                              for cap in validated_caps]
             cap_specificity.sort(key=lambda x: x[1], reverse=True)
             validated_caps = set([cap for cap, _ in cap_specificity[:max_caps]])
-                
+        
         return validated_caps
     
     def _calculate_enhanced_confidence(self, proc_name: str, proc_body: str, 
                                      direct_caps: List[str], code_caps: List[str], 
                                      llm_caps: List[str], llm_confidence: float,
                                      complexity_score: float) -> Dict[str, float]:
-        """Enhanced confidence calculation with detailed breakdown"""
-        
+        """Calculate detailed confidence scores with breakdown by evidence source."""
         confidence_details = {
-            'direct': 0.0,
-            'code': 0.0, 
-            'llm': 0.0,
-            'complexity_bonus': 0.0,
-            'specificity_bonus': 0.0,
-            'total': 0.0
+            'direct': 0.0,              # Confidence from direct name matching
+            'code': 0.0,                # Confidence from code analysis  
+            'llm': 0.0,                 # Confidence from LLM analysis
+            'complexity_bonus': 0.0,    # Bonus for high complexity procedures
+            'specificity_bonus': 0.0,   # Bonus for specific capabilities
+            'total': 0.0                # Combined total confidence
         }
         
-        # Direct mapping confidence
+        # Direct mapping confidence (highest weight due to high precision)
         if direct_caps:
             confidence_details['direct'] = min(len(direct_caps) * 0.4, 0.8)
         
@@ -866,15 +1118,15 @@ Respond with valid JSON only."""
                                 for cap in code_caps)
             confidence_details['code'] = min(specificity_sum * 0.3, 0.6)
         
-        # LLM confidence
+        # LLM confidence (variable based on LLM's own confidence assessment)
         if llm_caps and llm_confidence > 0:
             confidence_details['llm'] = min(len(llm_caps) * llm_confidence * 0.2, 0.4)
         
-        # Complexity bonus
+        # Complexity bonus for sophisticated procedures
         if complexity_score > 3.0:
             confidence_details['complexity_bonus'] = min((complexity_score - 3.0) * 0.1, 0.2)
         
-        # Calculate total
+        # Calculate total with diminishing returns
         base_confidence = confidence_details['direct'] + confidence_details['code'] + confidence_details['llm']
         bonuses = confidence_details['complexity_bonus'] + confidence_details['specificity_bonus']
         
@@ -884,17 +1136,17 @@ Respond with valid JSON only."""
     
     def _calculate_validation_score(self, proc_name: str, capabilities: List[str], 
                                    keyword_matches: Dict, complexity_score: float) -> float:
-        """Calculate validation quality score"""
+        """Calculate a validation quality score for the mapping."""
         score = 0.0
         
-        # Keyword match quality
+        # Factor 1: Keyword match quality
         primary_matches = len(keyword_matches.get('primary', []))
         related_matches = len(keyword_matches.get('related', []))
         
         score += primary_matches * 0.3
         score += related_matches * 0.1
         
-        # Capability-name alignment
+        # Factor 2: Capability-name alignment
         proc_words = set(proc_name.lower().replace('_', ' ').split())
         cap_alignment = 0
         
@@ -905,19 +1157,19 @@ Respond with valid JSON only."""
         
         score += cap_alignment * 0.2
         
-        # Complexity appropriateness
+        # Factor 3: Complexity appropriateness (right number of capabilities for complexity)
         expected_caps = max(1, int(complexity_score / 2))
         actual_caps = len(capabilities)
         
         if actual_caps <= expected_caps:
-            score += 0.3
+            score += 0.3  # Bonus for appropriate capability count
         else:
-            score -= (actual_caps - expected_caps) * 0.1
+            score -= (actual_caps - expected_caps) * 0.1  # Penalty for over-assignment
         
         return min(score, 1.0)
     
     def _get_enhanced_keyword_matches(self, searchable_text: str) -> Dict[str, List[str]]:
-        """Enhanced keyword matching with importance weighting"""
+        """Get detailed keyword matches with importance weighting for reporting."""
         matches = {'primary': [], 'related': [], 'fuzzy': [], 'important': []}
         
         for entry in self.keywords_data:
@@ -930,12 +1182,13 @@ Respond with valid JSON only."""
             matches['primary'].extend(primary_found)
             matches['related'].extend(related_found)
             
-            # Track high-importance matches
+            # Track high-importance matches for additional insight
             for kw in primary_found + related_found:
                 importance = self.keyword_importance_scores.get(kw, 1.0)
-                if importance > 2.0:
+                if importance > 2.0:  # High importance threshold
                     matches['important'].append(kw)
         
+        # Remove duplicates and add fuzzy matches
         matches['primary'] = list(set(matches['primary']))
         matches['related'] = list(set(matches['related']))
         matches['important'] = list(set(matches['important']))
@@ -944,31 +1197,34 @@ Respond with valid JSON only."""
         return matches
     
     def _find_enhanced_fuzzy_matches(self, text: str) -> List[str]:
-        """Enhanced fuzzy matching with better filtering"""
-        words = re.findall(r'\w{3,}', text.lower())
+        """Enhanced fuzzy matching with better filtering and validation."""
+        words = re.findall(r'\w{3,}', text.lower())  # Only words with 3+ characters
         fuzzy_matches = []
         
+        # Get all unique keywords for fuzzy matching
         all_keywords = set()
         for entry in self.keywords_data:
             keywords = entry.get('keywords', '') + ',' + entry.get('related_keywords', '')
             for kw in keywords.split(','):
                 kw = kw.strip().lower()
-                if len(kw) > 4:
+                if len(kw) > 4:  # Only fuzzy match longer keywords
                     all_keywords.add(kw)
         
+        # Find fuzzy matches with additional validation
         for keyword in all_keywords:
             close_matches = difflib.get_close_matches(keyword, words, n=1, cutoff=self.fuzzy_threshold)
             if close_matches:
                 matched_word = close_matches[0]
+                # Additional validation: check length similarity
                 length_ratio = min(len(keyword), len(matched_word)) / max(len(keyword), len(matched_word))
-                if length_ratio > 0.7:
+                if length_ratio > 0.7:  # Length similarity check
                     fuzzy_matches.append(keyword)
         
         return fuzzy_matches
     
     def _find_enhanced_domain_match(self, proc_name: str, proc_body: str, 
                                   capabilities: List[str]) -> str:
-        """Enhanced domain matching with multiple factors"""
+        """Enhanced domain matching with multiple factors and specificity weighting."""
         
         domain_scores = {}
         proc_text = f"{proc_name} {proc_body}".lower()
@@ -982,7 +1238,7 @@ Respond with valid JSON only."""
             
             score = 0.0
             
-            # Capability overlap (highest weight) - but prioritize primary capabilities
+            # Factor 1: Capability overlap with specificity weighting
             capability_overlap = len(set(capabilities) & set(domain_capabilities))
             if capability_overlap > 0:
                 # Bonus for having the most specific capabilities
@@ -990,7 +1246,7 @@ Respond with valid JSON only."""
                                       for cap in capabilities if cap in domain_capabilities)
                 score += capability_overlap * 3.0 + specificity_bonus
             
-            # Direct domain-procedure name alignment
+            # Factor 2: Direct domain-procedure name alignment  
             domain_name_parts = domain.lower().replace('-', ' ').split()
             proc_name_words = proc_name.lower().replace('_', ' ').split()
             
@@ -1002,7 +1258,7 @@ Respond with valid JSON only."""
                         elif domain_part in proc_word or proc_word in domain_part:
                             score += 2.0
             
-            # Keyword matches (medium weight)
+            # Factor 3: Keyword matches with importance weighting
             primary_kw = [kw.strip().lower() for kw in entry.get('keywords', '').split(',') if kw.strip()]
             related_kw = [kw.strip().lower() for kw in entry.get('related_keywords', '').split(',') if kw.strip()]
             
@@ -1019,6 +1275,7 @@ Respond with valid JSON only."""
             if score > 0:
                 domain_scores[domain] = score
         
+        # Return the highest-scoring domain
         if domain_scores:
             best_domain = max(domain_scores.keys(), key=lambda d: domain_scores[d])
             return best_domain
@@ -1026,7 +1283,7 @@ Respond with valid JSON only."""
         return 'unknown'
     
     def _detect_enhanced_procedural_patterns(self, proc_name: str, proc_body: str) -> List[str]:
-        """Enhanced procedural pattern detection using keywords.json data"""
+        """Detect procedural patterns using keywords.json data dynamically."""
         patterns = []
         name_lower = proc_name.lower()
         body_lower = proc_body.lower()
@@ -1037,7 +1294,7 @@ Respond with valid JSON only."""
             domain = entry.get('metadata', 'unknown')
             keywords = entry.get('keywords', '') + ',' + entry.get('related_keywords', '')
             
-            # Extract pattern-relevant keywords
+            # Extract pattern-relevant keywords from the taxonomy
             for keyword in keywords.split(','):
                 keyword = keyword.strip().lower()
                 if any(pattern_word in keyword for pattern_word in 
@@ -1059,7 +1316,7 @@ Respond with valid JSON only."""
     
     def _build_reasoning_explanation(self, direct_caps: List[str], code_caps: List[str], 
                                    llm_caps: List[str]) -> str:
-        """Build reasoning explanation for capability mapping"""
+        """Build human-readable explanation for capability mapping decisions."""
         parts = []
         
         if direct_caps:
@@ -1077,63 +1334,86 @@ Respond with valid JSON only."""
         return "; ".join(parts)
 
 class LLMProvider:
-    """LLM provider for semantic analysis"""
+    """
+    Handles communication with OpenAI's GPT-4 API for semantic analysis.
+    
+    This class provides:
+    - API communication with proper error handling
+    - Response caching to avoid duplicate API calls
+    - Token optimization and request management
+    - JSON parsing and validation
+    
+    The LLM component is optional - the system works without it using
+    only algorithmic approaches for capability detection.
+    """
     
     def __init__(self, model: str = "gpt-4", api_key: str = None):
+        """Initialize the LLM provider."""
         self.model = model
         self.api_key = api_key or os.getenv('OPENAI_API_KEY')
         self.base_url = "https://api.openai.com/v1"
+        
+        # Caching to avoid duplicate API calls for the same analysis
         self.cache = {}
-        self.request_count = 0
+        self.request_count = 0  # Track usage for monitoring
     
     def is_available(self) -> bool:
+        """Check if the LLM provider is properly configured and available."""
         return bool(self.api_key)
     
     def call_chat_completion(self, prompt: str, system_prompt: str = None) -> Dict:
-        """Make OpenAI API call with caching"""
+        """Make an OpenAI API call with caching and error handling."""
         if not self.is_available():
-            return {"error": "API not available"}
+            return {"error": "API not available - check OPENAI_API_KEY environment variable"}
         
+        # CACHING: Check if we've already analyzed this exact request
         cache_key = hash(f"{prompt}_{system_prompt}")
         if cache_key in self.cache:
             return self.cache[cache_key]
         
         try:
+            # Prepare the API request
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             }
             
+            # Build the message array
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
             
+            # API request payload
             payload = {
                 "model": self.model,
                 "messages": messages,
-                "max_tokens": 500,
-                "temperature": 0.1
+                "max_tokens": 500,        # Limit for cost control
+                "temperature": 0.1        # Low temperature for consistent results
             }
             
+            # Make the API call
             response = requests.post(
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=60
+                timeout=60  # 60 second timeout
             )
             
-            self.request_count += 1
+            self.request_count += 1  # Track usage
             
+            # Process the response
             if response.status_code == 200:
                 result = response.json()
                 if 'choices' in result and result['choices']:
                     content = result['choices'][0]['message']['content']
                     try:
+                        # Parse the JSON response
                         parsed_result = json.loads(content)
-                        self.cache[cache_key] = parsed_result
+                        self.cache[cache_key] = parsed_result  # Cache successful results
                         return parsed_result
                     except json.JSONDecodeError:
+                        # Return error with raw content for debugging
                         return {"error": "Invalid JSON response", "raw_content": content}
             
             return {"error": f"API error: {response.status_code}"}
@@ -1142,30 +1422,65 @@ class LLMProvider:
             return {"error": f"Request failed: {str(e)}"}
 
 def main():
-    parser = argparse.ArgumentParser(description="Dynamic TAL Procedure to Business Capability Mapper")
-    parser.add_argument("input_path", help="Input TAL file or directory")
-    parser.add_argument("-k", "--keywords", required=True, help="Keywords JSON file with business capabilities")
-    parser.add_argument("-o", "--output", default="procedure_capability_mapping.json", help="Output mapping file")
-    parser.add_argument("--min-confidence", type=float, default=0.2, help="Minimum confidence threshold")
-    parser.add_argument("--use-llm", action="store_true", help="Enable LLM semantic analysis")
-    parser.add_argument("--llm-model", default="gpt-4", help="OpenAI model to use")
-    parser.add_argument("--fuzzy-threshold", type=float, default=0.85, help="Fuzzy matching threshold")
+    """
+    Main execution function - orchestrates the entire analysis process.
+    
+    This function:
+    1. Parses command line arguments
+    2. Loads and validates the keywords.json taxonomy
+    3. Initializes all system components
+    4. Processes TAL source files
+    5. Generates comprehensive output with statistics
+    6. Provides monitoring and debugging information
+    
+    The system is designed to handle both individual files and large
+    repository-scale analysis with appropriate performance monitoring.
+    """
+    # COMMAND LINE INTERFACE: Define all available options
+    parser = argparse.ArgumentParser(
+        description="Dynamic TAL Procedure to Business Capability Mapper",
+        epilog="""
+This system analyzes TAL payments/wire processing procedures and maps them to business capabilities
+defined in a keywords.json taxonomy. It uses multiple analysis techniques including
+keyword matching, semantic analysis, and optional AI-powered understanding.
+
+Example usage:
+  python <this>.py /path/to/dir -k keywords.json --use-llm
+  python <this>.py single_file.tal -k keywords.json --min-confidence 0.7
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument("input_path", help="Input TAL file or directory to analyze")
+    parser.add_argument("-k", "--keywords", required=True, 
+                       help="Keywords JSON file containing business capability taxonomy")
+    parser.add_argument("-o", "--output", default="procedure_capability_mapping.json", 
+                       help="Output file for mapping results (default: procedure_capability_mapping.json)")
+    parser.add_argument("--min-confidence", type=float, default=0.2, 
+                       help="Minimum confidence threshold for capability inclusion (default: 0.2)")
+    parser.add_argument("--use-llm", action="store_true", 
+                       help="Enable LLM semantic analysis using OpenAI GPT-4 (requires OPENAI_API_KEY)")
+    parser.add_argument("--llm-model", default="gpt-4", 
+                       help="OpenAI model to use for semantic analysis (default: gpt-4)")
+    parser.add_argument("--fuzzy-threshold", type=float, default=0.85, 
+                       help="Fuzzy string matching threshold (default: 0.85)")
     
     args = parser.parse_args()
     
-    # Load keywords data
+    # TAXONOMY LOADING: Load and validate the keywords.json file
     try:
         with open(args.keywords, 'r', encoding='utf-8') as f:
             keywords_data = json.load(f)
+        logger.info(f"Loaded taxonomy with {len(keywords_data)} entries from {args.keywords}")
     except Exception as e:
         print(f"Error loading keywords file: {e}")
         return 1
     
-    # Initialize components
+    # COMPONENT INITIALIZATION: Set up all analysis components
     procedure_parser = EnhancedProcedureParser()
     capability_matcher = DynamicCapabilityMatcher(keywords_data, args.fuzzy_threshold)
     
-    # Initialize LLM if requested
+    # LLM SETUP: Initialize optional LLM component
     llm_provider = None
     if args.use_llm:
         llm_provider = LLMProvider(model=args.llm_model)
@@ -1174,32 +1489,36 @@ def main():
             print(f"LLM provider initialized: {args.llm_model}")
         else:
             print("Warning: LLM requested but API key not found. Set OPENAI_API_KEY environment variable.")
+            print("Continuing with keyword-based analysis only.")
     
-    # Process input files
+    # FILE DISCOVERY: Find all TAL files to process
     input_path = Path(args.input_path)
     files_to_process = []
     
     if input_path.is_file():
         files_to_process = [input_path]
     elif input_path.is_dir():
+        # Search for common TAL file extensions
         for pattern in ['*.tal', '*.TAL', '*.ast', '*.AST']:
             files_to_process.extend(input_path.rglob(pattern))
-        files_to_process = list(set(files_to_process))
+        files_to_process = list(set(files_to_process))  # Remove duplicates
     else:
         print(f"Error: Input path {input_path} not found")
         return 1
     
     print(f"Processing {len(files_to_process)} files...")
     
-    # Extract procedures and map to capabilities
+    # PROCEDURE EXTRACTION: Parse all TAL files to extract procedures
     all_procedures = []
-    global_procedure_names = set()
+    global_procedure_names = set()  # Global deduplication across all files
     
     for file_path in files_to_process:
         try:
+            # Read file with error handling for encoding issues
             content = file_path.read_text(encoding='utf-8', errors='ignore')
             procedures = procedure_parser.extract_procedures(content, str(file_path))
             
+            # Global deduplication to handle procedures appearing in multiple files
             unique_procedures = []
             for proc in procedures:
                 if proc['name'] not in global_procedure_names:
@@ -1210,36 +1529,41 @@ def main():
             
             all_procedures.extend(unique_procedures)
             print(f"Extracted {len(unique_procedures)} unique procedures from {file_path.name}")
+            
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
     
     print(f"Total unique procedures found: {len(all_procedures)}")
     
-    # Map each procedure to business capabilities
+    # CAPABILITY MAPPING: Analyze each procedure for business capabilities
     capability_mappings = []
     for i, procedure in enumerate(all_procedures, 1):
         print(f"Analyzing procedure {i}/{len(all_procedures)}: {procedure['name']}")
         
+        # Perform the multi-stage capability analysis
         capability_match = capability_matcher.match_procedure_to_capabilities(
             procedure, args.min_confidence
         )
         
+        # Process results and provide user feedback
         if capability_match.business_capabilities:
             print(f"  → Mapped to {len(capability_match.business_capabilities)} capabilities")
             print(f"  → Confidence: {capability_match.confidence_score:.3f}")
             print(f"  → Domain: {capability_match.domain_context}")
             
+            # Show top capabilities for user feedback
             top_caps = capability_match.business_capabilities[:4]
             if top_caps:
                 print(f"  → Top capabilities: {', '.join(top_caps)}")
                 if len(capability_match.business_capabilities) > 4:
                     print(f"    ... and {len(capability_match.business_capabilities)-4} more")
             
-            # Extract LLM details if available
+            # Extract LLM analysis details if available
             llm_analysis = {}
             if hasattr(capability_match, 'llm_analysis') and capability_match.llm_analysis:
                 llm_analysis = capability_match.llm_analysis
             
+            # Build comprehensive mapping record
             capability_mappings.append({
                 "procedure_name": capability_match.procedure_name,
                 "source_file": capability_match.source_file,
@@ -1261,13 +1585,13 @@ def main():
         else:
             print(f"  → No capabilities mapped (confidence too low)")
     
-    # Generate summary statistics
+    # STATISTICS GENERATION: Calculate comprehensive coverage metrics
     total_capabilities = capability_matcher.capability_extractor.get_all_capabilities()
     mapped_capabilities = set()
     for mapping in capability_mappings:
         mapped_capabilities.update(mapping["business_capabilities"])
     
-    # Create output structure
+    # BUILD OUTPUT STRUCTURE: Comprehensive results with metadata
     output_data = {
         "metadata": {
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1282,7 +1606,8 @@ def main():
             "mapped_business_capabilities": len(mapped_capabilities),
             "coverage_percentage": round((len(mapped_capabilities) / len(total_capabilities)) * 100, 1) if total_capabilities else 0,
             "dynamic_mapping": True,
-            "hard_coded_mappings": False
+            "hard_coded_mappings": False,
+            "system_version": "1.0 - Enhanced Dynamic Capability Mapper"
         },
         "business_capability_summary": {
             "all_capabilities": sorted(list(total_capabilities)),
@@ -1292,7 +1617,7 @@ def main():
         "procedure_mappings": sorted(capability_mappings, key=lambda x: x["confidence_score"], reverse=True)
     }
     
-    # Add LLM usage stats if available
+    # Add LLM usage statistics if available
     if llm_provider:
         output_data["llm_usage"] = {
             "requests_made": llm_provider.request_count,
@@ -1300,7 +1625,7 @@ def main():
             "model_used": llm_provider.model
         }
     
-    # Write output file
+    # RESULTS EXPORT: Write comprehensive output file
     try:
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(output_data, f, indent=2, ensure_ascii=False)
@@ -1309,7 +1634,7 @@ def main():
         print(f"Error saving output file: {e}")
         return 1
     
-    # Print summary
+    # FINAL REPORTING: User-friendly summary
     print(f"\n{'='*60}")
     print("DYNAMIC PROCEDURE TO BUSINESS CAPABILITY MAPPING COMPLETE")
     print(f"{'='*60}")
@@ -1319,6 +1644,7 @@ def main():
     print(f"Business capabilities covered: {len(mapped_capabilities)}/{len(total_capabilities)} ({output_data['metadata']['coverage_percentage']}%)")
     print(f"Dynamic mapping (no hard-coded rules): ✓")
     
+    # Show top results for immediate feedback
     if capability_mappings:
         print(f"\nTop procedure mappings:")
         for i, mapping in enumerate(capability_mappings[:5], 1):
@@ -1327,6 +1653,7 @@ def main():
                 caps_str += f" (+{len(mapping['business_capabilities'])-3} more)"
             print(f"{i}. {mapping['procedure_name']} → {caps_str} (conf: {mapping['confidence_score']:.3f})")
     
+    # Show unmapped capabilities for taxonomy improvement guidance
     if output_data['business_capability_summary']['unmapped_capabilities']:
         print(f"\nUnmapped capabilities: {len(output_data['business_capability_summary']['unmapped_capabilities'])}")
         for cap in output_data['business_capability_summary']['unmapped_capabilities'][:5]:
