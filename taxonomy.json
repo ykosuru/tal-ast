@@ -1,0 +1,660 @@
+{
+  "wire_transfer_business_capabilities_taxonomy": {
+    "description": "Organizes business capabilities for wire transfer and payment processing, including ISO 20022-specific capabilities from Federal Reserve, CHIPS, and SWIFT",
+    "version": "1.0",
+    "categories": [
+      {
+        "id": "1",
+        "name": "Payment Initiation and Execution",
+        "description": "Capabilities related to starting, prioritizing, and completing payment transactions",
+        "subcategories": [
+          {
+            "id": "1.1",
+            "name": "Initiation",
+            "capabilities": [
+              {
+                "name": "Payment Initiation",
+                "description": "Starting a wire transfer or payment instruction",
+                "standards": []
+              },
+              {
+                "name": "Method of Payment",
+                "description": "Specifying payment methods (e.g., wire, ACH)",
+                "standards": []
+              },
+              {
+                "name": "Payment Tier Assignment",
+                "description": "Assigning priority tiers to payments",
+                "standards": []
+              },
+              {
+                "name": "Payment Prioritization",
+                "description": "Determining processing order based on urgency or rules",
+                "standards": []
+              },
+              {
+                "name": "Customer Credit Transfer Initiation",
+                "description": "Initiating credit transfers using pain.001 messages",
+                "standards": ["FedISO", "SWIFT ISO"]
+              },
+              {
+                "name": "Request for Payment",
+                "description": "Sending payment requests via pain.013 messages",
+                "standards": ["FedISO", "SWIFT ISO"]
+              },
+              {
+                "name": "Customer Payment Initiation",
+                "description": "Using pain.001 for customer-initiated payments, with structured data for originator details",
+                "standards": ["SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          },
+          {
+            "id": "1.2",
+            "name": "Routing",
+            "capabilities": [
+              {
+                "name": "Payment Routing",
+                "description": "Determining the path for payment transfer (e.g., via SWIFT, Fedwire, CHIPS)",
+                "standards": []
+              },
+              {
+                "name": "Message Routing",
+                "description": "Directing payment messages to appropriate systems or networks",
+                "standards": []
+              },
+              {
+                "name": "Intermediary Banks",
+                "description": "Managing banks facilitating transfers between originator and beneficiary",
+                "standards": []
+              },
+              {
+                "name": "Correspondent Banks",
+                "description": "Handling relationships with banks for cross-border payments",
+                "standards": []
+              },
+              {
+                "name": "Financial Institution Credit Transfer",
+                "description": "Routing credit transfers via pacs.009 messages",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "High-Value Payment Routing",
+                "description": "Routing high-value USD payments via CHIPS with ISO 20022 interoperability",
+                "standards": ["CHIPS ISO"]
+              }
+            ]
+          },
+          {
+            "id": "1.3",
+            "name": "Processing",
+            "capabilities": [
+              {
+                "name": "Straight Through Processing",
+                "description": "Automating payment processing without manual intervention",
+                "standards": []
+              },
+              {
+                "name": "Pay Through Payment",
+                "description": "Processing payments through intermediary accounts",
+                "standards": []
+              },
+              {
+                "name": "Book Transfer Payment",
+                "description": "Transferring funds within the same financial institution",
+                "standards": []
+              },
+              {
+                "name": "Payment Warehousing",
+                "description": "Storing payments for scheduled or future processing",
+                "standards": []
+              },
+              {
+                "name": "Real-Time Payment Processing",
+                "description": "Processing payments instantly using FedNow ISO 20022 messages",
+                "standards": ["FedISO"]
+              },
+              {
+                "name": "High-Value Payment Processing",
+                "description": "Processing high-value payments with richer data and transparency",
+                "standards": ["CHIPS ISO"]
+              }
+            ]
+          },
+          {
+            "id": "1.4",
+            "name": "Advising",
+            "capabilities": [
+              {
+                "name": "Pre Advise",
+                "description": "Sending preliminary payment notifications",
+                "standards": []
+              },
+              {
+                "name": "Split Advice",
+                "description": "Dividing payment notifications into multiple messages",
+                "standards": []
+              },
+              {
+                "name": "Split Advising",
+                "description": "Distributing advice messages across parties",
+                "standards": []
+              },
+              {
+                "name": "Cover Payments",
+                "description": "Managing payments that involve cover instructions for intermediaries",
+                "standards": []
+              },
+              {
+                "name": "Payment Status Report",
+                "description": "Sending status updates via pacs.002 messages",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "2",
+        "name": "Validation and Verification",
+        "description": "Capabilities for ensuring payments and parties meet regulatory and operational requirements",
+        "subcategories": [
+          {
+            "id": "2.1",
+            "name": "Party Validation",
+            "capabilities": [
+              {
+                "name": "Credit Party Validation",
+                "description": "Verifying beneficiary details (e.g., name, account, Creditor element in pacs.008)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Debit Party Validation",
+                "description": "Verifying originator details (e.g., account, authorization, Debtor element in pacs.008)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Beneficiary",
+                "description": "Validating the recipient of funds",
+                "standards": []
+              },
+              {
+                "name": "Creditor",
+                "description": "Confirming creditor details for payment obligations",
+                "standards": []
+              },
+              {
+                "name": "Debtor",
+                "description": "Validating the party initiating the payment",
+                "standards": []
+              },
+              {
+                "name": "Party Identification",
+                "description": "Validating structured party identifiers (e.g., LEI, BIC) per ISO 20022, including sanctions screening support",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          },
+          {
+            "id": "2.2",
+            "name": "Account Validation",
+            "capabilities": [
+              {
+                "name": "Account Validation",
+                "description": "Checking account details (e.g., IBAN, routing number, AccountIdentification in pacs.008)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Account Lookup",
+                "description": "Retrieving account information for validation or processing",
+                "standards": []
+              }
+            ]
+          },
+          {
+            "id": "2.3",
+            "name": "Payment Validation",
+            "capabilities": [
+              {
+                "name": "Payment Validation",
+                "description": "Ensuring payment instructions are complete and valid",
+                "standards": []
+              },
+              {
+                "name": "Business Rule Validation",
+                "description": "Applying business-specific rules to payments",
+                "standards": []
+              },
+              {
+                "name": "Business Duplicate Check",
+                "description": "Detecting duplicate payment instructions (e.g., via TransactionIdentification)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Value Date Validation",
+                "description": "Verifying the date for payment settlement",
+                "standards": []
+              },
+              {
+                "name": "Future Date Validation",
+                "description": "Checking validity of future-dated payments",
+                "standards": []
+              }
+            ]
+          },
+          {
+            "id": "2.4",
+            "name": "Message Validation",
+            "capabilities": [
+              {
+                "name": "Message Schema Validation",
+                "description": "Ensuring message structure complies with ISO 20022 schemas (e.g., pacs.008, pain.001)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Message Format Validation",
+                "description": "Validating message format for Fedwire/FedNow/CHIPS/SWIFT compliance, including CBPR+ guidelines and error codes",
+                "standards": ["SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Remittance Information Validation",
+                "description": "Checking structured remittance data in RemittanceInformation element, with extended data support",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "3",
+        "name": "Messaging and Integration",
+        "description": "Capabilities for handling payment messages and integrating with external networks",
+        "subcategories": [
+          {
+            "id": "3.1",
+            "name": "Message Generation",
+            "capabilities": [
+              {
+                "name": "Message ID Generation",
+                "description": "Creating unique identifiers for payment messages (e.g., MessageIdentification in ISO 20022)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Message Format Transformation",
+                "description": "Converting messages between formats (e.g., SWIFT MT to ISO 20022 pacs.008)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Payment Cancellation Request",
+                "description": "Generating camt.056 messages for payment cancellation",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Resolution of Investigation",
+                "description": "Generating camt.029 messages for investigation responses",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "MT to MX Translation",
+                "description": "Converting legacy MT messages (e.g., MT103 to pacs.008, MT202 to pacs.009) during coexistence",
+                "standards": ["SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          },
+          {
+            "id": "3.2",
+            "name": "Network Integration",
+            "capabilities": [
+              {
+                "name": "Fed Integration",
+                "description": "Connecting with Fedwire/FedNow for domestic payments",
+                "standards": ["FedISO"]
+              },
+              {
+                "name": "SWIFT Integration",
+                "description": "Interfacing with SWIFT for cross-border payments, including CBPR+ and HVPS+ guidelines",
+                "standards": ["SWIFT ISO"]
+              },
+              {
+                "name": "CHIPS Integration",
+                "description": "Integrating with CHIPS for clearinghouse payments, with ISO 20022 for high-value USD",
+                "standards": ["CHIPS ISO"]
+              },
+              {
+                "name": "Inbound Fed",
+                "description": "Processing incoming Fedwire/FedNow payments using ISO 20022",
+                "standards": ["FedISO"]
+              },
+              {
+                "name": "Outbound Fed",
+                "description": "Sending payments via Fedwire/FedNow using ISO 20022",
+                "standards": ["FedISO"]
+              },
+              {
+                "name": "Inbound SWIFT",
+                "description": "Handling incoming SWIFT messages",
+                "standards": ["SWIFT ISO"]
+              },
+              {
+                "name": "Outbound SWIFT",
+                "description": "Sending SWIFT messages",
+                "standards": ["SWIFT ISO"]
+              },
+              {
+                "name": "Inbound CHIPS",
+                "description": "Processing incoming CHIPS payments",
+                "standards": ["CHIPS ISO"]
+              },
+              {
+                "name": "Outbound CHIPS",
+                "description": "Sending payments via CHIPS",
+                "standards": ["CHIPS ISO"]
+              },
+              {
+                "name": "Network",
+                "description": "Managing connectivity with payment networks, including translation without truncation for interoperability",
+                "standards": ["CHIPS ISO", "SWIFT ISO"]
+              }
+            ]
+          },
+          {
+            "id": "3.3",
+            "name": "Acknowledgements",
+            "capabilities": [
+              {
+                "name": "Channel Acknowledgement",
+                "description": "Confirming receipt of payment instructions via channels",
+                "standards": []
+              },
+              {
+                "name": "Confirmations",
+                "description": "Sending confirmation of payment processing or completion",
+                "standards": []
+              },
+              {
+                "name": "Payment Status Notification",
+                "description": "Notifying status via camt.054 messages",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "4",
+        "name": "Compliance and Fraud Prevention",
+        "description": "Capabilities for regulatory compliance and fraud detection",
+        "subcategories": [
+          {
+            "id": "4.1",
+            "name": "Regulatory Compliance",
+            "capabilities": [
+              {
+                "name": "Dodd Frank",
+                "description": "Complying with Dodd-Frank Act regulations for payments",
+                "standards": []
+              },
+              {
+                "name": "Anti Money Laundering",
+                "description": "Implementing AML checks for transactions",
+                "standards": []
+              },
+              {
+                "name": "Sanctions Screening",
+                "description": "Checking payments against sanctions lists (e.g., OFAC, using RegulatoryReporting element)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Sanctions Ring Fencing",
+                "description": "Isolating transactions to comply with sanctions",
+                "standards": []
+              }
+            ]
+          },
+          {
+            "id": "4.2",
+            "name": "Fraud Detection",
+            "capabilities": [
+              {
+                "name": "Fraud Monitoring",
+                "description": "Monitoring transactions for fraudulent activity",
+                "standards": []
+              },
+              {
+                "name": "Anomaly Detection",
+                "description": "Identifying unusual payment patterns (e.g., via TransactionInformation analysis)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "5",
+        "name": "Liquidity and Funds Management",
+        "description": "Capabilities for managing funds availability and financial institution liquidity",
+        "subcategories": [
+          {
+            "id": "5.1",
+            "name": "Liquidity Checks",
+            "capabilities": [
+              {
+                "name": "Intraday Bank Liquidity Check",
+                "description": "Verifying intraday liquidity for transactions",
+                "standards": []
+              },
+              {
+                "name": "Liquidity Check",
+                "description": "Ensuring sufficient funds for payment processing",
+                "standards": []
+              },
+              {
+                "name": "Liquidity Authorization",
+                "description": "Authorizing payments based on liquidity availability",
+                "standards": []
+              },
+              {
+                "name": "Funds Control",
+                "description": "Managing fund allocation for payments",
+                "standards": []
+              }
+            ]
+          },
+          {
+            "id": "5.2",
+            "name": "Foreign Exchange",
+            "capabilities": [
+              {
+                "name": "FX",
+                "description": "Handling foreign exchange for cross-border payments",
+                "standards": []
+              },
+              {
+                "name": "FX Rates",
+                "description": "Applying exchange rates to transactions (e.g., CurrencyAmount in pacs.008)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "FXAC",
+                "description": "Managing foreign exchange account conversions",
+                "standards": []
+              }
+            ]
+          },
+          {
+            "id": "5.3",
+            "name": "Posting",
+            "capabilities": [
+              {
+                "name": "Account Posting",
+                "description": "Recording transactions to accounts",
+                "standards": []
+              },
+              {
+                "name": "Memo Posting",
+                "description": "Temporary recording of transactions",
+                "standards": []
+              },
+              {
+                "name": "Hard Posting",
+                "description": "Finalizing transaction postings",
+                "standards": []
+              },
+              {
+                "name": "General Ledger",
+                "description": "Updating the general ledger with transaction data (e.g., using camt.053 for account statements)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "6",
+        "name": "Operations and Exceptions",
+        "description": "Capabilities for operational processes, exception handling, and pricing",
+        "subcategories": [
+          {
+            "id": "6.1",
+            "name": "Operational Processes",
+            "capabilities": [
+              {
+                "name": "Start of Day",
+                "description": "Initiating daily payment processing activities",
+                "standards": []
+              },
+              {
+                "name": "SOD",
+                "description": "Initiating daily payment processing activities",
+                "standards": []
+              },
+              {
+                "name": "End of Day",
+                "description": "Completing daily payment processing and reconciliation",
+                "standards": []
+              },
+              {
+                "name": "EOD",
+                "description": "Completing daily payment processing and reconciliation",
+                "standards": []
+              },
+              {
+                "name": "Payment Tracking",
+                "description": "Monitoring payment status across systems (e.g., via GroupHeader tracking fields)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Reference Data",
+                "description": "Managing data for payment processing (e.g., BIC, IBAN)",
+                "standards": []
+              },
+              {
+                "name": "Operator UI",
+                "description": "Providing interfaces for manual payment operations",
+                "standards": []
+              }
+            ]
+          },
+          {
+            "id": "6.2",
+            "name": "Exception Handling",
+            "capabilities": [
+              {
+                "name": "Payment Return",
+                "description": "Processing returned payments (e.g., via pacs.004)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Payment Investigation",
+                "description": "Investigating payment issues or disputes (e.g., using camt.029)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Exceptions",
+                "description": "Managing payment exceptions",
+                "standards": []
+              },
+              {
+                "name": "Manual Repair",
+                "description": "Manually correcting payment issues",
+                "standards": []
+              },
+              {
+                "name": "Auto Repair",
+                "description": "Automatically resolving payment errors",
+                "standards": []
+              },
+              {
+                "name": "Message Replay",
+                "description": "Re-sending payment messages",
+                "standards": []
+              },
+              {
+                "name": "Repairs",
+                "description": "General correction of payment issues",
+                "standards": []
+              },
+              {
+                "name": "Killswitch",
+                "description": "Emergency stop for payment processing",
+                "standards": []
+              },
+              {
+                "name": "Payment Cancel",
+                "description": "Canceling payment instructions (e.g., via camt.056)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              }
+            ]
+          },
+          {
+            "id": "6.3",
+            "name": "Payment Rules",
+            "capabilities": [
+              {
+                "name": "Payment Rules",
+                "description": "Applying rules for payment processing",
+                "standards": []
+              },
+              {
+                "name": "Routing",
+                "description": "Determining routing paths based on rules",
+                "standards": []
+              }
+            ]
+          },
+          {
+            "id": "6.4",
+            "name": "Pricing and Billing",
+            "capabilities": [
+              {
+                "name": "Pricing",
+                "description": "Determining payment processing fees",
+                "standards": []
+              },
+              {
+                "name": "Fee Calculation",
+                "description": "Calculating transaction fees (e.g., using ChargesInformation)",
+                "standards": ["FedISO", "SWIFT ISO", "CHIPS ISO"]
+              },
+              {
+                "name": "Billing",
+                "description": "Generating invoices for payment services",
+                "standards": []
+              },
+              {
+                "name": "Product Lookup",
+                "description": "Retrieving product details for pricing",
+                "standards": []
+              },
+              {
+                "name": "Product Qualification",
+                "description": "Determining eligibility for payment products",
+                "standards": []
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
