@@ -1,0 +1,934 @@
+[
+  {
+    "keywords": "wire transfer,electronic transfer,funds transfer",
+    "metadata": "payment-systems",
+    "description": "Electronic transfer of funds between financial institutions via systems like Fedwire, SWIFT, or CHIPS",
+    "related_keywords": "domestic wire,international wire,high-value payment,same-day settlement,real-time payment,electronic funds transfer,EFT,wire payment,urgent payment,priority payment",
+    "business_capability": [
+      "Payment Initiation",
+      "Payment Routing",
+      "Payment Processing",
+      "Cross-Border Payment",
+      "Book Transfer Payment",
+      "Inbound CHIPS",
+      "Outbound CHIPS",
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Inbound Fed",
+      "Outbound Fed"
+    ]
+  },
+  {
+    "keywords": "debit party,debtor,payer,originator",
+    "metadata": "payment-parties",
+    "description": "Entity or individual whose account is debited to initiate a wire transfer",
+    "related_keywords": "sender,remitter,ordering customer,ordering party,account holder,wire originator,payment initiator,source account,sending party,debit authorization",
+    "business_capability": [
+      "Debit Party Validation",
+      "Debtor",
+      "Payment Initiation"
+    ]
+  },
+  {
+    "keywords": "credit party,creditor,payee,beneficiary",
+    "metadata": "payment-parties",
+    "description": "Entity or individual whose account receives funds in a wire transfer",
+    "related_keywords": "receiver,recipient,beneficiary customer,receiving party,destination account,credit beneficiary,final beneficiary,end recipient,payee account,credit authorization",
+    "business_capability": [
+      "Credit Party Validation",
+      "Creditor",
+      "Beneficiary",
+      "Payment Processing"
+    ]
+  },
+  {
+    "keywords": "intermediary bank,correspondent bank,instructing agent",
+    "metadata": "banking-network",
+    "description": "Financial institutions facilitating transfers between debit and credit parties",
+    "related_keywords": "correspondent banking,correspondent relationship,agent bank,intermediary financial institution,transit bank,routing bank,covering bank,clearing bank,correspondent agreement,banking network",
+    "business_capability": [
+      "Intermediary Banks",
+      "Correspondent Banks",
+      "Payment Routing",
+      "Cover Payments"
+    ]
+  },
+  {
+    "keywords": "ultimate debtor,ultimate creditor",
+    "metadata": "payment-parties",
+    "description": "Original party responsible for payment or final recipient of funds",
+    "related_keywords": "underlying customer,actual originator,actual beneficiary,end customer,final customer,true originator,true beneficiary,underlying party,actual party,client customer",
+    "business_capability": [
+      "Ultimate Debtor",
+      "Ultimate Creditor",
+      "Debit Party Validation",
+      "Credit Party Validation"
+    ]
+  },
+  {
+    "keywords": "pre-advice,split advice,preliminary notification",
+    "metadata": "payment-messaging",
+    "description": "Preliminary notifications or split messages for upcoming wire transfers",
+    "related_keywords": "advance notice,preliminary message,payment notification,incoming advice,expected payment,pre-notification,wire advice,payment alert,anticipated transfer,expected wire",
+    "business_capability": [
+      "Pre Advise",
+      "Split Advice",
+      "Split Advising",
+      "Confirmations"
+    ]
+  },
+  {
+    "keywords": "cover payments,MT202COV,pacs.009",
+    "metadata": "payment-types",
+    "description": "Payments using intermediary banks to cover transfers, common in cross-border transactions",
+    "related_keywords": "covered wire,cover arrangement,correspondent cover,covering payment,indirect payment,two-step payment,nostro cover,cover instruction,covering bank payment,correspondent funding",
+    "business_capability": [
+      "Cover Payments",
+      "Cross-Border Payment"
+    ]
+  },
+  {
+    "keywords": "routing rules,routing criteria,payment routing",
+    "metadata": "payment-processing",
+    "description": "Predefined logic for determining wire transfer paths based on cost, speed, or compliance",
+    "related_keywords": "routing logic,routing matrix,routing table,routing engine,payment routing,channel routing,routing algorithm,routing decision,routing configuration,automatic routing,routing hierarchy,straight-through routing",
+    "business_capability": [
+      "Payment Routing",
+      "Message Routing",
+      "Routing",
+      "Payment Rules"
+    ]
+  },
+  {
+    "keywords": "validation,verification,compliance check",
+    "metadata": "security-compliance",
+    "description": "Verification of payment details for accurate and secure processing",
+    "related_keywords": "account validation,routing number validation,SWIFT BIC validation,IBAN validation,message validation,format validation,field validation,data validation,beneficiary validation,sanctions screening,compliance validation",
+    "business_capability": [
+      "Payment Validation",
+      "Account Validation",
+      "Credit Party Validation",
+      "Debit Party Validation",
+      "Business Rule Validation",
+      "Message Schema Validation",
+      "Message Format Validation",
+      "Value Date Validation",
+      "Future Date Validation"
+    ]
+  },
+  {
+    "keywords": "ISO 20022,pacs,pain,camt,remt",
+    "metadata": "messaging-standards",
+    "description": "Global standard for financial messaging with structured data-rich formats",
+    "related_keywords": "FedISO,SWIFTISO,CHIPSISO,ISO messaging,structured messaging,XML messaging,ISO format,ISO standard,financial messaging standard,rich data messaging",
+    "business_capability": [
+      "Message Format Transformation",
+      "Message Schema Validation",
+      "Message Format Validation"
+    ]
+  },
+  {
+    "keywords": "MT100,customer transfer,customer payment order",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT100 customer transfer message, equivalent to pain.001 in ISO 20022",
+    "related_keywords": "customer instruction,payment order,customer wire instruction,MT100 message,customer payment instruction,pain.001 equivalent,wire order",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT"
+    ]
+  },
+  {
+    "keywords": "MT101,request for transfer,customer payment request",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT101 customer payment request message, equivalent to pain.001 in ISO 20022",
+    "related_keywords": "payment request,customer request,wire request,MT101 message,customer transfer request,pain.001 equivalent,batch payment request",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT"
+    ]
+  },
+  {
+    "keywords": "MT102,multiple customer transfer,bulk payment",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT102 for multiple customer transfers, equivalent to pain.001 in ISO 20022",
+    "related_keywords": "bulk transfer,multiple payments,batch wire,MT102 message,multiple customer payments,pain.001 equivalent,bulk customer transfer",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT"
+    ]
+  },
+  {
+    "keywords": "MT103,single customer transfer,customer credit transfer,pacs.008",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT103 single customer credit transfer, equivalent to pacs.008 in ISO 20022 and Fedwire Format 1000",
+    "related_keywords": "customer wire,outgoing wire,credit transfer,customer payment,retail wire,commercial wire,customer-initiated wire,outbound payment,customer credit,wire instruction,pacs.008 equivalent,Fed 1000 equivalent",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT"
+    ]
+  },
+  {
+    "keywords": "MT103+,STP customer transfer,straight-through processing",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT103+ for straight-through processing, equivalent to pacs.008 in ISO 20022",
+    "related_keywords": "STP wire,automated processing,MT103 plus,enhanced MT103,pacs.008 equivalent,touchless processing,automated customer transfer",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Straight Through Processing"
+    ]
+  },
+  {
+    "keywords": "MT110,advice of cheque,cheque notification",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT110 advice of cheque, equivalent to pain.002 status report in ISO 20022",
+    "related_keywords": "cheque advice,check notification,MT110 message,payment advice,pain.002 equivalent,cheque information",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Confirmations"
+    ]
+  },
+  {
+    "keywords": "MT111,request for stop payment,payment stop request",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT111 request for stop payment, equivalent to camt.056 cancellation in ISO 20022",
+    "related_keywords": "stop payment,payment cancellation,MT111 message,cancel payment,camt.056 equivalent,payment stop request",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Payment Cancel"
+    ]
+  },
+  {
+    "keywords": "MT112,status of request,payment status inquiry",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT112 status inquiry, equivalent to pacs.028 status request in ISO 20022",
+    "related_keywords": "status inquiry,payment query,MT112 message,status request,pacs.028 equivalent,payment investigation",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Payment Tracking"
+    ]
+  },
+  {
+    "keywords": "MT192,request for cancellation,payment cancellation request",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT192 request for cancellation, equivalent to camt.056 in ISO 20022",
+    "related_keywords": "cancellation request,MT192 message,cancel wire,payment recall,camt.056 equivalent,recall request",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Payment Cancel"
+    ]
+  },
+  {
+    "keywords": "MT195,queries,payment inquiry",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT195 queries message, equivalent to camt.110 investigation in ISO 20022",
+    "related_keywords": "payment query,MT195 message,payment investigation,wire inquiry,camt.110 equivalent,investigation request",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Payment Investigation"
+    ]
+  },
+  {
+    "keywords": "MT196,answers,inquiry response",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT196 answers to queries, equivalent to camt.111 investigation response in ISO 20022",
+    "related_keywords": "query response,MT196 message,investigation response,inquiry answer,camt.111 equivalent,investigation reply",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Payment Investigation"
+    ]
+  },
+  {
+    "keywords": "MT199,free format,narrative message",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT199 free format message, equivalent to ISO 20022 supplementary data or remt.001",
+    "related_keywords": "free format,narrative,MT199 message,additional information,remt.001 equivalent,supplementary data",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Message Format Transformation"
+    ]
+  },
+  {
+    "keywords": "MT200,financial institution transfer,bank-to-bank transfer",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT200 financial institution transfer, equivalent to pacs.009 in ISO 20022 and Fedwire Format 2000",
+    "related_keywords": "bank transfer,FI transfer,MT200 message,interbank transfer,pacs.009 equivalent,Fed 2000 equivalent,institutional transfer",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Book Transfer Payment"
+    ]
+  },
+  {
+    "keywords": "MT201,multiple financial institution transfer,bulk bank transfer",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT201 multiple FI transfers, equivalent to pacs.009 in ISO 20022",
+    "related_keywords": "bulk bank transfer,multiple FI transfer,MT201 message,batch interbank,pacs.009 equivalent,bulk institutional transfer",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT"
+    ]
+  },
+  {
+    "keywords": "payment initiation, payment instruction, payment order",
+    "metadata": "payment-initiation",
+    "description": "Process of starting a wire transfer or payment instruction",
+    "related_keywords": "initiate payment, payment request, wire initiation, transfer order, payment start, initiation process, payment setup",
+    "business_capability": [
+      "Payment Initiation"
+    ]
+  },
+  {
+    "keywords": "customer positive pay, positive pay check, check verification",
+    "metadata": "fraud-prevention",
+    "description": "Verification of payments against customer-approved lists to prevent fraud",
+    "related_keywords": "positive pay service, check fraud prevention, payment verification, authorized payments, fraud check, payment approval list, positive pay system",
+    "business_capability": [
+      "Customer Positive Pay"
+    ]
+  },
+  {
+    "keywords": "channel integration, payment channel, integration channel",
+    "metadata": "integration",
+    "description": "Integration with various channels for payment processing",
+    "related_keywords": "channel connection, payment gateway, integration platform, channel setup, multi-channel integration, channel management",
+    "business_capability": [
+      "Channel Integration"
+    ]
+  },
+  {
+    "keywords": "fed integration, fedwire integration, federal reserve integration",
+    "metadata": "network-integration",
+    "description": "Integration with Federal Reserve systems like Fedwire",
+    "related_keywords": "fed connection, fedwire link, reserve bank integration, fed system access, federal payment integration",
+    "business_capability": [
+      "Fed Integration"
+    ]
+  },
+  {
+    "keywords": "swift integration, swift network integration, swift messaging integration",
+    "metadata": "network-integration",
+    "description": "Integration with SWIFT for cross-border payments",
+    "related_keywords": "swift connection, swift link, international messaging integration, swift access, global payment integration",
+    "business_capability": [
+      "Swift Integration"
+    ]
+  },
+  {
+    "keywords": "chips integration, chips network integration, clearing house integration",
+    "metadata": "network-integration",
+    "description": "Integration with CHIPS for clearinghouse payments",
+    "related_keywords": "chips connection, chips link, high-value payment integration, chips access, usd payment integration",
+    "business_capability": [
+      "Chips Integration"
+    ]
+  },
+  {
+    "keywords": "channel acknowledgement, payment acknowledgement, receipt confirmation",
+    "metadata": "acknowledgements",
+    "description": "Confirmation of receipt of payment instructions via channels",
+    "related_keywords": "ack receipt, payment confirm, channel receipt, acknowledgement message, receipt notification, confirmation receipt",
+    "business_capability": [
+      "Channel Acknowledgement"
+    ]
+  },
+  {
+    "keywords": "confirmations, payment confirmation, transaction confirmation",
+    "metadata": "acknowledgements",
+    "description": "Sending confirmation of payment processing or completion",
+    "related_keywords": "payment confirm, transaction confirm, completion notification, process confirmation, status confirmation",
+    "business_capability": [
+      "Confirmations"
+    ]
+  },
+  {
+    "keywords": "message ID generation, ID generation, unique ID",
+    "metadata": "message-generation",
+    "description": "Creating unique identifiers for payment messages",
+    "related_keywords": "message identifier, unique message ID, ID creation, transaction ID, payment ID",
+    "business_capability": [
+      "Message ID Generation"
+    ]
+  },
+  {
+    "keywords": "dodd frank, dodd-frank compliance, dodd-frank regulation",
+    "metadata": "regulatory-compliance",
+    "description": "Compliance with Dodd-Frank Act regulations for payments",
+    "related_keywords": "dodd-frank rules, financial reform compliance, wall street reform, consumer protection act, dodd-frank requirements",
+    "business_capability": [
+      "Dodd Frank"
+    ]
+  },
+  {
+    "keywords": "message format transformation, format conversion, message conversion",
+    "metadata": "message-processing",
+    "description": "Converting messages between formats (e.g., SWIFT to ISO 20022)",
+    "related_keywords": "format transform, message transform, conversion process, format change, message adaptation",
+    "business_capability": [
+      "Message Format Transformation"
+    ]
+  },
+  {
+    "keywords": "message schema validation, schema check, schema verification",
+    "metadata": "message-validation",
+    "description": "Ensuring message structure complies with standards",
+    "related_keywords": "schema validate, structure check, compliance check, schema conformity, message schema",
+    "business_capability": [
+      "Message Schema Validation"
+    ]
+  },
+  {
+    "keywords": "message format validation, format check, format verification",
+    "metadata": "message-validation",
+    "description": "Validating message format for compliance",
+    "related_keywords": "format validate, compliance format, format conformity, message format",
+    "business_capability": [
+      "Message Format Validation"
+    ]
+  },
+  {
+    "keywords": "payment validation, payment check, payment verification",
+    "metadata": "payment-validation",
+    "description": "Ensuring payment instructions are complete and valid",
+    "related_keywords": "payment validate, instruction check, validity check, payment conformity",
+    "business_capability": [
+      "Payment Validation"
+    ]
+  },
+  {
+    "keywords": "account validation, account check, account verification",
+    "metadata": "account-validation",
+    "description": "Checking account details for validity",
+    "related_keywords": "account validate, detail check, validity check, account conformity",
+    "business_capability": [
+      "Account Validation"
+    ]
+  },
+  {
+    "keywords": "credit party validation, credit party check, beneficiary validation",
+    "metadata": "party-validation",
+    "description": "Verifying beneficiary details",
+    "related_keywords": "credit validate, beneficiary check, party conformity, credit party conformity",
+    "business_capability": [
+      "Credit Party Validation"
+    ]
+  },
+  {
+    "keywords": "debit party validation, debit party check, originator validation",
+    "metadata": "party-validation",
+    "description": "Verifying originator details",
+    "related_keywords": "debit validate, originator check, party conformity, debit party conformity",
+    "business_capability": [
+      "Debit Party Validation"
+    ]
+  },
+  {
+    "keywords": "method of payment, payment method, payment type",
+    "metadata": "payment-initiation",
+    "description": "Specifying the method of payment",
+    "related_keywords": "payment mode, transfer method, payment category, method selection",
+    "business_capability": [
+      "Method of Payment"
+    ]
+  },
+  {
+    "keywords": "account lookup, account search, account query",
+    "metadata": "account-validation",
+    "description": "Retrieving account information for validation",
+    "related_keywords": "account retrieval, lookup process, account information query, account details search",
+    "business_capability": [
+      "Account Lookup"
+    ]
+  },
+  {
+    "keywords": "payment warehousing, payment storage, payment holding",
+    "metadata": "payment-processing",
+    "description": "Storing payments for scheduled processing",
+    "related_keywords": "warehousing process, payment hold, scheduled storage, payment queue",
+    "business_capability": [
+      "Payment Warehousing"
+    ]
+  },
+  {
+    "keywords": "message routing, message path, message direction",
+    "metadata": "message-processing",
+    "description": "Directing messages to appropriate systems",
+    "related_keywords": "routing message, path determination, message forwarding, routing logic",
+    "business_capability": [
+      "Message Routing"
+    ]
+  },
+  {
+    "keywords": "business rule validation, rule check, business validation",
+    "metadata": "payment-validation",
+    "description": "Applying business-specific rules to payments",
+    "related_keywords": "rule validate, business check, rule conformity, business rule conformity",
+    "business_capability": [
+      "Business Rule Validation"
+    ]
+  },
+  {
+    "keywords": "business duplicate check, duplicate detection, duplicate validation",
+    "metadata": "payment-validation",
+    "description": "Detecting duplicate payment instructions",
+    "related_keywords": "duplicate check, detection process, duplicate prevention, duplicate identification",
+    "business_capability": [
+      "Business Duplicate Check"
+    ]
+  },
+  {
+    "keywords": "value date validation, date check, value date check",
+    "metadata": "payment-validation",
+    "description": "Verifying the date for payment settlement",
+    "related_keywords": "date validate, settlement date check, value date conformity",
+    "business_capability": [
+      "Value Date Validation"
+    ]
+  },
+  {
+    "keywords": "future date validation, future date check, scheduled date validation",
+    "metadata": "payment-validation",
+    "description": "Checking validity of future-dated payments",
+    "related_keywords": "future validate, scheduled check, date conformity, future payment validation",
+    "business_capability": [
+      "Future Date Validation"
+    ]
+  },
+  {
+    "keywords": "anomaly detection, anomaly monitoring, unusual pattern detection",
+    "metadata": "fraud-prevention",
+    "description": "Identifying unusual payment patterns",
+    "related_keywords": "anomaly identify, pattern detection, unusual activity, anomaly alert",
+    "business_capability": [
+      "Anomaly Detection"
+    ]
+  },
+  {
+    "keywords": "sanctions screening, sanctions check, ofac screening",
+    "metadata": "compliance-fraud",
+    "description": "Checking payments against sanctions lists",
+    "related_keywords": "sanctions validate, ofac check, list screening, sanctions conformity",
+    "business_capability": [
+      "Sanctions Screening"
+    ]
+  },
+  {
+    "keywords": "sanctions ring fencing, ring fencing, sanctions isolation",
+    "metadata": "compliance-fraud",
+    "description": "Isolating transactions to comply with sanctions",
+    "related_keywords": "ring fence, transaction isolation, sanctions compliance, ring fencing process",
+    "business_capability": [
+      "Sanctions Ring Fencing"
+    ]
+  },
+  {
+    "keywords": "fraud monitoring, fraud detection, fraud surveillance",
+    "metadata": "fraud-prevention",
+    "description": "Monitoring transactions for fraudulent activity",
+    "related_keywords": "fraud monitor, activity detection, surveillance process, fraud alert",
+    "business_capability": [
+      "Fraud Monitoring"
+    ]
+  },
+  {
+    "keywords": "intraday bank liquidity check, liquidity verification, intraday liquidity",
+    "metadata": "liquidity-management",
+    "description": "Verifying intraday liquidity for transactions",
+    "related_keywords": "intraday check, liquidity validate, bank liquidity, intraday verification",
+    "business_capability": [
+      "Intraday Bank Liquidity Check"
+    ]
+  },
+  {
+    "keywords": "liquidity authorization, authorization check, liquidity approval",
+    "metadata": "liquidity-management",
+    "description": "Authorizing payments based on liquidity availability",
+    "related_keywords": "authorize liquidity, approval process, liquidity auth, payment authorization",
+    "business_capability": [
+      "Liquidity Authorization"
+    ]
+  },
+  {
+    "keywords": "funds control, funds management, control funds",
+    "metadata": "liquidity-management",
+    "description": "Managing fund allocation for payments",
+    "related_keywords": "funds allocate, management process, allocation control, funds handling",
+    "business_capability": [
+      "Funds Control"
+    ]
+  },
+  {
+    "keywords": "liquidity check, liquidity verification, check liquidity",
+    "metadata": "liquidity-management",
+    "description": "Ensuring sufficient funds for payment processing",
+    "related_keywords": "liquidity validate, funds check, availability verification, liquidity assessment",
+    "business_capability": [
+      "Liquidity Check"
+    ]
+  },
+  {
+    "keywords": "payment return, return payment, payment refund",
+    "metadata": "exception-handling",
+    "description": "Processing returned payments",
+    "related_keywords": "return process, refund payment, return handling, payment reversal",
+    "business_capability": [
+      "Payment Return"
+    ]
+  },
+  {
+    "keywords": "payment investigation, investigate payment, payment inquiry",
+    "metadata": "exception-handling",
+    "description": "Investigating payment issues or disputes",
+    "related_keywords": "inquiry process, dispute investigation, issue resolution, payment probe",
+    "business_capability": [
+      "Payment Investigation"
+    ]
+  },
+  {
+    "keywords": "account posting, post account, transaction posting",
+    "metadata": "posting",
+    "description": "Recording transactions to accounts",
+    "related_keywords": "posting process, account record, transaction entry, posting entry",
+    "business_capability": [
+      "Account Posting"
+    ]
+  },
+  {
+    "keywords": "memo posting, temporary posting, memo entry",
+    "metadata": "posting",
+    "description": "Temporary recording of transactions",
+    "related_keywords": "memo record, temporary entry, provisional posting, memo transaction",
+    "business_capability": [
+      "Memo Posting"
+    ]
+  },
+  {
+    "keywords": "hard posting, final posting, hard entry",
+    "metadata": "posting",
+    "description": "Finalizing transaction postings",
+    "related_keywords": "hard record, final entry, permanent posting, hard transaction",
+    "business_capability": [
+      "Hard Posting"
+    ]
+  },
+  {
+    "keywords": "straight through processing, STP, automated processing",
+    "metadata": "payment-processing",
+    "description": "Automating payment processing without manual intervention",
+    "related_keywords": "stp process, automation, touchless processing, automated payment",
+    "business_capability": [
+      "Straight Through Processing"
+    ]
+  },
+  {
+    "keywords": "pay through payment, intermediary payment, pay through",
+    "metadata": "payment-processing",
+    "description": "Processing payments through intermediary accounts",
+    "related_keywords": "pay through process, intermediary pay, account intermediary, payment intermediary",
+    "business_capability": [
+      "Pay Through Payment"
+    ]
+  },
+  {
+    "keywords": "payment tier assignment, tier assignment, payment tier",
+    "metadata": "payment-processing",
+    "description": "Assigning priority tiers to payments",
+    "related_keywords": "tier assign, priority tier, assignment process, tier management",
+    "business_capability": [
+      "Payment Tier Assignment"
+    ]
+  },
+  {
+    "keywords": "payment prioritization, prioritize payment, priority assignment",
+    "metadata": "payment-processing",
+    "description": "Determining processing order based on urgency or rules",
+    "related_keywords": "prioritize process, order determination, urgency priority, rule priority",
+    "business_capability": [
+      "Payment Prioritization"
+    ]
+  },
+  {
+    "keywords": "manual repair, repair manually, manual correction",
+    "metadata": "exception-handling",
+    "description": "Manually correcting payment issues",
+    "related_keywords": "manual fix, correction process, issue repair, manual handling",
+    "business_capability": [
+      "Manual Repair"
+    ]
+  },
+  {
+    "keywords": "auto repair, automatic repair, auto correction",
+    "metadata": "exception-handling",
+    "description": "Automatically resolving payment errors",
+    "related_keywords": "auto fix, automatic correction, error resolution, auto handling",
+    "business_capability": [
+      "Auto Repair"
+    ]
+  },
+  {
+    "keywords": "message replay, replay message, resend message",
+    "metadata": "exception-handling",
+    "description": "Re-sending payment messages",
+    "related_keywords": "replay process, message resend, resending, message repeat",
+    "business_capability": [
+      "Message Replay"
+    ]
+  },
+  {
+    "keywords": "exceptions, payment exceptions, exception handling",
+    "metadata": "exception-handling",
+    "description": "Managing payment exceptions",
+    "related_keywords": "exception manage, handling process, payment exception, exception resolution",
+    "business_capability": [
+      "Exceptions"
+    ]
+  },
+  {
+    "keywords": "repairs, payment repairs, repair process",
+    "metadata": "exception-handling",
+    "description": "General correction of payment issues",
+    "related_keywords": "repair manage, issue correction, payment fix, repair handling",
+    "business_capability": [
+      "Repairs"
+    ]
+  },
+  {
+    "keywords": "killswitch, emergency stop, kill switch",
+    "metadata": "exception-handling",
+    "description": "Emergency stop for payment processing",
+    "related_keywords": "emergency halt, stop process, killswitch activation, urgent stop",
+    "business_capability": [
+      "Killswitch"
+    ]
+  },
+  {
+    "keywords": "payment rules, rule application, payment rule",
+    "metadata": "payment-processing",
+    "description": "Applying rules for payment processing",
+    "related_keywords": "rule apply, processing rule, rule management, payment guideline",
+    "business_capability": [
+      "Payment Rules"
+    ]
+  },
+  {
+    "keywords": "routing, payment path, route determination",
+    "metadata": "payment-processing",
+    "description": "Determining routing paths based on rules",
+    "related_keywords": "route manage, path determination, routing process, route selection",
+    "business_capability": [
+      "Routing"
+    ]
+  },
+  {
+    "keywords": "cross-border payment, international payment, cross border",
+    "metadata": "payment-types",
+    "description": "Payments across international borders",
+    "related_keywords": "international transfer, border payment, global payment, cross-border wire",
+    "business_capability": [
+      "Cross-Border Payment"
+    ]
+  },
+  {
+    "keywords": "book transfer payment, internal transfer, book payment",
+    "metadata": "payment-types",
+    "description": "Transferring funds within the same financial institution",
+    "related_keywords": "internal book, transfer internal, book entry, internal payment",
+    "business_capability": [
+      "Book Transfer Payment"
+    ]
+  },
+  {
+    "keywords": "payment cancel, cancel payment, cancellation process",
+    "metadata": "exception-handling",
+    "description": "Canceling payment instructions",
+    "related_keywords": "cancel process, instruction cancel, payment abort, cancel request",
+    "business_capability": [
+      "Payment Cancel"
+    ]
+  },
+  {
+    "keywords": "start of day, SOD, day start process",
+    "metadata": "operational-processes",
+    "description": "Initiating daily payment processing activities",
+    "related_keywords": "sod process, day initiation, start activities, daily start",
+    "business_capability": [
+      "Start of Day",
+      "SOD"
+    ]
+  },
+  {
+    "keywords": "end of day, EOD, day end process",
+    "metadata": "operational-processes",
+    "description": "Completing daily payment processing and reconciliation",
+    "related_keywords": "eod process, day completion, end activities, daily end",
+    "business_capability": [
+      "End of Day",
+      "EOD"
+    ]
+  },
+  {
+    "keywords": "fx rates, exchange rates, currency rates",
+    "metadata": "foreign-exchange",
+    "description": "Applying exchange rates to transactions",
+    "related_keywords": "fx rate apply, currency exchange, rate application, exchange calculation",
+    "business_capability": [
+      "FX Rates"
+    ]
+  },
+  {
+    "keywords": "fx, foreign exchange, currency exchange",
+    "metadata": "foreign-exchange",
+    "description": "Handling foreign exchange for cross-border payments",
+    "related_keywords": "fx handling, exchange process, currency fx, fx management",
+    "business_capability": [
+      "FX"
+    ]
+  },
+  {
+    "keywords": "fxac, fx account conversion, fx conversion",
+    "metadata": "foreign-exchange",
+    "description": "Managing foreign exchange account conversions",
+    "related_keywords": "fxac process, account fx, conversion management, fx account",
+    "business_capability": [
+      "FXAC"
+    ]
+  },
+  {
+    "keywords": "pricing, payment pricing, fee pricing",
+    "metadata": "pricing-billing",
+    "description": "Determining payment processing fees",
+    "related_keywords": "price determine, fee pricing, pricing process, cost calculation",
+    "business_capability": [
+      "Pricing"
+    ]
+  },
+  {
+    "keywords": "fee calculation, calculate fee, transaction fee",
+    "metadata": "pricing-billing",
+    "description": "Calculating transaction fees",
+    "related_keywords": "fee compute, calculation process, fee determination, transaction cost",
+    "business_capability": [
+      "Fee Calculation"
+    ]
+  },
+  {
+    "keywords": "billing, invoice generation, payment billing",
+    "metadata": "pricing-billing",
+    "description": "Generating invoices for payment services",
+    "related_keywords": "bill process, invoice create, billing management, service invoice",
+    "business_capability": [
+      "Billing"
+    ]
+  },
+  {
+    "keywords": "product lookup, lookup product, product query",
+    "metadata": "pricing-billing",
+    "description": "Retrieving product details for pricing",
+    "related_keywords": "product search, detail lookup, product information, pricing lookup",
+    "business_capability": [
+      "Product Lookup"
+    ]
+  },
+  {
+    "keywords": "product qualification, qualify product, eligibility check",
+    "metadata": "pricing-billing",
+    "description": "Determining eligibility for payment products",
+    "related_keywords": "qualification process, eligibility determine, product eligibility, qualification check",
+    "business_capability": [
+      "Product Qualification"
+    ]
+  },
+  {
+    "keywords": "network, payment network, network management",
+    "metadata": "network-integration",
+    "description": "Managing connectivity with payment networks",
+    "related_keywords": "network connect, payment net, connectivity management, network handling",
+    "business_capability": [
+      "Network"
+    ]
+  },
+  {
+    "keywords": "payment tracking, track payment, status tracking",
+    "metadata": "operational-processes",
+    "description": "Monitoring payment status across systems",
+    "related_keywords": "track process, status monitor, payment monitor, tracking system",
+    "business_capability": [
+      "Payment Tracking"
+    ]
+  },
+  {
+    "keywords": "reference data, data reference, reference management",
+    "metadata": "operational-processes",
+    "description": "Managing data for payment processing",
+    "related_keywords": "data manage, reference handle, processing data, reference info",
+    "business_capability": [
+      "Reference Data"
+    ]
+  },
+  {
+    "keywords": "operator UI, user interface, operator interface",
+    "metadata": "operational-processes",
+    "description": "Providing interfaces for manual payment operations",
+    "related_keywords": "ui operator, interface manual, operation ui, manual interface",
+    "business_capability": [
+      "Operator UI"
+    ]
+  },
+  {
+    "keywords": "anti money laundering, AML, money laundering prevention",
+    "metadata": "compliance-fraud",
+    "description": "Implementing AML checks for transactions",
+    "related_keywords": "aml check, laundering prevention, anti-laundering, transaction aml",
+    "business_capability": [
+      "Anti Money Laundering"
+    ]
+  },
+  {
+    "keywords": "general ledger, ledger update, GL posting",
+    "metadata": "posting",
+    "description": "Updating the general ledger with transaction data",
+    "related_keywords": "ledger manage, gl update, transaction ledger, ledger entry",
+    "business_capability": [
+      "General Ledger"
+    ]
+  },
+  {
+    "keywords": "chips iso, chips iso 20022, chips messaging",
+    "metadata": "chips-iso-messages",
+    "description": "ISO 20022 messaging for CHIPS high-value USD payments",
+    "related_keywords": "chips format, chips migration, chips pacs.008, chips pacs.009, chips extended remittance, chips validation rules, chips interoperability, chips usd payments",
+    "business_capability": [
+      "Inbound CHIPS",
+      "Outbound CHIPS",
+      "Message Format Transformation",
+      "Message Schema Validation",
+      "Payment Routing",
+      "High-Value Payment Processing",
+      "Remittance Information Validation"
+    ]
+  },
+  {
+    "keywords": "swift iso, swift iso 20022, swift cbpr+",
+    "metadata": "swift-iso-messages",
+    "description": "ISO 20022 messaging for SWIFT cross-border payments with CBPR+ guidelines",
+    "related_keywords": "swift mx, swift migration, swift pacs.008, swift camt.056, swift mt to mx, swift coexistence, swift validation, swift hvps+, swift structured data, swift party validation",
+    "business_capability": [
+      "Inbound SWIFT",
+      "Outbound SWIFT",
+      "Message Format Transformation",
+      "Message Schema Validation",
+      "Payment Cancellation Request",
+      "Resolution of Investigation",
+      "MT to MX Translation",
+      "Party Identification",
+      "Remittance Information Validation"
+    ]
+  }
+]
