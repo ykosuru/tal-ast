@@ -1,0 +1,649 @@
+?NOLIST, SOURCE $SYSTEM.SYSTEM.EXTDECS0(ZSYSDEFS)
+
+!**********************************************************************
+!* PROCEDURE: VALIDATE_CREDIT_PARTY                                  *
+!* PURPOSE:   Validation of credit party (beneficiary)               *
+!*            information for wire transfer processing               *
+!* SYSTEM:    Wire Transfer Processing System                        *
+!* VERSION:   1.0                                                    *
+!* DATE:      2025-09-01                                             *
+!**********************************************************************
+
+PROC VALIDATE_CREDIT_PARTY(WIRE_REQUEST, VALIDATION_RESULT, ERROR_LIST);
+
+!----------------------------------------------------------------------
+! INPUT PARAMETERS
+!----------------------------------------------------------------------
+STRUCT WIRE_REQUEST(*);
+  BEGIN
+    STRING CREDIT_ACCOUNT_NUMBER[34];     ! Beneficiary account (IBAN support)
+    STRING CREDIT_ROUTING_NUMBER[11];     ! BIC/SWIFT code or ABA routing
+    STRING CREDIT_PARTY_NAME[70];         ! Beneficiary legal name
+    STRING CREDIT_PARTY_ADDRESS[140];     ! Structured address
+    STRING CREDIT_PARTY_CITY[35];         ! City
+    STRING CREDIT_PARTY_STATE[35];        ! State/Province
+    STRING CREDIT_PARTY_COUNTRY[2];       ! Country code (ISO 3166)
+    STRING CREDIT_PARTY_POSTAL[16];       ! Postal code
+    STRING CREDIT_BANK_NAME[70];          ! Receiving bank name
+    STRING CREDIT_BANK_ADDRESS[140];      ! Bank address
+    STRING CREDIT_BANK_CITY[35];          ! Bank city
+    STRING CREDIT_BANK_COUNTRY[2];        ! Bank country code
+    STRING PAYMENT_AMOUNT[15];            ! Wire amount
+    STRING CURRENCY_CODE[3];              ! ISO 4217 currency code
+    STRING PAYMENT_PURPOSE[4];            ! ISO purpose code
+    STRING REMITTANCE_INFO[140];          ! Remittance information
+    STRING ULTIMATE_CREDITOR_NAME[70];    ! Ultimate beneficiary if different
+    STRING ULTIMATE_CREDITOR_ID[35];      ! Ultimate creditor identifier
+    STRING CORRESPONDENT_BIC[11];         ! Intermediary bank BIC
+    STRING CORRESPONDENT_ACCOUNT[34];     ! Nostro account at correspondent
+    STRING PAYMENT_TYPE[10];              ! Domestic/International
+    STRING MESSAGE_TYPE[10];              ! pacs.008/pacs.009/MT103/MT202
+    STRING COVER_METHOD[10];              ! Direct/Cover payment method
+    STRING REGULATORY_INFO[70];           ! Regulatory reporting data
+    INT SAME_DAY_FLAG;                    ! Same-day processing indicator
+  END;
+
+!----------------------------------------------------------------------
+! OUTPUT PARAMETERS  
+!----------------------------------------------------------------------
+STRUCT VALIDATION_RESULT(*);
+  BEGIN
+    INT VALIDATION_STATUS;                ! 0=Valid, 1=Warning, 2=Error
+    STRING VALIDATION_CODE[10];           ! Validation result code
+    STRING VALIDATION_MESSAGE[200];       ! Detailed validation message
+    INT ACCOUNT_FORMAT_STATUS;            ! Account format validation
+    INT ROUTING_STATUS;                   ! Routing/BIC validation
+    INT SANCTIONS_STATUS;                 ! OFAC screening result
+    INT CORRESPONDENT_STATUS;             ! Correspondent bank validation
+    INT COUNTRY_COMPLIANCE_STATUS;        ! Country/jurisdiction check
+    INT MESSAGE_FORMAT_STATUS;            ! ISO 20022 format compliance
+    INT CROSS_BORDER_STATUS;              ! International payment checks
+    STRING PAYMENT_CLASSIFICATION[20];    ! Domestic/Cross-border/Internal
+    STRING ROUTING_METHOD[20];            ! Direct/Correspondent/Cover
+    INT ENHANCED_DUE_DILIGENCE;           ! EDD required flag
+    STRING COMPLIANCE_RATING[10];         ! Compliance risk rating
+  END;
+
+STRUCT ERROR_LIST(*);
+  BEGIN
+    INT ERROR_COUNT;                      ! Number of validation errors
+    STRING ERROR_CODES[0:49][10];         ! Array of error codes
+    STRING ERROR_MESSAGES[0:49][200];     ! Array of error messages
+    STRING ERROR_SEVERITY[0:49][10];      ! Error severity level
+  END;
+
+!----------------------------------------------------------------------
+! LOCAL VARIABLES
+!----------------------------------------------------------------------
+INT VALIDATION_STEP;                     ! Current validation step
+INT I, J;                                 ! Loop counters
+INT TEMP_RESULT;                          ! Temporary result holder
+STRING TEMP_STRING[200];                  ! Temporary string work area
+FIXED TEMP_AMOUNT;                        ! Temporary amount for calculations
+INT SANCTION_MATCH_COUNT;                 ! Number of sanctions matches
+STRING NORMALIZED_BIC[11];                ! Normalized BIC code
+STRING IBAN_CHECK_DIGITS[2];              ! IBAN check digits
+INT IBAN_VALIDATION_RESULT;               ! IBAN validation status
+STRING CORRESPONDENT_COUNTRY[2];          ! Correspondent bank country
+INT HIGH_RISK_COUNTRY_FLAG;               ! High-risk jurisdiction flag
+STRING NORMALIZED_BENEFICIARY[70];        ! Normalized beneficiary name
+INT CROSS_BORDER_FLAG;                    ! Cross-border payment flag
+STRING EFFECTIVE_BIC[11];                 ! Effective receiving bank BIC
+
+!----------------------------------------------------------------------
+! BUSINESS CONSTANTS
+!----------------------------------------------------------------------
+LITERAL MAX_BENEFICIARY_AMOUNT = 999999999.99; ! Maximum credit amount
+LITERAL DOMESTIC_ROUTING_LENGTH = 9;      ! US domestic ABA routing
+LITERAL BIC_LENGTH_8 = 8;                 ! BIC code 8 characters
+LITERAL BIC_LENGTH_11 = 11;               ! BIC code 11 characters
+LITERAL IBAN_MIN_LENGTH = 15;             ! Minimum IBAN length
+LITERAL IBAN_MAX_LENGTH = 34;             ! Maximum IBAN length
+LITERAL EDD_THRESHOLD = 10000.00;         ! Enhanced Due Diligence threshold
+LITERAL HIGH_RISK_AMOUNT = 50000.00;      ! High-risk amount threshold
+
+!----------------------------------------------------------------------
+! VALIDATION BUSINESS RULES
+!----------------------------------------------------------------------
+LITERAL NAME_MIN_LENGTH = 2;              ! Minimum beneficiary name length
+LITERAL ADDRESS_MIN_LENGTH = 10;          ! Minimum address length
+LITERAL REMITTANCE_MAX_LENGTH = 140;      ! Maximum remittance info length
+LITERAL VALID_CURRENCIES = "USD,EUR,GBP,JPY,CHF,CAD,AUD,SEK,NOK,DKK";
+LITERAL HIGH_RISK_COUNTRIES = "AF,BY,MM,CF,CD,CU,ET,HT,HK,IR,IQ,KP,LB,LY,ML,NI,SO,SS,SD,SY,UA,VE,YE,ZW";
+LITERAL OFAC_COUNTRIES = "CU,IR,KP,SY,BY";  ! OFAC sanctioned countries
+LITERAL SEPA_COUNTRIES = "AD,AT,BE,BG,CH,CY,CZ,DE,DK,EE,ES,FI,FR,GB,GI,GR,HR,HU,IE,IS,IT,LI,LT,LU,LV,MC,MT,NL,NO,PL,PT,RO,SE,SI,SK,SM,VA";
+
+BEGIN
+  ! Initialize validation result
+  VALIDATION_RESULT.VALIDATION_STATUS := 0;
+  VALIDATION_RESULT.VALIDATION_CODE := "INIT";
+  VALIDATION_RESULT.VALIDATION_MESSAGE := "Credit party validation initiated";
+  VALIDATION_RESULT.PAYMENT_CLASSIFICATION := "UNKNOWN";
+  VALIDATION_RESULT.ROUTING_METHOD := "DIRECT";
+  ERROR_LIST.ERROR_COUNT := 0;
+
+  ! Convert amount for calculations
+  TEMP_AMOUNT := $NUMERIC(WIRE_REQUEST.PAYMENT_AMOUNT, 10, 2);
+
+  !====================================================================
+  ! STEP 1: DETERMINE PAYMENT TYPE CLASSIFICATION
+  !====================================================================
+  VALIDATION_STEP := 1;
+  
+  ! Determine if domestic, international, or internal transfer
+  CALL CLASSIFY_PAYMENT_TYPE(WIRE_REQUEST.CREDIT_BANK_COUNTRY,
+                            WIRE_REQUEST.CURRENCY_CODE,
+                            WIRE_REQUEST.CREDIT_ROUTING_NUMBER,
+                            VALIDATION_RESULT.PAYMENT_CLASSIFICATION,
+                            CROSS_BORDER_FLAG);
+
+  ! Set enhanced due diligence flag for high-value or cross-border
+  IF TEMP_AMOUNT >= EDD_THRESHOLD OR CROSS_BORDER_FLAG = 1 THEN
+    VALIDATION_RESULT.ENHANCED_DUE_DILIGENCE := 1;
+
+  !====================================================================
+  ! STEP 2: CREDIT ACCOUNT NUMBER VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 2;
+  
+  ! Validate account number format based on country
+  IF VALIDATION_RESULT.PAYMENT_CLASSIFICATION = "INTERNATIONAL" OR
+     $SCAN(SEPA_COUNTRIES, WIRE_REQUEST.CREDIT_BANK_COUNTRY) > 0 THEN
+  BEGIN
+    ! IBAN validation for international/SEPA payments
+    IF $LEN(WIRE_REQUEST.CREDIT_ACCOUNT_NUMBER) >= IBAN_MIN_LENGTH AND
+       $LEN(WIRE_REQUEST.CREDIT_ACCOUNT_NUMBER) <= IBAN_MAX_LENGTH THEN
+    BEGIN
+      CALL VALIDATE_IBAN_FORMAT(WIRE_REQUEST.CREDIT_ACCOUNT_NUMBER,
+                               WIRE_REQUEST.CREDIT_BANK_COUNTRY,
+                               IBAN_VALIDATION_RESULT);
+      IF IBAN_VALIDATION_RESULT <> 0 THEN
+      BEGIN
+        CALL ADD_VALIDATION_ERROR("CRE001", 
+             "Invalid IBAN format or check digits", "ERROR", ERROR_LIST);
+        VALIDATION_RESULT.ACCOUNT_FORMAT_STATUS := 2;
+      END
+      ELSE
+        VALIDATION_RESULT.ACCOUNT_FORMAT_STATUS := 0;
+    END
+    ELSE
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("CRE002", 
+           "IBAN required for international payments", "ERROR", ERROR_LIST);
+      VALIDATION_RESULT.ACCOUNT_FORMAT_STATUS := 2;
+    END;
+  END
+  ELSE
+  BEGIN
+    ! Domestic account number validation
+    IF $LEN(WIRE_REQUEST.CREDIT_ACCOUNT_NUMBER) < 1 OR
+       $LEN(WIRE_REQUEST.CREDIT_ACCOUNT_NUMBER) > 17 THEN
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("CRE003", 
+           "Invalid domestic account number length", "ERROR", ERROR_LIST);
+      VALIDATION_RESULT.ACCOUNT_FORMAT_STATUS := 2;
+    END
+    ELSE
+      VALIDATION_RESULT.ACCOUNT_FORMAT_STATUS := 0;
+  END;
+
+  !====================================================================
+  ! STEP 3: ROUTING CODE VALIDATION (BIC/SWIFT OR ABA)
+  !====================================================================
+  VALIDATION_STEP := 3;
+  
+  IF VALIDATION_RESULT.PAYMENT_CLASSIFICATION = "INTERNATIONAL" THEN
+  BEGIN
+    ! BIC/SWIFT code validation for international payments
+    IF $LEN(WIRE_REQUEST.CREDIT_ROUTING_NUMBER) <> BIC_LENGTH_8 AND
+       $LEN(WIRE_REQUEST.CREDIT_ROUTING_NUMBER) <> BIC_LENGTH_11 THEN
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("CRE004", 
+           "Invalid BIC/SWIFT code length", "ERROR", ERROR_LIST);
+      VALIDATION_RESULT.ROUTING_STATUS := 2;
+    END
+    ELSE
+    BEGIN
+      ! Validate BIC format and lookup receiving bank
+      CALL VALIDATE_BIC_FORMAT(WIRE_REQUEST.CREDIT_ROUTING_NUMBER,
+                              NORMALIZED_BIC, TEMP_RESULT);
+      IF TEMP_RESULT <> 0 THEN
+      BEGIN
+        CALL ADD_VALIDATION_ERROR("CRE005", 
+             "Invalid BIC/SWIFT code format", "ERROR", ERROR_LIST);
+        VALIDATION_RESULT.ROUTING_STATUS := 2;
+      END
+      ELSE
+      BEGIN
+        WIRE_REQUEST.CREDIT_ROUTING_NUMBER := NORMALIZED_BIC;
+        EFFECTIVE_BIC := NORMALIZED_BIC;
+        
+        ! Verify BIC is active and reachable
+        CALL VERIFY_BIC_ACTIVE(NORMALIZED_BIC, TEMP_RESULT);
+        IF TEMP_RESULT <> 0 THEN
+          CALL ADD_VALIDATION_WARNING("CRE006", 
+               "BIC may be inactive or unreachable", "WARNING", ERROR_LIST);
+        
+        VALIDATION_RESULT.ROUTING_STATUS := 0;
+      END;
+    END;
+  END
+  ELSE
+  BEGIN
+    ! ABA routing number validation for domestic payments
+    IF $LEN(WIRE_REQUEST.CREDIT_ROUTING_NUMBER) <> DOMESTIC_ROUTING_LENGTH THEN
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("CRE007", 
+           "Invalid domestic routing number length", "ERROR", ERROR_LIST);
+      VALIDATION_RESULT.ROUTING_STATUS := 2;
+    END
+    ELSE
+    BEGIN
+      ! Validate ABA routing checksum
+      CALL VALIDATE_ABA_ROUTING_CHECKSUM(WIRE_REQUEST.CREDIT_ROUTING_NUMBER,
+                                        TEMP_RESULT);
+      IF TEMP_RESULT <> 0 THEN
+      BEGIN
+        CALL ADD_VALIDATION_ERROR("CRE008", 
+             "Invalid routing number checksum", "ERROR", ERROR_LIST);
+        VALIDATION_RESULT.ROUTING_STATUS := 2;
+      END
+      ELSE
+        VALIDATION_RESULT.ROUTING_STATUS := 0;
+    END;
+  END;
+
+  !====================================================================
+  ! STEP 4: BENEFICIARY NAME VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 4;
+  
+  ! Name length validation
+  IF $LEN(WIRE_REQUEST.CREDIT_PARTY_NAME) < NAME_MIN_LENGTH THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("CRE009", 
+         "Beneficiary name too short", "ERROR", ERROR_LIST);
+  END;
+  
+  ! Normalize name for sanctions screening
+  CALL NORMALIZE_PARTY_NAME(WIRE_REQUEST.CREDIT_PARTY_NAME,
+                           NORMALIZED_BENEFICIARY);
+  
+  ! Check for prohibited characters in international transfers
+  IF CROSS_BORDER_FLAG = 1 THEN
+  BEGIN
+    CALL VALIDATE_INTERNATIONAL_NAME_FORMAT(NORMALIZED_BENEFICIARY,
+                                           TEMP_RESULT);
+    IF TEMP_RESULT <> 0 THEN
+      CALL ADD_VALIDATION_WARNING("CRE010", 
+           "Name contains characters not supported internationally", 
+           "WARNING", ERROR_LIST);
+  END;
+
+  !====================================================================
+  ! STEP 5: BENEFICIARY ADDRESS VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 5;
+  
+  ! Address completeness validation
+  IF $LEN(WIRE_REQUEST.CREDIT_PARTY_ADDRESS) < ADDRESS_MIN_LENGTH THEN
+    CALL ADD_VALIDATION_ERROR("CRE011", 
+         "Incomplete beneficiary address", "WARNING", ERROR_LIST);
+  
+  ! Country code validation (mandatory for ISO 20022)
+  IF $LEN(WIRE_REQUEST.CREDIT_PARTY_COUNTRY) <> 2 THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("CRE012", 
+         "Invalid or missing beneficiary country code", "ERROR", ERROR_LIST);
+  END
+  ELSE
+  BEGIN
+    ! Validate country code exists in ISO 3166
+    CALL VALIDATE_COUNTRY_CODE(WIRE_REQUEST.CREDIT_PARTY_COUNTRY,
+                              TEMP_RESULT);
+    IF TEMP_RESULT <> 0 THEN
+      CALL ADD_VALIDATION_ERROR("CRE013", 
+           "Invalid beneficiary country code", "ERROR", ERROR_LIST);
+  END;
+
+  !====================================================================
+  ! STEP 6: CORRESPONDENT BANKING VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 6;
+  
+  ! Determine routing method and correspondent requirements
+  IF $LEN(WIRE_REQUEST.CORRESPONDENT_BIC) > 0 THEN
+  BEGIN
+    VALIDATION_RESULT.ROUTING_METHOD := "CORRESPONDENT";
+    
+    ! Validate correspondent BIC format
+    IF $LEN(WIRE_REQUEST.CORRESPONDENT_BIC) <> BIC_LENGTH_8 AND
+       $LEN(WIRE_REQUEST.CORRESPONDENT_BIC) <> BIC_LENGTH_11 THEN
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("CRE014", 
+           "Invalid correspondent BIC format", "ERROR", ERROR_LIST);
+      VALIDATION_RESULT.CORRESPONDENT_STATUS := 2;
+    END
+    ELSE
+    BEGIN
+      ! Verify correspondent bank relationship
+      CALL VERIFY_CORRESPONDENT_RELATIONSHIP(WIRE_REQUEST.CORRESPONDENT_BIC,
+                                           EFFECTIVE_BIC,
+                                           WIRE_REQUEST.CURRENCY_CODE,
+                                           TEMP_RESULT);
+      IF TEMP_RESULT <> 0 THEN
+      BEGIN
+        CALL ADD_VALIDATION_ERROR("CRE015", 
+             "No correspondent banking relationship found", "ERROR", ERROR_LIST);
+        VALIDATION_RESULT.CORRESPONDENT_STATUS := 2;
+      END
+      ELSE
+        VALIDATION_RESULT.CORRESPONDENT_STATUS := 0;
+    END;
+    
+    ! Validate nostro account if provided
+    IF $LEN(WIRE_REQUEST.CORRESPONDENT_ACCOUNT) > 0 THEN
+    BEGIN
+      CALL VALIDATE_NOSTRO_ACCOUNT(WIRE_REQUEST.CORRESPONDENT_BIC,
+                                  WIRE_REQUEST.CORRESPONDENT_ACCOUNT,
+                                  WIRE_REQUEST.CURRENCY_CODE,
+                                  TEMP_RESULT);
+      IF TEMP_RESULT <> 0 THEN
+        CALL ADD_VALIDATION_WARNING("CRE016", 
+             "Nostro account validation warning", "WARNING", ERROR_LIST);
+    END;
+  END
+  ELSE IF CROSS_BORDER_FLAG = 1 THEN
+  BEGIN
+    ! Check if correspondent required for cross-border payment
+    CALL CHECK_CORRESPONDENT_REQUIRED(EFFECTIVE_BIC,
+                                    WIRE_REQUEST.CURRENCY_CODE,
+                                    TEMP_RESULT);
+    IF TEMP_RESULT = 1 THEN
+    BEGIN
+      VALIDATION_RESULT.ROUTING_METHOD := "COVER";
+      CALL ADD_VALIDATION_WARNING("CRE017", 
+           "Cover payment may be required", "WARNING", ERROR_LIST);
+    END;
+  END;
+
+  !====================================================================
+  ! STEP 7: COUNTRY AND SANCTIONS COMPLIANCE
+  !====================================================================
+  VALIDATION_STEP := 7;
+  
+  ! High-risk country screening
+  IF $SCAN(HIGH_RISK_COUNTRIES, WIRE_REQUEST.CREDIT_PARTY_COUNTRY) > 0 OR
+     $SCAN(HIGH_RISK_COUNTRIES, WIRE_REQUEST.CREDIT_BANK_COUNTRY) > 0 THEN
+  BEGIN
+    HIGH_RISK_COUNTRY_FLAG := 1;
+    VALIDATION_RESULT.COMPLIANCE_RATING := "HIGH_RISK";
+    CALL ADD_VALIDATION_WARNING("CRE018", 
+         "Payment to high-risk jurisdiction", "WARNING", ERROR_LIST);
+  END;
+  
+  ! OFAC sanctioned countries check
+  IF $SCAN(OFAC_COUNTRIES, WIRE_REQUEST.CREDIT_PARTY_COUNTRY) > 0 OR
+     $SCAN(OFAC_COUNTRIES, WIRE_REQUEST.CREDIT_BANK_COUNTRY) > 0 THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("CRE019", 
+         "Payment to OFAC sanctioned country prohibited", "ERROR", ERROR_LIST);
+    VALIDATION_RESULT.COUNTRY_COMPLIANCE_STATUS := 2;
+    VALIDATION_RESULT.COMPLIANCE_RATING := "PROHIBITED";
+  END
+  ELSE
+    VALIDATION_RESULT.COUNTRY_COMPLIANCE_STATUS := 0;
+
+  !====================================================================
+  ! STEP 8: OFAC SANCTIONS SCREENING
+  !====================================================================
+  VALIDATION_STEP := 8;
+  
+  ! Screen beneficiary against OFAC SDN list
+  CALL OFAC_SCREEN_PARTY(NORMALIZED_BENEFICIARY,
+                        WIRE_REQUEST.CREDIT_PARTY_ADDRESS,
+                        WIRE_REQUEST.CREDIT_PARTY_COUNTRY,
+                        SANCTION_MATCH_COUNT, TEMP_RESULT);
+  
+  IF TEMP_RESULT <> 0 OR SANCTION_MATCH_COUNT > 0 THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("CRE020", 
+         "Beneficiary OFAC sanctions match detected", "ERROR", ERROR_LIST);
+    VALIDATION_RESULT.SANCTIONS_STATUS := 2;
+  END
+  ELSE
+    VALIDATION_RESULT.SANCTIONS_STATUS := 0;
+  
+  ! Screen receiving bank against OFAC list
+  IF $LEN(WIRE_REQUEST.CREDIT_BANK_NAME) > 0 THEN
+  BEGIN
+    CALL OFAC_SCREEN_PARTY(WIRE_REQUEST.CREDIT_BANK_NAME,
+                          WIRE_REQUEST.CREDIT_BANK_ADDRESS,
+                          WIRE_REQUEST.CREDIT_BANK_COUNTRY,
+                          SANCTION_MATCH_COUNT, TEMP_RESULT);
+    
+    IF TEMP_RESULT <> 0 OR SANCTION_MATCH_COUNT > 0 THEN
+      CALL ADD_VALIDATION_ERROR("CRE021", 
+           "Receiving bank OFAC sanctions match", "ERROR", ERROR_LIST);
+  END;
+  
+  ! Screen ultimate creditor if different
+  IF $LEN(WIRE_REQUEST.ULTIMATE_CREDITOR_NAME) > 0 AND
+     WIRE_REQUEST.ULTIMATE_CREDITOR_NAME <> WIRE_REQUEST.CREDIT_PARTY_NAME THEN
+  BEGIN
+    CALL OFAC_SCREEN_PARTY(WIRE_REQUEST.ULTIMATE_CREDITOR_NAME,
+                          "", "", SANCTION_MATCH_COUNT, TEMP_RESULT);
+    IF TEMP_RESULT <> 0 OR SANCTION_MATCH_COUNT > 0 THEN
+      CALL ADD_VALIDATION_ERROR("CRE022", 
+           "Ultimate creditor OFAC sanctions match", "ERROR", ERROR_LIST);
+  END;
+
+  !====================================================================
+  ! STEP 9: CURRENCY AND AMOUNT VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 9;
+  
+  ! Validate currency code
+  IF $SCAN(VALID_CURRENCIES, WIRE_REQUEST.CURRENCY_CODE) = 0 THEN
+    CALL ADD_VALIDATION_WARNING("CRE023", 
+         "Uncommon currency code - verify support", "WARNING", ERROR_LIST);
+  
+  ! Validate amount for receiving country limits
+  IF TEMP_AMOUNT > MAX_BENEFICIARY_AMOUNT THEN
+    CALL ADD_VALIDATION_ERROR("CRE024", 
+         "Amount exceeds maximum credit limit", "ERROR", ERROR_LIST);
+  
+  ! Check currency restrictions for destination country
+  CALL CHECK_CURRENCY_RESTRICTIONS(WIRE_REQUEST.CREDIT_PARTY_COUNTRY,
+                                  WIRE_REQUEST.CURRENCY_CODE,
+                                  TEMP_AMOUNT, TEMP_RESULT);
+  IF TEMP_RESULT <> 0 THEN
+    CALL ADD_VALIDATION_WARNING("CRE025", 
+         "Currency restrictions may apply", "WARNING", ERROR_LIST);
+
+  !====================================================================
+  ! STEP 10: MESSAGE FORMAT VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 10;
+  
+  ! Validate ISO 20022 message format compliance for beneficiary data
+  CALL VALIDATE_BENEFICIARY_MESSAGE_FORMAT(WIRE_REQUEST.MESSAGE_TYPE,
+                                          WIRE_REQUEST, TEMP_RESULT);
+  IF TEMP_RESULT <> 0 THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("CRE026", 
+         "Beneficiary message format validation failed", "WARNING", ERROR_LIST);
+    VALIDATION_RESULT.MESSAGE_FORMAT_STATUS := 1;
+  END
+  ELSE
+    VALIDATION_RESULT.MESSAGE_FORMAT_STATUS := 0;
+  
+  ! Validate remittance information length and format
+  IF $LEN(WIRE_REQUEST.REMITTANCE_INFO) > REMITTANCE_MAX_LENGTH THEN
+    CALL ADD_VALIDATION_WARNING("CRE027", 
+         "Remittance information exceeds maximum length", "WARNING", ERROR_LIST);
+
+  !====================================================================
+  ! STEP 11: REGULATORY REPORTING VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 11;
+  
+  ! Validate regulatory reporting requirements for cross-border payments
+  IF CROSS_BORDER_FLAG = 1 OR TEMP_AMOUNT >= EDD_THRESHOLD THEN
+  BEGIN
+    CALL VALIDATE_REGULATORY_REPORTING(WIRE_REQUEST.CREDIT_PARTY_COUNTRY,
+                                      WIRE_REQUEST.REGULATORY_INFO,
+                                      TEMP_AMOUNT, TEMP_RESULT);
+    IF TEMP_RESULT <> 0 THEN
+      CALL ADD_VALIDATION_WARNING("CRE028", 
+           "Additional regulatory information may be required", 
+           "WARNING", ERROR_LIST);
+  END;
+
+  !====================================================================
+  ! STEP 12: CROSS-BORDER PAYMENT VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 12;
+  
+  IF CROSS_BORDER_FLAG = 1 THEN
+  BEGIN
+    VALIDATION_RESULT.CROSS_BORDER_STATUS := 0;
+    
+    ! Validate SWIFT gpi compliance for international payments
+    IF $LEN(WIRE_REQUEST.MESSAGE_TYPE) > 0 AND
+       WIRE_REQUEST.MESSAGE_TYPE[0:2] = "MT" THEN
+      CALL ADD_VALIDATION_WARNING("CRE029", 
+           "Consider ISO 20022 for enhanced cross-border tracking", 
+           "INFO", ERROR_LIST);
+    
+    ! Validate correspondent coverage for destination
+    CALL VALIDATE_CORRESPONDENT_COVERAGE(EFFECTIVE_BIC,
+                                       WIRE_REQUEST.CREDIT_PARTY_COUNTRY,
+                                       WIRE_REQUEST.CURRENCY_CODE,
+                                       TEMP_RESULT);
+    IF TEMP_RESULT <> 0 THEN
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("CRE030", 
+           "No correspondent coverage for destination", "ERROR", ERROR_LIST);
+      VALIDATION_RESULT.CROSS_BORDER_STATUS := 2;
+    END;
+  END;
+
+  !====================================================================
+  ! FINAL VALIDATION RESULT DETERMINATION
+  !====================================================================
+  
+  ! Set compliance rating if not already set
+  IF VALIDATION_RESULT.COMPLIANCE_RATING = "" THEN
+  BEGIN
+    IF TEMP_AMOUNT >= HIGH_RISK_AMOUNT OR 
+       VALIDATION_RESULT.ENHANCED_DUE_DILIGENCE = 1 THEN
+      VALIDATION_RESULT.COMPLIANCE_RATING := "ENHANCED";
+    ELSE
+      VALIDATION_RESULT.COMPLIANCE_RATING := "STANDARD";
+  END;
+  
+  ! Determine overall validation status
+  IF ERROR_LIST.ERROR_COUNT > 0 THEN
+  BEGIN
+    ! Check for blocking errors
+    FOR I := 0 TO ERROR_LIST.ERROR_COUNT - 1 DO
+    BEGIN
+      IF ERROR_LIST.ERROR_SEVERITY[I] = "ERROR" AND
+         (ERROR_LIST.ERROR_CODES[I] = "CRE001" OR
+          ERROR_LIST.ERROR_CODES[I] = "CRE002" OR
+          ERROR_LIST.ERROR_CODES[I] = "CRE004" OR
+          ERROR_LIST.ERROR_CODES[I] = "CRE005" OR
+          ERROR_LIST.ERROR_CODES[I] = "CRE015" OR
+          ERROR_LIST.ERROR_CODES[I] = "CRE019" OR
+          ERROR_LIST.ERROR_CODES[I] = "CRE020" OR
+          ERROR_LIST.ERROR_CODES[I] = "CRE030") THEN
+      BEGIN
+        VALIDATION_RESULT.VALIDATION_STATUS := 2; ! Error - blocking
+        VALIDATION_RESULT.VALIDATION_CODE := "REJECTED";
+        VALIDATION_RESULT.VALIDATION_MESSAGE := 
+          "Credit party validation failed - transaction blocked";
+        CALL LOG_VALIDATION_RESULT("CREDIT_PARTY", 
+                                  WIRE_REQUEST.CREDIT_PARTY_NAME,
+                                  VALIDATION_RESULT.VALIDATION_STATUS,
+                                  ERROR_LIST.ERROR_COUNT);
+        RETURN;
+      END;
+    END;
+    
+    ! If no blocking errors, set warning status
+    VALIDATION_RESULT.VALIDATION_STATUS := 1; ! Warning
+    VALIDATION_RESULT.VALIDATION_CODE := "WARNING";
+    VALIDATION_RESULT.VALIDATION_MESSAGE := 
+      "Credit party validation completed with warnings - review required";
+  END
+  ELSE
+  BEGIN
+    VALIDATION_RESULT.VALIDATION_STATUS := 0; ! Success
+    VALIDATION_RESULT.VALIDATION_CODE := "APPROVED";
+    VALIDATION_RESULT.VALIDATION_MESSAGE := 
+      "Credit party validation successful";
+  END;
+
+  ! Log validation completion
+  CALL LOG_VALIDATION_RESULT("CREDIT_PARTY", 
+                            WIRE_REQUEST.CREDIT_PARTY_NAME,
+                            VALIDATION_RESULT.VALIDATION_STATUS,
+                            ERROR_LIST.ERROR_COUNT);
+
+END; ! VALIDATE_CREDIT_PARTY
+
+!**********************************************************************
+!* SUPPORTING SUBPROCEDURES
+!**********************************************************************
+
+SUBPROC ADD_VALIDATION_ERROR(ERROR_CODE, ERROR_MESSAGE, SEVERITY, ERROR_LIST);
+  STRING ERROR_CODE[10];
+  STRING ERROR_MESSAGE[200];
+  STRING SEVERITY[10];
+  STRUCT ERROR_LIST(*);
+BEGIN
+  IF ERROR_LIST.ERROR_COUNT < 50 THEN
+  BEGIN
+    ERROR_LIST.ERROR_CODES[ERROR_LIST.ERROR_COUNT] := ERROR_CODE;
+    ERROR_LIST.ERROR_MESSAGES[ERROR_LIST.ERROR_COUNT] := ERROR_MESSAGE;
+    ERROR_LIST.ERROR_SEVERITY[ERROR_LIST.ERROR_COUNT] := SEVERITY;
+    ERROR_LIST.ERROR_COUNT := ERROR_LIST.ERROR_COUNT + 1;
+  END;
+END;
+
+SUBPROC ADD_VALIDATION_WARNING(WARNING_CODE, WARNING_MESSAGE, SEVERITY, ERROR_LIST);
+  STRING WARNING_CODE[10];
+  STRING WARNING_MESSAGE[200];
+  STRING SEVERITY[10];
+  STRUCT ERROR_LIST(*);
+BEGIN
+  CALL ADD_VALIDATION_ERROR(WARNING_CODE, WARNING_MESSAGE, SEVERITY, ERROR_LIST);
+END;
+
+SUBPROC CLASSIFY_PAYMENT_TYPE(DEST_COUNTRY, CURRENCY, ROUTING_CODE, 
+                             CLASSIFICATION, CROSS_BORDER_FLAG);
+  STRING DEST_COUNTRY[2];
+  STRING CURRENCY[3];
+  STRING ROUTING_CODE[11];
+  STRING CLASSIFICATION[20];
+  INT CROSS_BORDER_FLAG;
+BEGIN
+  ! Determine payment classification
+  IF DEST_COUNTRY = "US" AND CURRENCY = "USD" AND 
+     $LEN(ROUTING_CODE) = 9 THEN
+  BEGIN
+    CLASSIFICATION := "DOMESTIC";
+    CROSS_BORDER_FLAG := 0;
+  END
+  ELSE
+  BEGIN
+    CLASSIFICATION := "INTERNATIONAL";
+    CROSS_BORDER_FLAG := 1;
+  END;
+END;
+
+!**********************************************************************
+!* END OF VALIDATE_CREDIT_PARTY PROCEDURE
+!**********************************************************************
+
