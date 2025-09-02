@@ -1,0 +1,471 @@
+?NOLIST, SOURCE $SYSTEM.SYSTEM.EXTDECS0(ZSYSDEFS)
+
+!**********************************************************************
+!* PROCEDURE: VALIDATE_DEBIT_PARTY                                   *
+!* PURPOSE:   Validation of debit party information                  *
+!*            for wire transfer processing                           *
+!* SYSTEM:    Wire Transfer Processing System                        *
+!* VERSION:   1.0                                                    *
+!* DATE:      2025-09-01                                             *
+!**********************************************************************
+
+PROC VALIDATE_DEBIT_PARTY(WIRE_REQUEST, VALIDATION_RESULT, ERROR_LIST);
+
+!----------------------------------------------------------------------
+! INPUT PARAMETERS
+!----------------------------------------------------------------------
+STRUCT WIRE_REQUEST(*);
+  BEGIN
+    STRING DEBIT_ACCOUNT_NUMBER[20];      ! Debit party account number
+    STRING DEBIT_ROUTING_NUMBER[9];       ! ABA routing number  
+    STRING DEBIT_PARTY_NAME[70];          ! Debit party legal name
+    STRING DEBIT_PARTY_ADDRESS[140];      ! Structured address
+    STRING DEBIT_PARTY_CITY[35];          ! City
+    STRING DEBIT_PARTY_STATE[2];          ! State code
+    STRING DEBIT_PARTY_COUNTRY[2];        ! Country code (ISO)
+    STRING DEBIT_PARTY_POSTAL[10];        ! Postal code
+    STRING DEBIT_PARTY_ID[20];            ! Customer identification
+    STRING PAYMENT_AMOUNT[15];            ! Wire amount
+    STRING CURRENCY_CODE[3];              ! ISO currency code
+    STRING PAYMENT_PURPOSE[4];            ! Purpose code
+    STRING INSTRUCTION_PRIORITY[4];       ! HIGH/NORM priority
+    STRING CHARGE_BEARER[3];              ! OUR/BEN/SHA
+    STRING CHANNEL_SOURCE[10];            ! Online/Branch/API/Mobile
+    STRING ULTIMATE_DEBTOR_NAME[70];      ! Ultimate debtor if different
+    STRING AUTHORIZATION_ID[20];          ! Authorization reference
+    STRING MESSAGE_TYPE[10];              ! pacs.008/pain.001
+  END;
+
+!----------------------------------------------------------------------
+! OUTPUT PARAMETERS  
+!----------------------------------------------------------------------
+STRUCT VALIDATION_RESULT(*);
+  BEGIN
+    INT VALIDATION_STATUS;                ! 0=Valid, 1=Warning, 2=Error
+    STRING VALIDATION_CODE[10];           ! Validation result code
+    STRING VALIDATION_MESSAGE[200];       ! Detailed validation message
+    INT ACCOUNT_STATUS;                   ! Account validation result
+    INT SANCTIONS_STATUS;                 ! OFAC screening result
+    INT AML_STATUS;                       ! AML validation result
+    INT AUTHORIZATION_STATUS;             ! Authorization check result
+    INT LIQUIDITY_STATUS;                 ! Funds availability result
+    FIXED AVAILABLE_BALANCE;              ! Available account balance
+    INT KYC_STATUS;                       ! Know Your Customer status
+    STRING RISK_RATING[10];               ! Risk assessment rating
+  END;
+
+STRUCT ERROR_LIST(*);
+  BEGIN
+    INT ERROR_COUNT;                      ! Number of validation errors
+    STRING ERROR_CODES[0:49][10];         ! Array of error codes
+    STRING ERROR_MESSAGES[0:49][200];     ! Array of error messages
+  END;
+
+!----------------------------------------------------------------------
+! LOCAL VARIABLES
+!----------------------------------------------------------------------
+INT VALIDATION_STEP;                     ! Current validation step
+INT I;                                    ! Loop counter
+INT TEMP_RESULT;                          ! Temporary result holder
+STRING TEMP_STRING[200];                  ! Temporary string work area
+FIXED TEMP_AMOUNT;                        ! Temporary amount for calculations
+INT SANCTION_MATCH_COUNT;                 ! Number of sanctions matches
+INT AML_ALERT_COUNT;                      ! Number of AML alerts
+STRING FORMATTED_ACCOUNT[20];             ! Formatted account number
+STRING NORMALIZED_NAME[70];               ! Normalized party name
+INT ACCOUNT_TYPE;                         ! Account type classification
+
+!----------------------------------------------------------------------
+! BUSINESS CONSTANTS
+!----------------------------------------------------------------------
+LITERAL MAX_WIRE_AMOUNT = 999999999.99;   ! Maximum wire amount
+LITERAL MIN_WIRE_AMOUNT = 0.01;           ! Minimum wire amount  
+LITERAL SANCTION_CHECK_REQUIRED = 1;      ! Enable sanctions screening
+LITERAL AML_CHECK_REQUIRED = 1;           ! Enable AML screening
+LITERAL KYC_REFRESH_DAYS = 365;           ! KYC refresh interval
+LITERAL HIGH_RISK_THRESHOLD = 50000.00;   ! High risk amount threshold
+LITERAL MAX_DAILY_LIMIT = 1000000.00;     ! Daily wire limit per customer
+
+!----------------------------------------------------------------------
+! VALIDATION BUSINESS RULES
+!----------------------------------------------------------------------
+LITERAL DOMESTIC_ROUTING_LENGTH = 9;      ! US domestic routing number
+LITERAL ACCOUNT_MIN_LENGTH = 1;           ! Minimum account length
+LITERAL ACCOUNT_MAX_LENGTH = 17;          ! Maximum account length  
+LITERAL NAME_MIN_LENGTH = 2;              ! Minimum name length
+LITERAL ADDRESS_MIN_LENGTH = 10;          ! Minimum address length
+LITERAL VALID_PRIORITIES = "HIGH,NORM";   ! Valid priority values
+LITERAL VALID_CHARGE_TYPES = "OUR,BEN,SHA"; ! Valid charge bearer codes
+LITERAL VALID_CHANNELS = "ONLINE,BRANCH,API,MOBILE,PHONE,FILE"; ! Valid channels
+
+BEGIN
+  ! Initialize validation result
+  VALIDATION_RESULT.VALIDATION_STATUS := 0;
+  VALIDATION_RESULT.VALIDATION_CODE := "INIT";
+  VALIDATION_RESULT.VALIDATION_MESSAGE := "Debit party validation initiated";
+  ERROR_LIST.ERROR_COUNT := 0;
+
+  !====================================================================
+  ! STEP 1: ACCOUNT NUMBER VALIDATION  
+  !====================================================================
+  VALIDATION_STEP := 1;
+  
+  ! Check account number format and length
+  IF $LEN(WIRE_REQUEST.DEBIT_ACCOUNT_NUMBER) < ACCOUNT_MIN_LENGTH OR
+     $LEN(WIRE_REQUEST.DEBIT_ACCOUNT_NUMBER) > ACCOUNT_MAX_LENGTH THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL001", 
+         "Invalid debit account number length", ERROR_LIST);
+    VALIDATION_RESULT.ACCOUNT_STATUS := 2; ! Error
+  END
+  ELSE
+  BEGIN
+    ! Format and normalize account number
+    CALL FORMAT_ACCOUNT_NUMBER(WIRE_REQUEST.DEBIT_ACCOUNT_NUMBER, 
+                              FORMATTED_ACCOUNT);
+    WIRE_REQUEST.DEBIT_ACCOUNT_NUMBER := FORMATTED_ACCOUNT;
+    
+    ! Validate account exists and is active
+    CALL VALIDATE_ACCOUNT_STATUS(WIRE_REQUEST.DEBIT_ACCOUNT_NUMBER,
+                                 WIRE_REQUEST.DEBIT_ROUTING_NUMBER,
+                                 TEMP_RESULT, ACCOUNT_TYPE);
+    IF TEMP_RESULT <> 0 THEN
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("VAL002", 
+           "Debit account not found or inactive", ERROR_LIST);
+      VALIDATION_RESULT.ACCOUNT_STATUS := 2; ! Error
+    END
+    ELSE
+      VALIDATION_RESULT.ACCOUNT_STATUS := 0; ! Valid
+  END;
+
+  !====================================================================
+  ! STEP 2: ROUTING NUMBER VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 2;
+  
+  ! Domestic routing number validation
+  IF $LEN(WIRE_REQUEST.DEBIT_ROUTING_NUMBER) <> DOMESTIC_ROUTING_LENGTH THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL003", 
+         "Invalid routing number format", ERROR_LIST);
+  END
+  ELSE
+  BEGIN
+    ! Validate routing number checksum (MOD-10 algorithm)
+    CALL VALIDATE_ROUTING_CHECKSUM(WIRE_REQUEST.DEBIT_ROUTING_NUMBER, 
+                                  TEMP_RESULT);
+    IF TEMP_RESULT <> 0 THEN
+      CALL ADD_VALIDATION_ERROR("VAL004", 
+           "Invalid routing number checksum", ERROR_LIST);
+  END;
+
+  !====================================================================
+  ! STEP 3: DEBIT PARTY NAME VALIDATION
+  !====================================================================  
+  VALIDATION_STEP := 3;
+  
+  ! Name length and format validation
+  IF $LEN(WIRE_REQUEST.DEBIT_PARTY_NAME) < NAME_MIN_LENGTH THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL005", 
+         "Debit party name too short", ERROR_LIST);
+  END
+  ELSE
+  BEGIN
+    ! Normalize name for comparison
+    CALL NORMALIZE_PARTY_NAME(WIRE_REQUEST.DEBIT_PARTY_NAME, 
+                             NORMALIZED_NAME);
+    
+    ! Validate name matches account holder
+    CALL VALIDATE_ACCOUNT_HOLDER_NAME(WIRE_REQUEST.DEBIT_ACCOUNT_NUMBER,
+                                     NORMALIZED_NAME, TEMP_RESULT);
+    IF TEMP_RESULT <> 0 THEN
+      CALL ADD_VALIDATION_ERROR("VAL006", 
+           "Name does not match account holder", ERROR_LIST);
+  END;
+
+  !====================================================================
+  ! STEP 4: ADDRESS VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 4;
+  
+  ! Structured address validation (ISO 20022 compliant)
+  IF $LEN(WIRE_REQUEST.DEBIT_PARTY_ADDRESS) < ADDRESS_MIN_LENGTH THEN
+    CALL ADD_VALIDATION_ERROR("VAL007", 
+         "Incomplete debit party address", ERROR_LIST);
+  
+  ! Country code validation (mandatory for ISO 20022)
+  IF $LEN(WIRE_REQUEST.DEBIT_PARTY_COUNTRY) <> 2 THEN
+    CALL ADD_VALIDATION_ERROR("VAL008", 
+         "Invalid or missing country code", ERROR_LIST);
+  
+  ! Postal code format validation  
+  CALL VALIDATE_POSTAL_CODE(WIRE_REQUEST.DEBIT_PARTY_COUNTRY,
+                           WIRE_REQUEST.DEBIT_PARTY_POSTAL, 
+                           TEMP_RESULT);
+  IF TEMP_RESULT <> 0 THEN
+    CALL ADD_VALIDATION_ERROR("VAL009", 
+         "Invalid postal code format", ERROR_LIST);
+
+  !====================================================================
+  ! STEP 5: PAYMENT AMOUNT VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 5;
+  
+  ! Convert amount string to numeric
+  TEMP_AMOUNT := $NUMERIC(WIRE_REQUEST.PAYMENT_AMOUNT, 10, 2);
+  
+  ! Amount range validation
+  IF TEMP_AMOUNT < MIN_WIRE_AMOUNT OR TEMP_AMOUNT > MAX_WIRE_AMOUNT THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL010", 
+         "Wire amount outside valid range", ERROR_LIST);
+  END;
+  
+  ! High-value transaction flag
+  IF TEMP_AMOUNT >= HIGH_RISK_THRESHOLD THEN
+  BEGIN
+    VALIDATION_RESULT.RISK_RATING := "HIGH";
+    CALL ADD_VALIDATION_WARNING("VAL011", 
+         "High-value transaction requires additional review", ERROR_LIST);
+  END
+  ELSE
+    VALIDATION_RESULT.RISK_RATING := "NORMAL";
+
+  !====================================================================
+  ! STEP 6: LIQUIDITY AND CREDIT AUTHORIZATION
+  !====================================================================
+  VALIDATION_STEP := 6;
+  
+  ! Check available funds for debit
+  CALL CHECK_ACCOUNT_BALANCE(WIRE_REQUEST.DEBIT_ACCOUNT_NUMBER,
+                           VALIDATION_RESULT.AVAILABLE_BALANCE,
+                           TEMP_RESULT);
+  
+  IF TEMP_RESULT <> 0 THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL012", 
+         "Unable to verify account balance", ERROR_LIST);
+    VALIDATION_RESULT.LIQUIDITY_STATUS := 2; ! Error
+  END
+  ELSE IF VALIDATION_RESULT.AVAILABLE_BALANCE < TEMP_AMOUNT THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL013", 
+         "Insufficient funds for wire transfer", ERROR_LIST);
+    VALIDATION_RESULT.LIQUIDITY_STATUS := 2; ! Error
+  END
+  ELSE
+    VALIDATION_RESULT.LIQUIDITY_STATUS := 0; ! Valid
+
+  ! Check daily wire transfer limits
+  CALL CHECK_DAILY_WIRE_LIMIT(WIRE_REQUEST.DEBIT_PARTY_ID,
+                             TEMP_AMOUNT, TEMP_RESULT);
+  IF TEMP_RESULT <> 0 THEN
+    CALL ADD_VALIDATION_ERROR("VAL014", 
+         "Daily wire transfer limit exceeded", ERROR_LIST);
+
+  !====================================================================
+  ! STEP 7: OFAC SANCTIONS SCREENING
+  !====================================================================
+  VALIDATION_STEP := 7;
+  
+  IF SANCTION_CHECK_REQUIRED THEN
+  BEGIN
+    ! Screen debit party name against OFAC SDN list
+    CALL OFAC_SCREEN_PARTY(NORMALIZED_NAME,
+                          WIRE_REQUEST.DEBIT_PARTY_ADDRESS,
+                          WIRE_REQUEST.DEBIT_PARTY_COUNTRY,
+                          SANCTION_MATCH_COUNT, TEMP_RESULT);
+    
+    IF TEMP_RESULT <> 0 OR SANCTION_MATCH_COUNT > 0 THEN
+    BEGIN
+      CALL ADD_VALIDATION_ERROR("VAL015", 
+           "Potential OFAC sanctions match detected", ERROR_LIST);
+      VALIDATION_RESULT.SANCTIONS_STATUS := 2; ! Error - blocked
+    END
+    ELSE
+      VALIDATION_RESULT.SANCTIONS_STATUS := 0; ! Clear
+    
+    ! Screen ultimate debtor if different from debit party
+    IF $LEN(WIRE_REQUEST.ULTIMATE_DEBTOR_NAME) > 0 AND
+       WIRE_REQUEST.ULTIMATE_DEBTOR_NAME <> WIRE_REQUEST.DEBIT_PARTY_NAME THEN
+    BEGIN
+      CALL OFAC_SCREEN_PARTY(WIRE_REQUEST.ULTIMATE_DEBTOR_NAME,
+                            "", "", SANCTION_MATCH_COUNT, TEMP_RESULT);
+      IF TEMP_RESULT <> 0 OR SANCTION_MATCH_COUNT > 0 THEN
+        CALL ADD_VALIDATION_ERROR("VAL016", 
+             "Ultimate debtor OFAC sanctions match", ERROR_LIST);
+    END;
+  END;
+
+  !====================================================================
+  ! STEP 8: AML TRANSACTION MONITORING
+  !====================================================================
+  VALIDATION_STEP := 8;
+  
+  IF AML_CHECK_REQUIRED THEN
+  BEGIN
+    ! AML transaction pattern analysis
+    CALL AML_TRANSACTION_ANALYSIS(WIRE_REQUEST.DEBIT_PARTY_ID,
+                                 TEMP_AMOUNT,
+                                 WIRE_REQUEST.PAYMENT_PURPOSE,
+                                 WIRE_REQUEST.CHANNEL_SOURCE,
+                                 AML_ALERT_COUNT, TEMP_RESULT);
+    
+    IF AML_ALERT_COUNT > 0 THEN
+    BEGIN
+      CALL ADD_VALIDATION_WARNING("VAL017", 
+           "AML suspicious activity alert generated", ERROR_LIST);
+      VALIDATION_RESULT.AML_STATUS := 1; ! Warning
+    END
+    ELSE
+      VALIDATION_RESULT.AML_STATUS := 0; ! Clear
+  END;
+
+  !====================================================================
+  ! STEP 9: KYC COMPLIANCE VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 9;
+  
+  ! Check KYC status and refresh requirements
+  CALL CHECK_KYC_STATUS(WIRE_REQUEST.DEBIT_PARTY_ID,
+                       KYC_REFRESH_DAYS, TEMP_RESULT);
+  
+  IF TEMP_RESULT = 1 THEN
+  BEGIN
+    CALL ADD_VALIDATION_WARNING("VAL018", 
+         "KYC information requires refresh", ERROR_LIST);
+    VALIDATION_RESULT.KYC_STATUS := 1; ! Warning
+  END
+  ELSE IF TEMP_RESULT = 2 THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL019", 
+         "KYC validation expired or incomplete", ERROR_LIST);
+    VALIDATION_RESULT.KYC_STATUS := 2; ! Error
+  END
+  ELSE
+    VALIDATION_RESULT.KYC_STATUS := 0; ! Valid
+
+  !====================================================================
+  ! STEP 10: AUTHORIZATION VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 10;
+  
+  ! Validate authorization for transaction amount and type
+  CALL VALIDATE_TRANSACTION_AUTHORIZATION(WIRE_REQUEST.DEBIT_PARTY_ID,
+                                        WIRE_REQUEST.AUTHORIZATION_ID,
+                                        TEMP_AMOUNT,
+                                        WIRE_REQUEST.CHANNEL_SOURCE,
+                                        TEMP_RESULT);
+  
+  IF TEMP_RESULT <> 0 THEN
+  BEGIN
+    CALL ADD_VALIDATION_ERROR("VAL020", 
+         "Invalid or insufficient authorization", ERROR_LIST);
+    VALIDATION_RESULT.AUTHORIZATION_STATUS := 2; ! Error
+  END
+  ELSE
+    VALIDATION_RESULT.AUTHORIZATION_STATUS := 0; ! Valid
+
+  !====================================================================
+  ! STEP 11: MESSAGE FORMAT VALIDATION
+  !====================================================================
+  VALIDATION_STEP := 11;
+  
+  ! Validate ISO 20022 message format compliance
+  CALL VALIDATE_MESSAGE_FORMAT(WIRE_REQUEST.MESSAGE_TYPE,
+                               WIRE_REQUEST, TEMP_RESULT);
+  
+  IF TEMP_RESULT <> 0 THEN
+    CALL ADD_VALIDATION_ERROR("VAL021", 
+         "Message format validation failed", ERROR_LIST);
+
+  ! Validate instruction priority
+  IF $SCAN(VALID_PRIORITIES, WIRE_REQUEST.INSTRUCTION_PRIORITY) = 0 THEN
+    CALL ADD_VALIDATION_ERROR("VAL022", 
+         "Invalid instruction priority code", ERROR_LIST);
+
+  ! Validate charge bearer code
+  IF $SCAN(VALID_CHARGE_TYPES, WIRE_REQUEST.CHARGE_BEARER) = 0 THEN
+    CALL ADD_VALIDATION_ERROR("VAL023", 
+         "Invalid charge bearer specification", ERROR_LIST);
+
+  !====================================================================
+  ! FINAL VALIDATION RESULT DETERMINATION
+  !====================================================================
+  
+  ! Set overall validation status based on error count
+  IF ERROR_LIST.ERROR_COUNT > 0 THEN
+  BEGIN
+    ! Check if any errors are blocking (status 2)
+    FOR I := 0 TO ERROR_LIST.ERROR_COUNT - 1 DO
+    BEGIN
+      IF ERROR_LIST.ERROR_CODES[I][0:2] = "VAL" AND
+         (ERROR_LIST.ERROR_CODES[I] = "VAL001" OR
+          ERROR_LIST.ERROR_CODES[I] = "VAL002" OR
+          ERROR_LIST.ERROR_CODES[I] = "VAL013" OR
+          ERROR_LIST.ERROR_CODES[I] = "VAL015" OR
+          ERROR_LIST.ERROR_CODES[I] = "VAL019" OR
+          ERROR_LIST.ERROR_CODES[I] = "VAL020") THEN
+      BEGIN
+        VALIDATION_RESULT.VALIDATION_STATUS := 2; ! Error - blocking
+        VALIDATION_RESULT.VALIDATION_CODE := "REJECTED";
+        VALIDATION_RESULT.VALIDATION_MESSAGE := 
+          "Debit party validation failed - transaction blocked";
+        RETURN; ! Exit early for blocking errors
+      END;
+    END;
+    
+    ! If no blocking errors, set warning status
+    VALIDATION_RESULT.VALIDATION_STATUS := 1; ! Warning
+    VALIDATION_RESULT.VALIDATION_CODE := "WARNING"; 
+    VALIDATION_RESULT.VALIDATION_MESSAGE := 
+      "Debit party validation completed with warnings";
+  END
+  ELSE
+  BEGIN
+    VALIDATION_RESULT.VALIDATION_STATUS := 0; ! Success
+    VALIDATION_RESULT.VALIDATION_CODE := "APPROVED";
+    VALIDATION_RESULT.VALIDATION_MESSAGE := 
+      "Debit party validation successful";
+  END;
+
+  ! Log validation completion
+  CALL LOG_VALIDATION_RESULT("DEBIT_PARTY", 
+                            WIRE_REQUEST.DEBIT_PARTY_ID,
+                            VALIDATION_RESULT.VALIDATION_STATUS,
+                            ERROR_LIST.ERROR_COUNT);
+
+END; ! VALIDATE_DEBIT_PARTY
+
+!**********************************************************************
+!* SUPPORTING SUBPROCEDURES
+!**********************************************************************
+
+SUBPROC ADD_VALIDATION_ERROR(ERROR_CODE, ERROR_MESSAGE, ERROR_LIST);
+  STRING ERROR_CODE[10];
+  STRING ERROR_MESSAGE[200]; 
+  STRUCT ERROR_LIST(*);
+BEGIN
+  IF ERROR_LIST.ERROR_COUNT < 50 THEN
+  BEGIN
+    ERROR_LIST.ERROR_CODES[ERROR_LIST.ERROR_COUNT] := ERROR_CODE;
+    ERROR_LIST.ERROR_MESSAGES[ERROR_LIST.ERROR_COUNT] := ERROR_MESSAGE;
+    ERROR_LIST.ERROR_COUNT := ERROR_LIST.ERROR_COUNT + 1;
+  END;
+END;
+
+SUBPROC ADD_VALIDATION_WARNING(WARNING_CODE, WARNING_MESSAGE, ERROR_LIST);
+  STRING WARNING_CODE[10];
+  STRING WARNING_MESSAGE[200];
+  STRUCT ERROR_LIST(*);
+BEGIN
+  ! Warnings are added to same error list but with different severity
+  CALL ADD_VALIDATION_ERROR(WARNING_CODE, WARNING_MESSAGE, ERROR_LIST);
+END;
+
+!**********************************************************************
+!* END OF VALIDATE_DEBIT_PARTY PROCEDURE
+!**********************************************************************
+
