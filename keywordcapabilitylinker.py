@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import List, Dict, Set, Tuple, Optional
 import re
 import difflib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import requests
 import time
 import os
@@ -50,7 +50,7 @@ import numpy as np
 from collections import defaultdict, Counter
 import logging
 
-# Configure logging for debugging and monitoring
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -58,23 +58,21 @@ logger = logging.getLogger(__name__)
 class BusinessCapabilityMatch:
     """
     Represents the result of mapping a TAL procedure to business capabilities.
-    
-    Contains all analysis results including confidence scores, evidence sources,
-    and reasoning for the mapping decisions.
     """
-    procedure_name: str                    # Name of the TAL procedure
-    source_file: str                       # Source file containing the procedure
-    business_capabilities: List[str]       # List of mapped business capabilities
-    primary_keyword_matches: List[str]     # Primary keywords that matched
-    related_keyword_matches: List[str]     # Related keywords that matched
-    fuzzy_matches: List[str]              # Fuzzy string matches found
-    semantic_matches: List[str]           # Capabilities found via LLM analysis
-    confidence_score: float               # Overall confidence (0.0-1.0)
-    domain_context: str                   # Primary business domain
-    procedural_patterns: List[str]        # Code patterns detected
-    reasoning: str                        # Human-readable explanation
-    validation_score: float               # Quality score for the mapping
-    evidence_strength: Dict[str, float]   # Breakdown of evidence sources
+    procedure_name: str
+    source_file: str
+    business_capabilities: List[str]
+    primary_keyword_matches: List[str]
+    related_keyword_matches: List[str]
+    fuzzy_matches: List[str]
+    semantic_matches: List[str]
+    confidence_score: float
+    domain_context: str
+    procedural_patterns: List[str]
+    reasoning: str
+    validation_score: float
+    evidence_strength: Dict[str, float]
+    llm_analysis: Optional[Dict] = field(default_factory=dict)
 
 class BusinessCapabilityExtractor:
     """
@@ -108,7 +106,7 @@ class BusinessCapabilityExtractor:
         self.all_capabilities = set()       # All unique capability names
         self.capability_hierarchy = {}      # For future hierarchical relationships
         
-        # Build the core mappings from the taxonomy
+        # Build all the core mappings from the taxonomy
         self._build_capability_mappings()
         
         # Validate taxonomy structure and warn about potential issues
@@ -243,6 +241,29 @@ class EnhancedProcedureParser:
         
         # Dynamic utility function detection (no hard-coded lists)
         self.utility_indicators = ['error', 'warning', 'debug', 'trace', 'log', 'format', 'normalize']
+        
+        # Comment pattern for TAL (line comments starting with -- or !)
+        self.comment_pattern = re.compile(r'(?:--|!)[^\n]*', re.MULTILINE)
+        
+        # Pattern for better boundary detection (e.g., RETURN; as potential end)
+        self.return_pattern = re.compile(r'(?i)return\s*;', re.MULTILINE)
+    
+    def _extract_comments(self, content: str) -> List[str]:
+        """
+        Extract all comments from the TAL content.
+        
+        Collects line comments starting with -- or ! for potential additional context.
+        """
+        comments = self.comment_pattern.findall(content)
+        return [comment.strip() for comment in comments if comment.strip()]
+    
+    def _strip_comments(self, content: str) -> str:
+        """
+        Remove comments from the TAL content to improve parsing accuracy.
+        
+        Strips line comments starting with -- or ! before procedure extraction.
+        """
+        return self.comment_pattern.sub('', content)
     
     def _extract_balanced_body(self, content: str, start_pos: int) -> Tuple[str, int]:
         """
@@ -295,7 +316,7 @@ class EnhancedProcedureParser:
         Extract procedure body when no explicit BEGIN/END structure exists.
         
         This handles cases where procedures don't follow strict BEGIN/END
-        patterns by looking for the next procedure declaration or taking
+        patterns by looking for the next procedure or taking
         a reasonable chunk of code.
         """
         next_proc_pos = len(remaining)
@@ -306,8 +327,15 @@ class EnhancedProcedureParser:
             if next_match:
                 next_proc_pos = min(next_proc_pos, next_match.start())
         
-        # Extract content up to next procedure or reasonable limit
-        body_end = min(next_proc_pos, 3000)  # Cap at 3000 chars for performance
+        # New: Look for RETURN; as an alternative boundary if no next procedure
+        return_match = self.return_pattern.search(remaining)
+        if return_match:
+            body_end = min(next_proc_pos, return_match.end())
+        else:
+            body_end = next_proc_pos
+        
+        # Extract content up to next boundary or reasonable limit
+        body_end = min(body_end, 3000)  # Cap at 3000 chars for performance
         return remaining[:body_end]
     
     def _is_utility_function(self, proc_name: str, proc_body: str) -> bool:
@@ -322,7 +350,7 @@ class EnhancedProcedureParser:
         body_lower = proc_body.lower()
         
         # Check for common utility prefixes in procedure names
-        utility_prefixes = ['add_', 'log_', 'format_', 'normalize_', 'get_', 'set_', 'init_', 'cleanup_']
+        utility_prefixes = ['add_', 'log_', 'format_', 'normalize_', 'get_', 'set_', 'init_']
         if any(name_lower.startswith(prefix) for prefix in utility_prefixes):
             return True
         
@@ -349,6 +377,12 @@ class EnhancedProcedureParser:
         rich metadata for capability matching. Handles deduplication and provides
         statistics for monitoring the parsing process.
         """
+        # New: Extract all comments from the full content
+        all_comments = self._extract_comments(content)
+        
+        # New: Strip comments from content to improve parsing accuracy
+        clean_content = self._strip_comments(content)
+        
         procedures = []
         found_procedures = set()  # Global deduplication
         
@@ -362,7 +396,7 @@ class EnhancedProcedureParser:
         
         # Process each procedure pattern type
         for pattern in self.proc_patterns:
-            matches = list(pattern.finditer(content))
+            matches = list(pattern.finditer(clean_content))
             extraction_stats['total_found'] += len(matches)
             
             for match in matches:
@@ -378,7 +412,7 @@ class EnhancedProcedureParser:
                 parameters = match.group(2).strip() if match.group(2) else ""
                 
                 # Extract procedure body using balanced parsing
-                body_content, body_end = self._extract_balanced_body(content, match.end())
+                body_content, body_end = self._extract_balanced_body(clean_content, match.end())
                 
                 # Extract function calls from the procedure body
                 function_calls = set()
@@ -395,6 +429,11 @@ class EnhancedProcedureParser:
                 if is_utility:
                     extraction_stats['utilities'] += 1
                 
+                # New: Extract comments specific to this procedure (from start to end)
+                proc_start = match.start()
+                proc_end = match.end() + body_end
+                proc_comments = self._extract_comments(content[proc_start:proc_end])
+                
                 # Create comprehensive procedure metadata
                 procedures.append({
                     'name': proc_name,
@@ -402,10 +441,11 @@ class EnhancedProcedureParser:
                     'parameters': parameters,
                     'body': body_content,
                     'function_calls': sorted(list(function_calls)),
-                    'full_context': content[max(0, match.start() - 200):match.end() + min(len(body_content), 2000)],
+                    'full_context': clean_content[max(0, match.start() - 200):match.end() + min(len(body_content), 2000)],
                     'is_utility': is_utility,
                     'body_length': len(body_content),
-                    'complexity_score': self._calculate_complexity_score(body_content, function_calls)
+                    'complexity_score': self._calculate_complexity_score(body_content, function_calls),
+                    'comments': proc_comments  # New: Extracted comments for the procedure
                 })
                 extraction_stats['parsed'] += 1
         
@@ -430,7 +470,7 @@ class EnhancedProcedureParser:
         # Function call complexity
         score += len(function_calls) * 0.3
         
-        # Control flow complexity
+        # Control flow complexity (increased weight for loops/conditions)
         control_keywords = ['if', 'while', 'for', 'case', 'loop']
         for keyword in control_keywords:
             score += body.lower().count(keyword) * 0.2
@@ -465,10 +505,10 @@ class DynamicCapabilityMatcher:
         self.keyword_importance_scores = {}     # keyword -> importance_score
         self.capability_keyword_map = {}        # capability -> {primary: [], related: []}
         
-        # Build all the core data structures from the taxonomy
+        # Build all all the core data structures from the taxonomy
         self._build_dynamic_mappings()
         
-        # Initialize TF-IDF for semantic similarity scoring
+        # Initialize all TF-IDF for semantic similarity scoring
         self._init_enhanced_tfidf()
         
         # Dynamic false positive detection patterns
@@ -529,15 +569,16 @@ class DynamicCapabilityMatcher:
         # Extract utility-like terms from the taxonomy itself
         utility_terms = set()
         for entry in self.keywords_data:
-            keywords = entry.get('keywords', '').lower() + ',' + entry.get('related_keywords', '').lower()
-            for word in re.findall(r'\b\w+\b', keywords):
+            domain = entry.get('metadata', 'unknown')
+            keywords = entry.get('keywords', '') + ',' + entry.get('related_keywords', '')
+            for word in re.findall(r'\b\w+\b', keywords.lower()):
                 # Common utility indicators found in banking taxonomies
                 if word in ['error', 'warning', 'debug', 'trace', 'log', 'format', 'normalize']:
                     utility_terms.add(word)
         
         # Create regex patterns for utility detection
         if utility_terms:
-            patterns.append(re.compile(r'(?i)^(add_|get_|set_|init_)'))
+            patterns.append(re.compile(r'(?i)^(add_|get_|set_|init_|log_|format_|normalize_)'))
             utility_pattern = '|'.join(utility_terms)
             patterns.append(re.compile(f'(?i)({utility_pattern})$'))
         
@@ -608,6 +649,7 @@ class DynamicCapabilityMatcher:
         proc_name = procedure['name']
         proc_body = procedure['body'].lower()
         function_calls = procedure.get('function_calls', [])
+
         full_context = procedure.get('full_context', '').lower()
         is_utility = procedure.get('is_utility', False)
         complexity_score = procedure.get('complexity_score', 0.0)
@@ -621,7 +663,7 @@ class DynamicCapabilityMatcher:
             return self._create_minimal_match(procedure, "Likely false positive pattern detected")
         
         # STAGE 1: DIRECT NAME MATCHING
-        # Look for semantic alignment between procedure names and capability names
+        # Semantic alignment between procedure names and capability names
         direct_capabilities = self._find_direct_name_matches(proc_name)
         
         # STAGE 2: CODE CONTENT ANALYSIS
@@ -635,7 +677,7 @@ class DynamicCapabilityMatcher:
         llm_confidence = 0.0
         llm_details = {}
         
-        if self.llm_provider and self.llm_provider.is_available() and complexity_score >= 1.0:
+        if self.llm_provider and self.llm_provider.is_available() and complexity_score >= 0.5:
             llm_result = self._enhanced_llm_semantic_bridge(procedure, direct_capabilities + code_detected_capabilities)
             if isinstance(llm_result, dict):
                 llm_capabilities = llm_result.get('additional_capabilities', [])
@@ -671,7 +713,7 @@ class DynamicCapabilityMatcher:
         # STAGE 8: VALIDATION SCORING
         # Calculate quality score for the overall mapping
         validation_score = self._calculate_validation_score(
-            proc_name, all_capabilities, keyword_matches, complexity_score
+            proc_name, list(all_capabilities), keyword_matches, complexity_score
         )
         
         # STAGE 9: PATTERN DETECTION
@@ -694,7 +736,8 @@ class DynamicCapabilityMatcher:
                 direct_capabilities, code_detected_capabilities, llm_capabilities
             ),
             validation_score=validation_score,
-            evidence_strength=confidence_details
+            evidence_strength=confidence_details,
+            llm_analysis=llm_details  # Add llm analysis
         )
     
     def _find_direct_name_matches(self, proc_name: str) -> List[str]:
@@ -830,7 +873,7 @@ class DynamicCapabilityMatcher:
         """
         Filter domain capabilities to only the most relevant ones for this procedure.
         
-        When a domain matches a procedure, not all capabilities in that domain
+        When a domain matches a procedure, not all all capabilities in that domain
         are necessarily relevant. This method scores each capability based on
         its specific relevance to the procedure.
         """
@@ -866,6 +909,7 @@ class DynamicCapabilityMatcher:
             relevance_score += specificity * 3.0
             
             # DYNAMIC THRESHOLDS: Adjust threshold based on overall match strength
+            # not sure we need this..
             base_threshold = 3.0
             if match_score > 8.0:
                 threshold = base_threshold * 0.6
@@ -883,7 +927,7 @@ class DynamicCapabilityMatcher:
         return [cap for cap, score in relevant_caps]
     
     def _enhanced_llm_semantic_bridge(self, procedure: Dict, already_detected: List[str]) -> Dict:
-        """Advanced semantic analysis using LLM with optimized token usage."""
+        """Enhanced semantic analysis using LLM with optimized token usage."""
         if not self.llm_provider or not self.llm_provider.is_available():
             return {}
         
@@ -905,79 +949,116 @@ class DynamicCapabilityMatcher:
             if has_keyword_match or has_undetected_caps:
                 relevant_entries.append(entry)
         
-        # Limit to top 20 most relevant entries to stay under token limits
-        relevant_entries = relevant_entries[:20]
+        # Limit to top 15 most relevant entries to stay under token limits
+        relevant_entries = relevant_entries[:15]
         
-        # Create condensed taxonomy with minimal formatting
-        focused_taxonomy = json.dumps(relevant_entries, indent=1)
+        # Create condensed taxonomy with only essential fields
+        focused_taxonomy = []
+        for entry in relevant_entries:
+            focused_taxonomy.append({
+                "keywords": entry.get('keywords', ''),
+                "related_keywords": entry.get('related_keywords', ''),
+                "business_capability": entry.get('business_capability', []),
+                "metadata": entry.get('metadata', '')
+            })
         
-        # Truncate procedure context aggressively for token efficiency
-        max_code_length = 800
+        # Truncate procedure context for token efficiency
+        max_code_length = 2000
         code_context = procedure['full_context'][:max_code_length]
         if len(procedure['full_context']) > max_code_length:
             code_context += "\n... [truncated]"
         
-        # STRUCTURED PROMPT: Clear instructions for consistent analysis
-        prompt = f"""Analyze this TAL payment procedure against the relevant keyword entries.
-
-RELEVANT TAXONOMY ENTRIES:
-{focused_taxonomy}
-
-PROCEDURE:
-Name: {procedure['name']}
-Function Calls: {', '.join(procedure.get('function_calls', [])[:6])}
-
-Code Context:
-{code_context}
-
-ALREADY DETECTED: {', '.join(already_detected) if already_detected else 'None'}
-
-TASK:
-Review the keword/taxonomy entries above and identify which business capabilities this procedure implements.
-Look for evidence in function calls, validation patterns, and processing logic.
-
-Focus on capabilities NOT already detected that have clear evidence in the code.
-
-Respond with JSON:
-{{
-    "mapped_capabilities": [
-        {{
-            "capability": "Exact Name from business_capability",
-            "confidence": 0.85,
-            "evidence": "Specific code evidence"
-        }}
-    ],
-    "reasoning": "Why these capabilities match the code",
-    "primary_domain": "Best matching domain from metadata"
-}}"""
+        # Dynamically build evidence patterns from the taxonomy
+        evidence_patterns = []
+        for entry in focused_taxonomy:
+            keywords = entry.get('keywords', '') + ', ' + entry.get('related_keywords', '')
+            capabilities = entry.get('business_capability', [])
+            if keywords and capabilities:
+                # Create dynamic pattern from actual taxonomy data
+                key_terms = [kw.strip() for kw in keywords.split(',') if kw.strip()][:3]  # Top 3 terms
+                cap_list = capabilities[:3]  # Top 3 capabilities
+                if key_terms and cap_list:
+                    pattern = f"- {', '.join(key_terms)} → {', '.join(cap_list)}"
+                    evidence_patterns.append(pattern)
         
-        system_prompt = """You are an expert in wire transfer and payment processing systems.
+        # Get all unique business capabilities from the taxonomy
+        all_capabilities = set()
+        for entry in focused_taxonomy:
+            all_capabilities.update(entry.get('business_capability', []))
+        
+        evidence_section = '\n'.join(evidence_patterns) if evidence_patterns else "Look for keywords and patterns in the taxonomy above"
+        
+        # STRUCTURED PROMPT: Clear instructions for payment domain analysis
+        prompt = f"""Analyze this TAL banking procedure to identify which payment domain business capabilities it implements.
 
-Analyze TAL procedures to identify implemented business capabilities based on the provided taxonomy entries.
+    PROCEDURE DETAILS:
+    Name: {procedure['name']}
+    Function Calls: {', '.join(procedure.get('function_calls', [])[:8])}
 
-Focus on concrete evidence from code patterns, function calls, and processing logic.
-Use only capability names that appear in the business_capability arrays from the taxonomy.
-Be conservative - only high-confidence mappings with clear evidence.
+    Code Context:
+    {code_context}
 
-Respond with valid JSON only."""
+    BUSINESS CAPABILITIES TAXONOMY:
+    {json.dumps(focused_taxonomy, indent=1)}
+
+    ALL AVAILABLE CAPABILITIES:
+    {sorted(list(all_capabilities))}
+
+    ALREADY DETECTED: {', '.join(already_detected) if already_detected else 'None'}
+
+    ANALYSIS TASK:
+    1. Read the TAL procedure code carefully
+    2. Identify what banking/payment operations this procedure performs
+    3. Match these operations to business capabilities from the ALL AVAILABLE CAPABILITIES list above
+    4. Use the taxonomy entries to understand which keywords relate to which capabilities
+    5. Focus on capabilities NOT already detected that have clear evidence in the code
+
+    EVIDENCE PATTERNS FROM TAXONOMY:
+    {evidence_section}
+
+    Respond with JSON only:
+    {{
+        "capabilities": [
+            {{
+                "name": "Exact business capability name from ALL AVAILABLE CAPABILITIES list",
+                "confidence": 0.85,
+                "evidence": "Specific code evidence (function calls, validation logic, etc.)"
+            }}
+        ],
+        "reasoning": "Brief explanation of why these capabilities match the procedure's actual functionality",
+        "primary_domain": "Best matching metadata domain from taxonomy"
+    }}"""
+        
+        system_prompt = """You are a payments domain expert analyzing TAL banking procedures.
+
+    Your task: Map TAL procedures to specific business capabilities based on what the code actually does.
+
+    CRITICAL RULES:
+    1. Only suggest capabilities that appear in the provided taxonomy
+    2. Base suggestions on actual code evidence, not procedure names, including function calls and comments
+    3. Focus on what the procedure validates, processes, or manages
+    4. Provide confidence scores between 0.4-0.95 (be conservative)
+    5. Give specific code evidence for each capability
+
+    OUTPUT: Valid JSON only, no explanatory text outside the JSON."""
         
         try:
             # Make the LLM API call
             result = self.llm_provider.call_chat_completion(prompt, system_prompt)
             
-            if isinstance(result, dict) and 'mapped_capabilities' in result:
+            if isinstance(result, dict) and 'capabilities' in result:
                 # VALIDATION: Extract and validate returned capabilities
                 valid_capabilities = []
                 capability_details = []
                 
-                for mapping in result.get('mapped_capabilities', []):
-                    capability = mapping.get('capability', '')
+                for mapping in result.get('capabilities', []):
+                    capability = mapping.get('name', '')
                     confidence = mapping.get('confidence', 0.0)
                     evidence = mapping.get('evidence', '')
                     
                     # Ensure capability exists in our taxonomy and meets confidence threshold
                     all_capabilities = self.capability_extractor.get_all_capabilities()
-                    if capability in all_capabilities and confidence >= 0.4:
+                    if capability in all_capabilities and confidence >= 0.25:
                         valid_capabilities.append(capability)
                         capability_details.append({
                             'capability': capability,
@@ -991,7 +1072,7 @@ Respond with valid JSON only."""
                 
                 return {
                     'additional_capabilities': valid_capabilities,
-                    'reasoning': result.get('reasoning', 'LLM analysis of focused taxonomy'),
+                    'reasoning': result.get('reasoning', 'LLM analysis of procedure functionality'),
                     'confidence': sum(d['confidence'] for d in capability_details) / len(capability_details) if capability_details else 0.0,
                     'capability_details': capability_details,
                     'primary_domain': result.get('primary_domain', 'unknown')
@@ -1440,14 +1521,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="Dynamic TAL Procedure to Business Capability Mapper",
         epilog="""
-This system analyzes TAL payments/wire processing procedures and maps them to business capabilities
-defined in a keywords.json taxonomy. It uses multiple analysis techniques including
-keyword matching, semantic analysis, and optional AI-powered understanding.
+        This system analyzes TAL payments/wire processing procedures and maps them to business capabilities
+        defined in a keywords.json taxonomy. It uses multiple analysis techniques including
+        keyword matching, semantic analysis, and optional AI-powered understanding.
 
-Example usage:
-  python <this>.py /path/to/dir -k keywords.json --use-llm
-  python <this>.py single_file.tal -k keywords.json --min-confidence 0.7
-        """,
+        Example usage:
+        python <this>.py /path/to/dir -k keywords.json --use-llm
+        python <this>.py single_file.tal -k keywords.json --min-confidence 0.7
+                """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
@@ -1558,10 +1639,8 @@ Example usage:
                 if len(capability_match.business_capabilities) > 4:
                     print(f"    ... and {len(capability_match.business_capabilities)-4} more")
             
-            # Extract LLM analysis details if available
-            llm_analysis = {}
-            if hasattr(capability_match, 'llm_analysis') and capability_match.llm_analysis:
-                llm_analysis = capability_match.llm_analysis
+            # Extract LLM analysis details 
+            llm_analysis = capability_match.llm_analysis
             
             # Build comprehensive mapping record
             capability_mappings.append({
@@ -1665,3 +1744,4 @@ Example usage:
 
 if __name__ == "__main__":
     exit(main())
+
