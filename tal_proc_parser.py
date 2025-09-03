@@ -227,8 +227,32 @@ def find_procedure_declarations(tal_code: str) -> List[Tuple[int, str, str]]:
     while i < len(lines):
         line = lines[i].strip()
         
+        # Skip empty lines
+        if not line:
+            i += 1
+            continue
+        
+        # Skip comment lines (lines that start with !)
+        if line.startswith('!'):
+            i += 1
+            continue
+        
+        # Check if line contains a comment and extract the non-comment part
+        comment_pos = line.find('!')
+        if comment_pos >= 0:
+            # Only consider the part before the comment
+            code_part = line[:comment_pos].strip()
+        else:
+            code_part = line
+        
+        # Skip if the entire line is a comment or empty after removing comments
+        if not code_part:
+            i += 1
+            continue
+        
         # Look for procedure declaration pattern (case insensitive)
-        proc_match = re.search(r'\b(?:(INT(?:\([^)]*\))?|REAL(?:\([^)]*\))?|STRING|FIXED|UNSIGNED(?:\([^)]*\))?)\s+)?PROC\s+([a-zA-Z_][a-zA-Z0-9_^]*)', line, re.IGNORECASE)
+        # Only search in the non-comment part of the line
+        proc_match = re.search(r'\b(?:(INT(?:\([^)]*\))?|REAL(?:\([^)]*\))?|STRING|FIXED|UNSIGNED(?:\([^)]*\))?)\s+)?PROC\s+([a-zA-Z_][a-zA-Z0-9_^]*)', code_part, re.IGNORECASE)
         
         if proc_match:
             start_line = i + 1  # 1-based line numbering
