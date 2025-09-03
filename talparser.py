@@ -1,1703 +1,816 @@
-#!/usr/bin/env python3
 """
-This parser converts TAL source code into Abstract Syntax Trees (ASTs) with support for:
-- Enhanced error reporting with context and source location tracking
-- Symbol table management with scoped symbol resolution  
-- Advanced TAL language features (procedures, structs, literals, defines)
-- Multiple output formats (S-expressions, JSON, DOT graphs)
-- Performance optimizations with packrat parsing
-- Robust error recovery mechanisms
+Enhanced TAL Parser - A comprehensive parser for Transaction Application Language (TAL)
 
-FIXES APPLIED:
-1. Missing procedure definitions - procedures now properly closed and added to AST
-2. Variable scope placement - local vars go to local_declarations, not statements
-3. Global variable parsing - struct variables properly parsed
+APPROACH OVERVIEW:
+=================
+
+This parser implements a hybrid two-stage parsing approach that combines the strengths of
+two different parsing strategies:
+
+1. FOUNDATION PARSING (tal_proc_parser):
+   - Uses the existing tal_proc_parser module as a foundation
+   - Handles procedure detection and basic structural parsing
+   - Provides reliable procedure boundary detection and parameter parsing
+   - Creates the basic AST skeleton with procedures, parameters, and declarations
+
+2. ENHANCEMENT PARSING (rich AST generation):
+   - Adds detailed parsing for procedure bodies, expressions, and statements
+   - Implements comprehensive system function detection and validation
+   - Provides detailed analysis of TAL-specific constructs (bit fields, operators)
+   - Generates rich metadata and attributes for all AST nodes
+
+DESIGN:
+=======
+
+- Modular Design: Separate classes for system functions, operators, and main parser
+- Error Resilience: Continues parsing even when encountering errors
+- Comprehensive Coverage: Handles all major TAL constructs including:
+  * Procedure declarations (PROC, INT PROC, etc.)
+  * System functions ($LEN, $OCCURS, $DBL, etc.)
+  * Control flow (IF, WHILE, FOR, CASE, SCAN)
+  * TAL-specific features (bit fields, pointer operations)
+  * Compiler directives (?PAGE, ?SECTION, etc.)
+  * Global declarations (STRUCT, TEMPLATE, LITERAL, etc.)
+
+- Rich Metadata: Each AST node contains detailed attributes for analysis
+- Validation: Built-in validation for system function usage and argument counts
+- Extensibility: Easy to add new system functions and language constructs
+
+PARSING FLOW:
+============
+
+1. File Reading → Content Preprocessing
+2. Foundation Parsing → Basic procedure structure via tal_proc_parser
+3. Line Range Calculation → Determine procedure boundaries
+4. Enhancement Phase → Rich parsing of procedure bodies and global content
+5. AST Assembly → Combine enhanced procedures with global content
+6. Validation → Check system function usage and generate warnings
+7. Output Generation → Produce S-expressions, JSON, or analysis reports
+
+This approach ensures both reliability (from the proven tal_proc_parser) and
+comprehensiveness (from the enhanced parsing logic).
 """
 
-from pyparsing import *
-import sys
 import re
 import argparse
+import os
 import json
-import time
-from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Set, Tuple, Union
 from enum import Enum
-from collections import defaultdict, deque
 
-# Enable packrat parsing for performance optimization with memoization
-ParserElement.enablePackrat()
+# Import tal_proc_parser module to parse PROCs
+import tal_proc_parser
 
-class TALType(Enum):
+class TALSystemFunctions:
     """
-    Enumeration of TAL data types supported by the parser.
+    Comprehensive registry of TAL system functions with parameter counts and return types.
     
-    TAL supports both primitive and composite data types:
-    - INT: Integer numbers (16-bit or 32-bit depending on context)
-    - STRING: Variable-length character strings
-    - REAL: Floating-point numbers (single or double precision)
-    - FIXED: Fixed-point decimal numbers with specified precision
-    - BYTE: 8-bit unsigned integers
-    - CHAR: Single character values
-    - STRUCT: User-defined composite data structures
-    - POINTER: Memory address references (indicated by leading dot)
-    - UNKNOWN: Type not yet determined or unresolvable
+    This class maintains a complete catalog of all known TAL system functions,
+    organized by category for easier maintenance and lookup. Each function entry
+    includes parameter count, return type, and description for validation and
+    documentation purposes.
     """
-    INT = "INT"
-    STRING = "STRING" 
-    REAL = "REAL"
-    FIXED = "FIXED"
-    BYTE = "BYTE"
-    CHAR = "CHAR"
-    STRUCT = "STRUCT"
-    POINTER = "POINTER"
-    UNKNOWN = "UNKNOWN"
-
-class ErrorSeverity(Enum):
-    """
-    Classification of error severity levels for diagnostic reporting.
     
-    Levels determine how the parser handles different types of issues:
-    - INFO: Informational messages about parsing process
-    - WARNING: Non-critical issues that don't prevent parsing
-    - ERROR: Serious issues that may affect correctness but allow continued parsing
-    - FATAL: Critical errors that prevent successful parsing
-    """
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"
-    FATAL = "fatal"
-
-@dataclass
-class SourceLocation:
-    """
-    Represents a specific location in source code for error reporting and debugging.
+    # String manipulation and information functions
+    STRING_FUNCTIONS = {
+        '$LEN': {'params': 1, 'returns': 'INT', 'description': 'Length of string'},
+        '$OCCURS': {'params': 1, 'returns': 'INT', 'description': 'Number of occurrences'},
+        '$TYPE': {'params': 1, 'returns': 'INT', 'description': 'Data type'},
+        '$BITLENGTH': {'params': 1, 'returns': 'INT', 'description': 'Bit length'},
+        '$BYTELENGTH': {'params': 1, 'returns': 'INT', 'description': 'Byte length'},
+        '$OFFSET': {'params': 1, 'returns': 'INT', 'description': 'Offset in structure'},
+    }
     
-    Attributes:
-        filename: Path to the source file
-        line: Line number (1-based indexing)
-        column: Column number (1-based indexing)
-        length: Length of the token or construct at this location
-        
-    Used for:
-    - Error message context
-    - Symbol cross-referencing
-    - IDE integration support
-    - Debugging information
-    """
-    filename: str = ""
-    line: int = 0
-    column: int = 0
-    length: int = 0
+    # Numeric conversion and casting functions  
+    NUMERIC_FUNCTIONS = {
+        '$DBL': {'params': 1, 'returns': 'REAL*8', 'description': 'Convert to double'},
+        '$FIX': {'params': 1, 'returns': 'FIXED', 'description': 'Convert to fixed'},
+        '$FLOAT': {'params': 1, 'returns': 'REAL', 'description': 'Convert to float'},
+        '$IFIX': {'params': 1, 'returns': 'INT', 'description': 'Convert to integer'},
+        '$SNGL': {'params': 1, 'returns': 'REAL', 'description': 'Convert to single precision'},
+        '$UDBL': {'params': 1, 'returns': 'REAL*8', 'description': 'Unsigned to double'},
+        '$UFLOAT': {'params': 1, 'returns': 'REAL', 'description': 'Unsigned to float'},
+    }
     
-    def __str__(self):
-        """Return human-readable location string for error messages."""
-        return f"{self.filename}:{self.line}:{self.column}"
-
-@dataclass
-class ParseError:
-    """
-    Enhanced parse error with comprehensive context information.
+    # Bitwise operation functions
+    BIT_FUNCTIONS = {
+        '$BITAND': {'params': 2, 'returns': 'INT', 'description': 'Bitwise AND'},
+        '$BITOR': {'params': 2, 'returns': 'INT', 'description': 'Bitwise OR'},
+        '$BITXOR': {'params': 2, 'returns': 'INT', 'description': 'Bitwise XOR'},
+        '$BITNOT': {'params': 1, 'returns': 'INT', 'description': 'Bitwise NOT'},
+        '$SHIFTL': {'params': 2, 'returns': 'INT', 'description': 'Shift left'},
+        '$SHIFTR': {'params': 2, 'returns': 'INT', 'description': 'Shift right'},
+        '$ROTATEL': {'params': 2, 'returns': 'INT', 'description': 'Rotate left'},
+        '$ROTATER': {'params': 2, 'returns': 'INT', 'description': 'Rotate right'},
+    }
     
-    Provides detailed error reporting including:
-    - Source location with filename, line, and column
-    - Contextual source code lines around the error
-    - Suggested fixes or alternatives
-    - Error classification codes for tooling integration
+    # Array manipulation and boundary functions
+    ARRAY_FUNCTIONS = {
+        '$HIGH': {'params': 1, 'returns': 'INT', 'description': 'High bound of array'},
+        '$BOUNDS': {'params': 1, 'returns': 'INT', 'description': 'Array bounds'},
+        '$DIMENSION': {'params': 1, 'returns': 'INT', 'description': 'Array dimension'},
+    }
     
-    Attributes:
-        message: Human-readable error description
-        location: Source location where error occurred
-        severity: Classification of error importance
-        context_lines: Source lines around the error for context
-        suggestions: Recommended fixes or alternatives
-        error_code: Unique identifier for error type (e.g., "E001")
-    """
-    message: str
-    location: SourceLocation
-    severity: ErrorSeverity
-    context_lines: List[str] = field(default_factory=list)
-    suggestions: List[str] = field(default_factory=list)
-    error_code: str = ""
+    # Mathematical computation functions
+    MATH_FUNCTIONS = {
+        '$ABS': {'params': 1, 'returns': 'NUMERIC', 'description': 'Absolute value'},
+        '$MAX': {'params': 2, 'returns': 'NUMERIC', 'description': 'Maximum value'},
+        '$MIN': {'params': 2, 'returns': 'NUMERIC', 'description': 'Minimum value'},
+        '$SQRT': {'params': 1, 'returns': 'REAL', 'description': 'Square root'},
+        '$EXP': {'params': 1, 'returns': 'REAL', 'description': 'Exponential'},
+        '$LOG': {'params': 1, 'returns': 'REAL', 'description': 'Natural logarithm'},
+        '$SIN': {'params': 1, 'returns': 'REAL', 'description': 'Sine'},
+        '$COS': {'params': 1, 'returns': 'REAL', 'description': 'Cosine'},
+        '$TAN': {'params': 1, 'returns': 'REAL', 'description': 'Tangent'},
+        '$ATAN': {'params': 1, 'returns': 'REAL', 'description': 'Arctangent'},
+    }
     
-    def __str__(self):
-        """Format error for display with context and suggestions."""
-        result = f"{self.severity.value.upper()}: {self.message}\n"
-        result += f"  at {self.location}\n"
-        
-        # Add source context if available
-        if self.context_lines:
-            for i, line in enumerate(self.context_lines):
-                # Mark the middle line as the error location
-                marker = ">>>" if i == 1 else "   "
-                result += f"  {marker} {line}\n"
-        
-        # Add helpful suggestions
-        if self.suggestions:
-            result += "  Suggestions:\n"
-            for suggestion in self.suggestions:
-                result += f"    - {suggestion}\n"
-        
-        return result
-
-@dataclass
-class Symbol:
-    """
-    Symbol table entry representing a declared identifier in TAL code.
+    # System state and process information functions
+    SYSTEM_FUNCTIONS = {
+        '$AXADR': {'params': 1, 'returns': 'INT', 'description': 'Address of parameter'},
+        '$PARAM': {'params': 1, 'returns': 'ANY', 'description': 'Parameter value'},
+        '$SPECIAL': {'params': -1, 'returns': 'ANY', 'description': 'Special system function'},
+        '$CARRY': {'params': 0, 'returns': 'INT', 'description': 'Carry flag'},
+        '$OVERFLOW': {'params': 0, 'returns': 'INT', 'description': 'Overflow flag'},
+        '$READCLOCK': {'params': 0, 'returns': 'FIXED', 'description': 'Read system clock'},
+        '$MYGMOM': {'params': 0, 'returns': 'INT', 'description': 'Current GMOM'},
+        '$MYSEGMENT': {'params': 0, 'returns': 'INT', 'description': 'Current segment'},
+    }
     
-    Tracks all information about declared symbols including:
-    - Basic properties (name, type, location)
-    - Scope and visibility information  
-    - Type-specific attributes (array bounds, struct members, etc.)
-    - Usage tracking with reference locations
+    # Input/output and file operation functions
+    IO_FUNCTIONS = {
+        '$RECEIVEINFO': {'params': 0, 'returns': 'INT', 'description': 'Receive information'},
+        '$FILENAME_TO_FILE_': {'params': 2, 'returns': 'INT', 'description': 'Convert filename'},
+        '$FILE_TO_FILENAME_': {'params': 2, 'returns': 'INT', 'description': 'Convert to filename'},
+        '$DISPLAY': {'params': -1, 'returns': 'VOID', 'description': 'Display output (variable args)'},
+    }
     
-    Used for:
-    - Type checking and semantic analysis
-    - Cross-reference generation
-    - Unused variable detection
-    - IDE features like "go to definition"
-    
-    Attributes:
-        name: Identifier name as written in source
-        symbol_type: TAL data type classification
-        location: Where symbol was first declared
-        scope: Scope name where symbol exists (e.g., procedure name)
-        is_pointer: True if symbol is a pointer (starts with '.')
-        is_array: True if symbol is an array with bounds
-        array_bounds: Tuple of (start, end) indices for arrays
-        struct_name: Name of struct type for struct variables
-        procedure_params: Parameter list for procedure symbols
-        return_type: Return type for procedure symbols
-        bit_fields: Bit field definitions for packed structures
-        is_main: True if this is the main procedure entry point
-        references: List of all locations where symbol is referenced
-    """
-    name: str
-    symbol_type: TALType
-    location: SourceLocation
-    scope: str = ""
-    is_pointer: bool = False
-    is_array: bool = False
-    array_bounds: Optional[Tuple[int, int]] = None
-    struct_name: Optional[str] = None
-    procedure_params: Optional[List['Symbol']] = None
-    return_type: Optional[TALType] = None
-    bit_fields: Optional[Dict[str, Tuple[int, int]]] = None
-    is_main: bool = False
-    references: List[SourceLocation] = field(default_factory=list)
-    
-    def add_reference(self, location: SourceLocation):
+    @classmethod
+    def get_all_functions(cls) -> Dict[str, Dict[str, Any]]:
         """
-        Record a reference to this symbol at the given location.
-        
-        Args:
-            location: Source location where symbol is referenced
-            
-        Used for cross-reference analysis and unused variable detection.
-        """
-        self.references.append(location)
-
-class SymbolTable:
-    """
-    Multi-scope symbol table with hierarchical name resolution.
-    
-    Manages symbol declarations and lookups across different scopes:
-    - Global scope for module-level declarations
-    - Procedure scopes for local variables and parameters
-    - Struct scopes for member definitions
-    
-    Features:
-    - Nested scope management with scope stack
-    - Redeclaration detection within same scope
-    - Symbol lookup with scope chain traversal
-    - Separate tracking of struct type definitions
-    
-    TAL Scoping Rules:
-    - Global symbols visible throughout module
-    - Procedure parameters and locals shadow globals
-    - Struct members have their own namespace
-    - Forward references allowed for procedures
-    """
-    
-    def __init__(self):
-        """Initialize empty symbol table with global scope."""
-        # Dictionary mapping scope names to their symbol dictionaries
-        self.scopes: Dict[str, Dict[str, Symbol]] = defaultdict(dict)
-        self.current_scope = "global"
-        # Stack tracking nested scope entry/exit
-        self.scope_stack: List[str] = ["global"]
-        # Separate namespace for struct type definitions
-        self.struct_definitions: Dict[str, Dict[str, Symbol]] = {}
-        
-    def enter_scope(self, scope_name: str):
-        """
-        Enter a new lexical scope (e.g., when entering a procedure).
-        
-        Args:
-            scope_name: Name of the new scope to enter
-            
-        Updates current scope context and maintains scope stack for
-        proper nested scope resolution.
-        """
-        self.scope_stack.append(scope_name)
-        self.current_scope = scope_name
-        
-    def exit_scope(self):
-        """
-        Exit current scope and return to parent scope.
-        
-        Maintains scope stack integrity by preventing exit from global scope.
-        Called when leaving procedures or other scoped constructs.
-        """
-        if len(self.scope_stack) > 1:
-            self.scope_stack.pop()
-            self.current_scope = self.scope_stack[-1]
-    
-    def declare_symbol(self, symbol: Symbol) -> Optional[ParseError]:
-        """
-        Declare a new symbol in the current scope.
-        
-        Args:
-            symbol: Symbol to declare with all required attributes
-            
-        Returns:
-            ParseError if symbol already exists in current scope, None if successful
-            
-        Performs redeclaration checking within the current scope only.
-        Symbols in parent scopes can be shadowed by local declarations.
-        """
-        symbol.scope = self.current_scope
-        
-        # Check for redeclaration in current scope only
-        if symbol.name in self.scopes[self.current_scope]:
-            existing = self.scopes[self.current_scope][symbol.name]
-            return ParseError(
-                f"Symbol '{symbol.name}' already declared in scope '{self.current_scope}'",
-                symbol.location,
-                ErrorSeverity.ERROR,
-                error_code="E001",
-                suggestions=[f"Previous declaration at {existing.location}"]
-            )
-        
-        self.scopes[self.current_scope][symbol.name] = symbol
-        return None
-    
-    def lookup_symbol(self, name: str, location: SourceLocation) -> Optional[Symbol]:
-        """
-        Look up a symbol using TAL's scoping rules.
-        
-        Args:
-            name: Symbol name to find
-            location: Location of the reference (for tracking)
-            
-        Returns:
-            Symbol if found in current scope chain, None otherwise
-            
-        Search order:
-        1. Current scope (e.g., current procedure)
-        2. Parent scopes up the stack
-        3. Global scope (always searched last)
-        
-        Automatically records the reference location for cross-reference analysis.
-        """
-        # Search from current scope up to global
-        for scope in reversed(self.scope_stack):
-            if name in self.scopes[scope]:
-                symbol = self.scopes[scope][name]
-                symbol.add_reference(location)
-                return symbol
-        return None
-    
-    def get_all_symbols(self) -> List[Symbol]:
-        """
-        Retrieve all declared symbols from all scopes.
+        Combine all system function categories into a single registry.
         
         Returns:
-            List of all Symbol objects across all scopes
-            
-        Used for analysis, reporting, and symbol table export.
+            Dict containing all system functions with their metadata
         """
-        symbols = []
-        for scope_symbols in self.scopes.values():
-            symbols.extend(scope_symbols.values())
-        return symbols
+        all_functions = {}
+        all_functions.update(cls.STRING_FUNCTIONS)
+        all_functions.update(cls.NUMERIC_FUNCTIONS)
+        all_functions.update(cls.BIT_FUNCTIONS)
+        all_functions.update(cls.ARRAY_FUNCTIONS)
+        all_functions.update(cls.MATH_FUNCTIONS)
+        all_functions.update(cls.SYSTEM_FUNCTIONS)
+        all_functions.update(cls.IO_FUNCTIONS)
+        return all_functions
+    
+    @classmethod
+    def is_system_function(cls, name: str) -> bool:
+        """
+        Check if a given name represents a known TAL system function.
+        
+        Args:
+            name: Function name to check (with or without $ prefix)
+            
+        Returns:
+            True if the name is a recognized system function
+        """
+        name_upper = name.upper()
+        if not name_upper.startswith('$'):
+            name_upper = '$' + name_upper
+        return name_upper in cls.get_all_functions()
+    
+    @classmethod
+    def get_function_info(cls, name: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve detailed information about a system function.
+        
+        Args:
+            name: Function name to look up (with or without $ prefix)
+            
+        Returns:
+            Dictionary with function metadata or None if not found
+        """
+        name_upper = name.upper()
+        if not name_upper.startswith('$'):
+            name_upper = '$' + name_upper
+        return cls.get_all_functions().get(name_upper)
 
-@dataclass
-class TALNode:
+class TALOperators:
     """
-    Abstract Syntax Tree node representing TAL language constructs.
+    Registry of TAL operators organized by type for expression parsing and validation.
     
-    Forms the backbone of the parsed representation with:
-    - Hierarchical structure through parent-child relationships
-    - Rich metadata for analysis and code generation
-    - Type information for semantic analysis
-    - Source location tracking for error reporting
-    
-    Node Types:
-    - program: Root node containing entire compilation unit
-    - procedure: Function/procedure definitions
-    - var_decl: Variable declarations
-    - struct_decl: Structure type definitions  
-    - statement: Executable statements
-    - expression: Value-producing expressions
-    - comment: Source code comments
-    
-    Attributes:
-        type: Classification of AST node (e.g., 'procedure', 'var_decl')
-        name: Identifier name for named constructs
-        value: Literal value or source text representation
-        children: List of child nodes forming tree structure
-        location: Source location for error reporting
-        attributes: Additional metadata as key-value pairs
-        symbol: Associated symbol table entry if applicable
-        semantic_type: Resolved TAL type after semantic analysis
-        cross_refs: References to related nodes for analysis
+    This class categorizes all TAL operators to enable proper parsing, precedence
+    handling, and semantic analysis of expressions.
     """
-    type: str
-    name: str = ""
-    value: Any = None
-    children: List['TALNode'] = field(default_factory=list)
-    location: SourceLocation = field(default_factory=SourceLocation)
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    symbol: Optional[Symbol] = None
-    semantic_type: Optional[TALType] = None
-    cross_refs: List['TALNode'] = field(default_factory=list)
     
-    def add_child(self, child):
+    ARITHMETIC_OPERATORS = {'+', '-', '*', '/', 'MOD', '**'}
+    COMPARISON_OPERATORS = {'=', '<>', '<', '>', '<=', '>=', 'LT', 'LE', 'GT', 'GE', 'EQ', 'NE'}
+    LOGICAL_OPERATORS = {'AND', 'OR', 'NOT', 'XOR'}
+    ASSIGNMENT_OPERATORS = {':=', "':='"}
+    ADDRESSING_OPERATORS = {'@', '.', '->', '[', ']'}
+    
+    @classmethod
+    def is_operator(cls, token: str) -> bool:
         """
-        Add a child node to this AST node.
+        Determine if a token represents a TAL operator.
         
         Args:
-            child: Either a TALNode or primitive value to add
+            token: Token to check
             
-        Primitive values are automatically wrapped in token nodes.
-        Maintains the tree structure for traversal and analysis.
+        Returns:
+            True if token is a recognized operator
         """
-        if isinstance(child, TALNode):
-            self.children.append(child)
-        else:
-            # Wrap primitive values in token nodes
-            self.children.append(TALNode('token', value=str(child)))
+        token_upper = token.upper()
+        return (token in cls.ARITHMETIC_OPERATORS or 
+                token in cls.COMPARISON_OPERATORS or
+                token_upper in cls.LOGICAL_OPERATORS or
+                token in cls.ASSIGNMENT_OPERATORS or
+                token in cls.ADDRESSING_OPERATORS)
     
-    def find_children_by_type(self, node_type: str) -> List['TALNode']:
+    @classmethod
+    def get_operator_type(cls, token: str) -> str:
         """
-        Recursively find all descendant nodes of a specific type.
+        Classify an operator by its functional category.
         
         Args:
-            node_type: Type string to search for
+            token: Operator token to classify
             
         Returns:
-            List of matching nodes in depth-first order
-            
-        Useful for analysis passes that need to process all nodes
-        of a particular kind (e.g., all variable declarations).
+            String describing the operator category
         """
-        result = []
-        for child in self.children:
-            if child.type == node_type:
-                result.append(child)
-            result.extend(child.find_children_by_type(node_type))
-        return result
-    
-    def get_path(self) -> str:
-        """
-        Get hierarchical path to this node for debugging.
-        
-        Returns:
-            String representation of path from root to this node
-            
-        Used for debugging and error reporting to help locate
-        specific nodes within large ASTs.
-        """
-        # This would be set during parsing with full path
-        return getattr(self, '_path', f"{self.type}.{self.name}")
-    
-    def to_sexp(self, indent=0):
-        """
-        Convert AST to S-expression format for readable output.
-        
-        Args:
-            indent: Current indentation level for pretty-printing
-            
-        Returns:
-            String representation in LISP-like S-expression format
-            
-        S-expressions provide a clean, structured view of the AST
-        that's both human-readable and machine-parseable. Special
-        handling for program nodes organizes output into logical sections.
-        """
-        spaces = "  " * indent
-        
-        # Special formatting for program root to organize output
-        if self.type == 'program':
-            sections = []
-            
-            # Group children by type for better organization
-            globals_children = [c for c in self.children if c.type in ['name_decl', 'struct_decl', 'var_decl', 'literal_decl', 'define_decl']]
-            procedure_children = [c for c in self.children if c.type == 'procedure']
-            comment_children = [c for c in self.children if c.type == 'comment']
-            
-            # Format globals section
-            if globals_children:
-                globals_section = f"{spaces}  (globals"
-                for child in globals_children:
-                    globals_section += f"\n{child.to_sexp(indent + 2)}"
-                globals_section += ")"
-                sections.append(globals_section)
-            
-            # Format procedures section
-            if procedure_children:
-                procedures_section = f"{spaces}  (procedures"
-                for child in procedure_children:
-                    procedures_section += f"\n{child.to_sexp(indent + 2)}"
-                procedures_section += ")"
-                sections.append(procedures_section)
-            
-            # Format comments section
-            if comment_children:
-                comments_section = f"{spaces}  (comments"
-                for child in comment_children:
-                    comments_section += f"\n{child.to_sexp(indent + 2)}"
-                comments_section += ")"
-                sections.append(comments_section)
-            
-            sections_str = "\n".join(sections)
-            return f"(program\n{sections_str})"
-        
-        # Format regular nodes with enhanced attributes
-        name_part = f" {self.name}" if self.name else ""
-        attrs = []
-        
-        # Include custom attributes
-        if self.attributes:
-            for key, value in self.attributes.items():
-                attrs.append(f"{key}={value}")
-        
-        # Include semantic type information
-        if self.semantic_type:
-            attrs.append(f"semantic_type={self.semantic_type.value}")
-        
-        attr_part = f" ({' '.join(attrs)})" if attrs else ""
-        
-        # Handle leaf nodes
-        if not self.children:
-            if self.value is not None:
-                return f"{spaces}({self.type}{name_part} {self.value}{attr_part})"
-            else:
-                return f"{spaces}({self.type}{name_part}{attr_part})"
-        else:
-            # Format nodes with children
-            child_sexps = [child.to_sexp(indent + 1) for child in self.children if child]
-            if not child_sexps:
-                return f"{spaces}({self.type}{name_part}{attr_part})"
-            
-            children_str = "\n".join(child_sexps)
-            return f"{spaces}({self.type}{name_part}{attr_part}\n{children_str})"
-    
-    def to_json(self) -> Dict[str, Any]:
-        """
-        Convert AST to JSON format for structured data exchange.
-        
-        Returns:
-            Dictionary representation suitable for JSON serialization
-            
-        JSON format provides machine-readable output for tools that
-        need to process the AST programmatically. Includes all node
-        metadata and maintains the tree structure.
-        """
-        result = {
-            "type": self.type,
-            "name": self.name,
-            "value": self.value,
-            "location": {
-                "file": self.location.filename,
-                "line": self.location.line,
-                "column": self.location.column
-            },
-            "attributes": self.attributes
-        }
-        
-        # Include type information if available
-        if self.semantic_type:
-            result["semantic_type"] = self.semantic_type.value
-            
-        # Recursively convert children
-        if self.children:
-            result["children"] = [child.to_json() for child in self.children]
-            
-        return result
-    
-    def to_dot(self, graph_name="ast") -> str:
-        """
-        Convert AST to Graphviz DOT format for visualization.
-        
-        Args:
-            graph_name: Name for the generated graph
-            
-        Returns:
-            DOT format string for graph rendering
-            
-        Generates directed graph suitable for visualization with
-        Graphviz tools. Nodes show type and key information,
-        edges show parent-child relationships.
-        """
-        lines = [f"digraph {graph_name} {{"]
-        lines.append("  rankdir=TB;")  # Top-to-bottom layout
-        lines.append("  node [shape=box, style=rounded];")  # Box-shaped nodes
-        
-        node_id = 0
-        node_map = {}
-        
-        def add_node(node, parent_id=None):
-            """Recursively add nodes to DOT graph."""
-            nonlocal node_id
-            current_id = node_id
-            node_id += 1
-            
-            # Create descriptive label
-            label = f"{node.type}"
-            if node.name:
-                label += f"\\n{node.name}"
-            if node.value and len(str(node.value)) < 20:
-                label += f"\\n{node.value}"
-                
-            lines.append(f'  n{current_id} [label="{label}"];')
-            
-            # Add edge from parent if not root
-            if parent_id is not None:
-                lines.append(f"  n{parent_id} -> n{current_id};")
-            
-            # Process children recursively
-            for child in node.children:
-                add_node(child, current_id)
-        
-        add_node(self)
-        lines.append("}")
-        return "\n".join(lines)
+        token_upper = token.upper()
+        if token in cls.ARITHMETIC_OPERATORS:
+            return 'arithmetic'
+        elif token in cls.COMPARISON_OPERATORS or token_upper in cls.COMPARISON_OPERATORS:
+            return 'comparison'
+        elif token_upper in cls.LOGICAL_OPERATORS:
+            return 'logical'
+        elif token in cls.ASSIGNMENT_OPERATORS:
+            return 'assignment'
+        elif token in cls.ADDRESSING_OPERATORS:
+            return 'addressing'
+        return 'unknown'
 
 class EnhancedTALParser:
     """
-    Main parser class for TAL source code with comprehensive analysis capabilities.
+    Enhanced TAL parser implementing a hybrid two-stage parsing approach.
     
-    Features:
-    - Multi-pass parsing with preprocessing and AST construction
-    - Symbol table management with scoped symbol resolution
-    - Enhanced error reporting with source context
-    - Multiple output formats (S-expressions, JSON, DOT graphs)
-    - Performance monitoring with detailed statistics
-    - Robust error recovery for continued parsing after errors
+    This parser combines the reliable procedure detection from tal_proc_parser
+    with comprehensive rich parsing for detailed AST generation. It handles
+    all major TAL language constructs including procedures, system functions,
+    control flow, and TAL-specific features like bit fields.
     
-    Parser Architecture:
-    1. Preprocessing: Clean up source, handle multi-line constructs
-    2. Lexical analysis: Identify TAL language constructs
-    3. Syntax analysis: Build Abstract Syntax Tree
-    4. Semantic analysis: Type checking and symbol resolution (optional)
-    5. Cross-reference generation: Build symbol usage maps
-    6. Output generation: Convert to requested formats
-    
-    TAL Language Support:
-    - Data declarations: INT, STRING, REAL, FIXED, BYTE, CHAR
-    - Structured data: STRUCT definitions with nested members  
-    - Procedures: Parameter lists, return types, local variables
-    - Control flow: IF/THEN, WHILE/DO, CASE/OF, SCAN statements
-    - Memory management: Pointers, arrays, structured access
-    - Preprocessor: LITERAL and DEFINE constant definitions
-    - Comments: Line and inline comment handling
+    Architecture:
+    1. Foundation parsing using tal_proc_parser for reliable structure
+    2. Enhanced parsing for detailed AST nodes and metadata
+    3. Comprehensive validation and error reporting
+    4. Rich output generation (S-expressions, JSON, analysis)
     """
     
     def __init__(self):
-        """Initialize parser with clean state and empty symbol table."""
-        self.reset_state()
-        self.symbol_table = SymbolTable()
-        self.errors: List[ParseError] = []
-        self.warnings: List[ParseError] = []
-        self.source_lines: List[str] = []
+        """
+        Initialize the enhanced TAL parser with all necessary components.
+        
+        Sets up error tracking, symbol tables, and parsing utilities.
+        """
+        self.debug_mode = False
         self.filename = ""
+        self.source_lines = []
+        self.symbol_table = tal_proc_parser.SymbolTable()
+        self.errors = []
+        self.warnings = []
+        self.system_functions = TALSystemFunctions()
+        self.operators = TALOperators()
         
-        # Performance and analysis statistics
-        self.stats = {
-            'parse_time': 0.0,
-            'lines_processed': 0,
-            'nodes_created': 0,
-            'symbols_declared': 0,
-            'errors_found': 0,
-            'warnings_issued': 0
-        }
-        
-    def reset_state(self):
-        """
-        Reset parser internal state for fresh parsing.
-        
-        Called before parsing each new file to ensure clean state.
-        Clears all parsing context and temporary data structures.
-        """
-        self.current_procedure = None  # Currently open procedure being parsed
-        self.in_struct = False         # Whether we're inside a struct definition
-        self.struct_stack = []         # Stack of nested struct contexts
-        self.brace_level = 0          # Nesting level for brace matching
-        self.in_proc_params = False    # Whether parsing procedure parameters
-        self.collecting_statements = False  # Whether collecting procedure body statements
-        self.current_struct = None     # Current struct being defined
-        
-    def add_error(self, message: str, location: SourceLocation, 
-                 severity: ErrorSeverity = ErrorSeverity.ERROR,
-                 error_code: str = "", suggestions: List[str] = None):
-        """
-        Add an error or warning with rich context information.
-        
-        Args:
-            message: Human-readable error description
-            location: Source location where error occurred
-            severity: Classification of error severity
-            error_code: Unique identifier for error type
-            suggestions: List of suggested fixes or alternatives
-            
-        Automatically includes source context lines around the error
-        location for better debugging. Updates statistics counters.
-        """
-        context_lines = self._get_context_lines(location.line)
-        
-        error = ParseError(
-            message=message,
-            location=location,
-            severity=severity,
-            context_lines=context_lines,
-            suggestions=suggestions or [],
-            error_code=error_code
-        )
-        
-        # Categorize error by severity
-        if severity in [ErrorSeverity.ERROR, ErrorSeverity.FATAL]:
-            self.errors.append(error)
-            self.stats['errors_found'] += 1
-        else:
-            self.warnings.append(error)
-            self.stats['warnings_issued'] += 1
-    
-    def _get_context_lines(self, line_num: int, context=1) -> List[str]:
-        """
-        Extract source lines around an error for context display.
-        
-        Args:
-            line_num: Line number where error occurred (1-based)
-            context: Number of lines to include before and after error
-            
-        Returns:
-            List of formatted context lines with line numbers
-            
-        Provides visual context in error messages to help users
-        understand the location and nature of parsing errors.
-        """
-        lines = []
-        start = max(0, line_num - context - 1)
-        end = min(len(self.source_lines), line_num + context)
-        
-        for i in range(start, end):
-            line_content = self.source_lines[i] if i < len(self.source_lines) else ""
-            lines.append(f"{i+1:4d}: {line_content}")
-            
-        return lines
     
     def parse_file(self, filename: str) -> Dict[str, Any]:
         """
-        Parse a TAL source file with comprehensive analysis.
+        Main entry point for parsing a TAL file.
+        
+        This method orchestrates the entire parsing process:
+        1. Reads the source file
+        2. Applies the hybrid parsing approach
+        3. Generates comprehensive results
         
         Args:
-            filename: Path to TAL source file to parse
+            filename: Path to the TAL source file
             
         Returns:
-            Dictionary containing parse results, AST, errors, and analysis data
-            
-        Main entry point for parsing. Handles file I/O, coordinates
-        all parsing phases, and returns comprehensive results including
-        the AST, error information, symbol table, and performance stats.
+            Dictionary containing parse results, AST, and analysis data
         """
-        start_time = time.time()
         self.filename = filename
         
         try:
-            # Read source file with UTF-8 encoding
+            # Read and preprocess the source file
             with open(filename, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Split into lines for error context
             self.source_lines = content.split('\n')
-            self.stats['lines_processed'] = len(self.source_lines)
             
-            # Perform main parsing
-            result = self._parse_content(content)
-            
-            # Add performance and diagnostic information
-            self.stats['parse_time'] = time.time() - start_time
-            result['stats'] = self.stats
-            result['errors'] = [str(e) for e in self.errors]
-            result['warnings'] = [str(w) for w in self.warnings]
-            result['symbols'] = self._export_symbol_table()
-            
+            # Apply the enhanced hybrid parsing approach
+            result = self._parse_using_tal_proc_parser_enhanced(content)
             return result
             
         except Exception as e:
-            # Handle file I/O and other critical errors
             return {
                 'success': False, 
                 'error': f"File error: {e}",
-                'stats': self.stats,
                 'errors': [str(err) for err in self.errors],
                 'warnings': [str(warn) for warn in self.warnings]
             }
     
-    def _parse_content(self, content: str) -> Dict[str, Any]:
+    def _parse_using_tal_proc_parser_enhanced(self, content: str) -> Dict[str, Any]:
         """
-        Parse source content through multiple analysis phases.
+        Implement the hybrid parsing approach combining tal_proc_parser with rich enhancement.
+        
+        This is the core of the enhanced parsing strategy:
+        1. Use tal_proc_parser for reliable procedure detection
+        2. Calculate precise procedure line ranges
+        3. Apply rich parsing to procedure bodies
+        4. Parse global content with comprehensive analysis
+        5. Assemble complete program AST
         
         Args:
-            content: Complete source code text
+            content: Complete source file content
             
         Returns:
-            Dictionary with parse results and analysis data
-            
-        Coordinates the multi-phase parsing process:
-        1. Preprocessing to clean up source
-        2. AST construction from preprocessed tokens
-        3. Optional semantic analysis
-        4. Cross-reference generation
-        5. Result compilation and formatting
+            Comprehensive parsing results with enhanced AST
         """
         lines = content.split('\n')
         
-        # Phase 1: Preprocess source lines
-        processed_lines = self._preprocess_lines(lines)
+        # Step 1: Foundation parsing - use tal_proc_parser for reliable procedure detection
+        procedures, proc_errors = tal_proc_parser.parse_multiple_procedures(
+            content, self.filename, self.symbol_table
+        )
+        self.errors.extend(proc_errors)
         
-        # Phase 2: Parse into AST
-        program = self._parse_to_ast(processed_lines)
+        # Step 2: Calculate precise procedure line ranges for body parsing
+        proc_declarations = tal_proc_parser.find_procedure_declarations(content)
+        proc_line_ranges = self._calculate_simple_line_ranges(proc_declarations, lines)
         
-        # Phase 3: Skip semantic analysis to avoid false errors
-        # Semantic analysis would check types, resolve symbols, etc.
-        # Disabled to prevent false positives during parsing
-        # self._semantic_analysis(program)
+        # Step 3: Enhancement phase - apply rich parsing to each procedure
+        enhanced_procedures = []
+        all_proc_lines = set()
         
-        # Phase 4: Generate cross-references between symbols
-        self._generate_cross_references(program)
+        for proc_node in procedures:
+            # Find the line range for this procedure
+            line_range = proc_line_ranges.get(proc_node.name)
+            if line_range:
+                # Track all lines that belong to procedures
+                all_proc_lines.update(range(line_range['start'], line_range['end'] + 1))
+                
+                # Apply rich parsing enhancement to procedure body
+                enhanced_proc = self._enhance_procedure_with_rich_parsing(proc_node, lines, line_range)
+                enhanced_procedures.append(enhanced_proc)
+            else:
+                # Keep procedure as-is if no range found
+                enhanced_procedures.append(proc_node)
         
-        # Update statistics
-        self.stats['nodes_created'] = self._count_nodes(program)
-        self.stats['symbols_declared'] = len(self.symbol_table.get_all_symbols())
+        # Step 4: Create comprehensive program AST
+        program = tal_proc_parser.TALNode('program')
+        program.location = tal_proc_parser.SourceLocation(self.filename, 1, 1)
         
-        # Return comprehensive results
+        # Step 5: Add global content with rich parsing (everything not in procedures)
+        self._add_global_content_rich(lines, program, all_proc_lines)
+        
+        # Step 6: Integrate enhanced procedures into program AST
+        for proc in enhanced_procedures:
+            program.add_child(proc)
+        
+        # Step 7: Generate comprehensive results
         return {
-            'success': len([e for e in self.errors if e.severity == ErrorSeverity.FATAL]) == 0,
+            'success': len([e for e in self.errors if e.severity == tal_proc_parser.ErrorSeverity.FATAL]) == 0,
             'ast': program,
             'sexp': program.to_sexp(),
-            'json': program.to_json(),
-            'dot': program.to_dot(),
-            'node_count': self.stats['nodes_created'],
-            'structure': self._analyze_structure(program)
+            'json': self._ast_to_json(program),
+            'node_count': self._count_nodes(program),
+            'structure': self._analyze_structure(program),
+            'system_functions_used': self._collect_system_functions(program),
+            'procedures': self._extract_procedure_info(enhanced_procedures)
         }
     
-    def _preprocess_lines(self, lines: List[str]) -> List[Tuple[str, int, int]]:
+
+    def _has_bit_field_syntax(self, expr: str) -> bool:
         """
-        Preprocess source lines with multi-line construct handling.
+        Detect TAL bit field syntax in expressions.
+        
+        TAL supports bit field access using syntax like <start:end> to extract
+        specific bit ranges from variables.
         
         Args:
-            lines: Raw source lines from file
+            expr: Expression string to check
             
         Returns:
-            List of (processed_line, line_number, column) tuples
-            
-        Preprocessing handles:
-        - Comment removal (both line and inline comments)
-        - Multi-line construct merging (LITERAL, DEFINE, STRUCT, PROC)
-        - Empty line filtering
-        - Column position tracking for error reporting
-        
-        TAL allows constructs to span multiple lines, especially
-        for complex declarations and procedure definitions.
+            True if expression contains bit field syntax
         """
-        processed = []
-        i = 0
+        import re
+        return re.search(r'<\d+:\d+>', expr) is not None
+
+    def _parse_bit_field_expression(self, expr: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse TAL bit field expressions into structured components.
         
-        while i < len(lines):
-            line = lines[i].strip()
-            original_line = lines[i]
-            # Calculate column based on original indentation
-            column = len(lines[i]) - len(lines[i].lstrip()) + 1
+        Extracts the base expression and bit range from TAL bit field syntax
+        like variable.field.<0:7> into analyzable components.
+        
+        Args:
+            expr: Expression containing bit field syntax
             
-            # Skip empty lines and standalone comments
-            if not line or line.startswith('!'):
-                i += 1
-                continue
+        Returns:
+            Dictionary with parsed bit field components or None
+        """
+        import re
+        bit_field_match = re.search(r'<(\d+):(\d+)>', expr)
+        if bit_field_match:
+            start_bit = int(bit_field_match.group(1))
+            end_bit = int(bit_field_match.group(2))
+            base_expr = expr[:bit_field_match.start()]
             
-            # Strip inline comments before processing
-            line = self._strip_inline_comment(line)
-            if not line:
-                i += 1
-                continue
+            return {
+                'base_expression': base_expr.strip(),
+                'start_bit': start_bit,
+                'end_bit': end_bit,
+                'bit_range': f"{start_bit}:{end_bit}"
+            }
+        return None
+
+    def _calculate_simple_line_ranges(self, proc_declarations: List[Tuple[int, str, str]], lines: List[str]) -> Dict[str, Dict[str, int]]:
+        """
+        Calculate accurate line ranges for procedures, handling multi-line declarations.
+        
+        This function determines exactly where each procedure starts and ends,
+        accounting for multi-line procedure declarations that may span several lines.
+        Critical for avoiding duplicate parsing of procedure content.
+        
+        Args:
+            proc_declarations: List of (line_num, proc_name, declaration_text) tuples
+            lines: All source code lines
             
-            # Handle multi-line constructs
-            if self._is_multiline_start(line):
-                merged_line, consumed = self._merge_multiline(lines, i)
-                # Strip comments from merged line too
-                merged_line = self._strip_inline_comment(merged_line)
-                processed.append((merged_line, i + 1, column))
-                i += consumed
+        Returns:
+            Dictionary mapping procedure names to their line ranges
+        """
+        ranges = {}
+        
+        for i, (start_line, proc_name, declaration) in enumerate(proc_declarations):
+            # Calculate how many lines the declaration actually spans
+            declaration_line_count = declaration.count('\n') + 1
+            
+            # Find the actual end of the declaration
+            declaration_end_line = start_line + declaration_line_count - 1
+            
+            # Determine where this procedure ends (start of next procedure or end of file)
+            if i + 1 < len(proc_declarations):
+                end_line = proc_declarations[i + 1][0] - 1
             else:
-                processed.append((line, i + 1, column))
-                i += 1
+                end_line = len(lines)
+            
+            ranges[proc_name] = {
+                'start': start_line,
+                'declaration_end': declaration_end_line,  # Track declaration boundary
+                'end': end_line
+            }
         
-        return processed
+        return ranges
     
-    def _strip_inline_comment(self, line: str) -> str:
+    def _enhance_procedure_with_rich_parsing(self, proc_node: tal_proc_parser.TALNode, lines: List[str], line_range: Dict[str, int]) -> tal_proc_parser.TALNode:
         """
-        Remove inline comments while preserving string literals.
+        Apply rich parsing enhancement to a procedure's body content.
+        
+        This method takes a basic procedure node from tal_proc_parser and enhances
+        it with detailed parsing of the procedure body, including:
+        - Local variable declarations
+        - Statement parsing with system function detection
+        - Control flow analysis
+        - Expression parsing
         
         Args:
-            line: Source line potentially containing comments
+            proc_node: Basic procedure node from tal_proc_parser
+            lines: All source code lines
+            line_range: Dictionary with start/end line numbers for this procedure
             
         Returns:
-            Line with comments removed but strings preserved
-            
-        TAL uses '!' for comments. Must be careful not to remove
-        '!' characters that appear inside string literals.
-        Handles both single and double quoted strings.
+            Enhanced procedure node with rich AST content
         """
-        result = ""
-        in_quotes = False
-        quote_char = None
-        i = 0
         
-        while i < len(line):
-            char = line[i]
-            
-            # Handle quote character transitions
-            if char in '"\'':
-                if not in_quotes:
-                    # Starting a quoted string
-                    in_quotes = True
-                    quote_char = char
-                elif char == quote_char:
-                    # Ending the quoted string
-                    in_quotes = False
-                    quote_char = None
-                result += char
-            elif char == '!' and not in_quotes:
-                # Found comment start outside of quotes - stop here
-                break
-            else:
-                result += char
-            i += 1
+        # Skip enhancement for FORWARD/EXTERNAL procedures (no body to parse)
+        if proc_node.attributes.get('is_forward') or proc_node.attributes.get('is_external'):
+            return proc_node
         
-        return result.rstrip()
+        # Locate existing structure nodes within the procedure
+        local_decls_node = None
+        statements_node = None
+        
+        for child in proc_node.children:
+            if child.type == 'local_declarations':
+                local_decls_node = child
+            elif child.type == 'statements':
+                statements_node = child
+        
+        # Clear existing content to avoid duplicates during enhancement
+        if local_decls_node:
+            local_decls_node.children = []
+        if statements_node:
+            statements_node.children = []
+        
+        # CRITICAL: Start parsing AFTER the procedure declaration ends
+        # This prevents re-parsing the procedure declaration as body content
+        declaration_end_line = line_range.get('declaration_end', line_range['start'])
+        
+        # Extract procedure body lines (after declaration, before next procedure)
+        proc_lines = lines[declaration_end_line:line_range['end']]
+        start_line_for_parsing = declaration_end_line + 1
+        
+        if self.debug_mode: 
+            print(f"DEBUG: Procedure body parsing from line {start_line_for_parsing} to {line_range['end']}")
+            print(f"DEBUG: Declaration ended at line {declaration_end_line}")
+        
+        # Apply rich parsing to the procedure body
+        self._parse_procedure_body_rich(proc_lines, local_decls_node, statements_node, start_line_for_parsing)
+        
+        return proc_node
+
     
-    def _is_multiline_start(self, line: str) -> bool:
+    def _parse_procedure_body_rich(self, proc_lines: List[str], local_decls_node: tal_proc_parser.TALNode, statements_node: tal_proc_parser.TALNode, start_line_num: int):
         """
-        Detect if a line starts a multi-line construct.
+        Parse procedure body lines with comprehensive AST generation.
+        
+        This method processes each line of a procedure body, determining whether
+        it represents a local declaration or an executable statement, and creates
+        appropriate rich AST nodes with detailed metadata.
         
         Args:
-            line: Source line to analyze
-            
-        Returns:
-            True if line starts a multi-line construct
-            
-        TAL constructs that commonly span multiple lines:
-        - LITERAL definitions with multiple assignments
-        - DEFINE preprocessor directives  
-        - STRUCT type definitions
-        - PROC procedure declarations with parameters
-        - Lines with unmatched parentheses or brackets
+            proc_lines: Lines of code within the procedure body
+            local_decls_node: AST node for local declarations
+            statements_node: AST node for executable statements
+            start_line_num: Starting line number for location tracking
         """
-        upper_line = line.upper()
+        in_statements = False
+        found_begin = False
         
-        # Known multi-line construct starters
-        multiline_starts = [
-            'LITERAL', 'DEFINE', 'STRUCT', 'PROC',
-            'INT PROC', 'STRING PROC', 'REAL PROC'
-        ]
-        
-        for start in multiline_starts:
-            if upper_line.startswith(start) and not line.endswith((';', '#', '#;')):
-                return True
-        
-        # Check for incomplete statements with unmatched delimiters
-        if (',' in line and not line.endswith(';') or
-            line.count('(') != line.count(')') or
-            line.count('[') != line.count(']')):
-            return True
+        for line_idx, line_text in enumerate(proc_lines):
+            line_stripped = line_text.strip()
             
-        return False
-    
-    def _merge_multiline(self, lines: List[str], start_idx: int) -> Tuple[str, int]:
-        """
-        Merge multi-line constructs into single logical lines.
-        
-        Args:
-            lines: Complete list of source lines
-            start_idx: Index of line starting the multi-line construct
-            
-        Returns:
-            Tuple of (merged_line_text, lines_consumed)
-            
-        Combines continuation lines until finding a terminator:
-        - Semicolon (;) for most statements
-        - Hash (#) for DEFINE directives  
-        - BEGIN...END blocks for procedures and structs
-        - Balanced parentheses and brackets
-        
-        Includes safety limit to prevent infinite loops on malformed input.
-        """
-        merged = lines[start_idx].strip()
-        consumed = 1
-        paren_count = merged.count('(') - merged.count(')')
-        bracket_count = merged.count('[') - merged.count(']')
-        
-        for i in range(start_idx + 1, len(lines)):
-            next_line = lines[i].strip()
-            
-            # Skip empty lines and comments
-            if not next_line or next_line.startswith('!'):
-                consumed += 1
+            # Skip empty lines
+            if not line_stripped:
                 continue
             
-            merged += ' ' + next_line
-            consumed += 1
+            # Handle comment lines (starting with !)
+            if line_stripped.startswith('!'):
+                location = tal_proc_parser.SourceLocation(self.filename, start_line_num + line_idx, 1)
+                comment_node = tal_proc_parser.TALNode('comment', value=line_stripped[1:].strip(), location=location)
+                if in_statements:
+                    statements_node.add_child(comment_node)
+                else:
+                    local_decls_node.add_child(comment_node)
+                continue
             
-            # Update delimiter counting
-            paren_count += next_line.count('(') - next_line.count(')')
-            bracket_count += next_line.count('[') - next_line.count(']')
-            
-            # Check for termination conditions
-            if (next_line.endswith((';', '#', '#;')) and 
-                paren_count == 0 and bracket_count == 0):
-                break
-                
-            # Handle BEGIN...END blocks
-            if ('BEGIN' in merged and 'END;' in merged):
-                break
-                
-            # Safety limit to prevent runaway merging
-            if consumed > 20:
-                self.add_error(
-                    "Multiline construct too long, possible syntax error",
-                    SourceLocation(self.filename, start_idx + 1, 1),
-                    ErrorSeverity.WARNING,
-                    "W001"
-                )
-                break
-        
-        return merged, consumed
-    
-    def _parse_to_ast(self, processed_lines: List[Tuple[str, int, int]]) -> TALNode:
-        """
-        Build Abstract Syntax Tree from preprocessed source lines.
-        
-        Args:
-            processed_lines: List of (line_text, line_number, column) tuples
-            
-        Returns:
-            Root TALNode representing the complete program
-            
-        Main AST construction phase that:
-        - Creates program root node
-        - Processes struct definitions first (for type resolution)
-        - Parses each line based on TAL language constructs
-        - Manages procedure parsing state (declaration -> body -> end)
-        - Places nodes in correct AST locations (global vs local scope)
-        - Handles proper procedure closure and symbol table management
-        """
-        program = TALNode('program')
-        program.location = SourceLocation(self.filename, 1, 1)
-        self.reset_state()
-        
-        # Pre-extract struct definitions for type resolution
-        struct_bodies = self._extract_struct_bodies(processed_lines)
-        
-        for line_text, line_num, column in processed_lines:
-            try:
-                location = SourceLocation(self.filename, line_num, column)
-                
-                # Skip lines already processed as struct bodies
-                if self._is_struct_body_line(line_text, struct_bodies):
-                    continue
-                
-                upper_line = line_text.upper()
-                
-                # Handle procedure lifecycle management
-                if any(upper_line.startswith(p) for p in ['PROC ', 'INT PROC ', 'STRING PROC ', 'REAL PROC ']):
-                    # Starting new procedure - close previous if exists
-                    if self.current_procedure:
-                        program.add_child(self.current_procedure)
-                    
-                    # Parse procedure declaration (creates new current_procedure)
-                    node = self._parse_procedure_declaration(line_text, location)
-                    # Don't add to program yet - will be added when procedure ends
-                    continue
-                    
-                elif upper_line == 'BEGIN' and self.current_procedure:
-                    # Start collecting procedure body statements
-                    self.collecting_statements = True
-                    continue
-                    
-                elif upper_line == 'END;' and self.current_procedure:
-                    # Close current procedure
-                    proc = self.current_procedure
-                    self.current_procedure = None
-                    self.collecting_statements = False
-                    self.symbol_table.exit_scope()
-                    program.add_child(proc)
-                    continue
-                
-                # Parse line based on context and content
-                node = self._parse_line_contextual(line_text, location)
-                
-                # Add struct body members if this is a struct declaration
-                if node and node.type == 'struct_decl' and node.name in struct_bodies:
-                    members = struct_bodies[node.name]
-                    for member in members:
-                        node.add_child(member)
-                
-                # Place node in appropriate AST location
-                if node:
-                    if self.current_procedure:
-                        # Inside a procedure - determine correct placement
-                        if self.collecting_statements:
-                            # Add to procedure body (after BEGIN)
-                            for child in self.current_procedure.children:
-                                if child.type == 'statements':
-                                    child.add_child(node)
-                                    break
-                        else:
-                            # Add to local declarations (between PROC and BEGIN)
-                            if node.type == 'var_decl':
-                                for child in self.current_procedure.children:
-                                    if child.type == 'local_declarations':
-                                        child.add_child(node)
-                                        break
-                            else:
-                                # Non-variable declarations go to statements for now
-                                for child in self.current_procedure.children:
-                                    if child.type == 'statements':
-                                        child.add_child(node)
-                                        break
+            # Extract and handle inline comments
+            comment_pos = line_stripped.find('!')
+            if comment_pos >= 0:
+                code_part = line_stripped[:comment_pos].strip()
+                # Create separate node for inline comment
+                inline_comment = line_stripped[comment_pos+1:].strip()
+                if inline_comment:
+                    location = tal_proc_parser.SourceLocation(self.filename, start_line_num + line_idx, comment_pos + 1)
+                    comment_node = tal_proc_parser.TALNode('comment', value=inline_comment, location=location)
+                    if in_statements:
+                        statements_node.add_child(comment_node)
                     else:
-                        # Global level declaration
-                        program.add_child(node)
-                        
+                        local_decls_node.add_child(comment_node)
+            else:
+                code_part = line_stripped
+            
+            # Skip lines with no executable content
+            if not code_part:
+                continue
+            
+            location = tal_proc_parser.SourceLocation(self.filename, start_line_num + line_idx, 1)
+            
+            # Skip the PROC declaration line (should already be handled)
+            if re.search(r'\bPROC\b', code_part, re.IGNORECASE):
+                continue
+            
+            # Detect BEGIN - switches from declarations to statements
+            if re.search(r'\bBEGIN\b', code_part, re.IGNORECASE):
+                found_begin = True
+                in_statements = True
+                continue
+            
+            # Detect END - stops parsing procedure body
+            if re.search(r'\bEND\b', code_part, re.IGNORECASE) and found_begin:
+                break
+            
+            # Parse the line using comprehensive rich parsing methods
+            try:
+                node = self._parse_body_line_comprehensive(code_part, location, in_statements)
+                if node:
+                    # Determine whether this belongs in declarations or statements
+                    if in_statements or self._is_statement_node(node):
+                        statements_node.add_child(node)
+                    else:
+                        local_decls_node.add_child(node)
             except Exception as e:
-                self.add_error(
-                    f"Parse error: {e}",
-                    SourceLocation(self.filename, line_num, column),
-                    ErrorSeverity.ERROR,
-                    "E002"
-                )
-        
-        # Close any remaining open procedure
-        if self.current_procedure:
-            program.add_child(self.current_procedure)
-            self.current_procedure = None
-            self.symbol_table.exit_scope()
-        
-        return program
-
-    def _is_variable_declaration_line(self, line: str) -> bool:
+                # Log parsing errors but continue processing
+                self.errors.append(tal_proc_parser.ParseError(
+                    f"Error parsing line: {e}",
+                    location,
+                    tal_proc_parser.ErrorSeverity.WARNING,
+                    error_code="E100"
+                ))
+    
+    def _parse_body_line_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation, in_statements: bool) -> Optional[tal_proc_parser.TALNode]:
         """
-        Enhanced detection of variable declaration lines.
+        Parse individual lines with comprehensive pattern recognition.
+        
+        This method applies pattern matching to identify and parse different
+        types of TAL constructs, creating appropriate AST nodes with rich
+        metadata for each construct type.
         
         Args:
-            line: Source line to analyze
-            
-        Returns:
-            True if line appears to be a variable declaration
-            
-        TAL variable declarations can take several forms:
-        - Standard types: INT var1, var2; STRING(20) name;
-        - Struct variables: struct_name .pointer_var, normal_var;
-        - Array declarations: INT array_name[0:99];
-        - Initialized variables: INT counter := 0;
-        
-        Must distinguish from:
-        - Procedure declarations containing type keywords
-        - Control flow statements  
-        - Complex expressions that might contain type names
-        """
-        upper_line = line.upper()
-        parts = line.split()
-        
-        if not parts:
-            return False
-        
-        # Standard TAL type declarations (but not procedure declarations)
-        if any(upper_line.startswith(t) for t in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR']):
-            return 'PROC ' not in upper_line
-        
-        # Struct variable declarations: struct_name .variable_name
-        # Must exclude known non-declaration constructs
-        if (len(parts) >= 2 and 
-            not any(upper_line.startswith(kw) for kw in [
-                'NAME ', 'STRUCT ', 'LITERAL ', 'DEFINE ', 'PROC ', 
-                'WHILE ', 'CASE ', 'SCAN ', 'RETURN ', 'CALL ', 'IF '
-            ]) and
-            not ':=' in line and  # Not an assignment statement
-            not line.strip().endswith(('DO', 'THEN')) and  # Not control flow
-            not self._looks_like_statement(line)):  # Not a complex statement
-            return True
-        
-        return False
-
-    def _looks_like_statement(self, line: str) -> bool:
-        """
-        Heuristic check if line looks like executable statement vs declaration.
-        
-        Args:
-            line: Source line to analyze
-            
-        Returns:
-            True if line appears to be an executable statement
-            
-        Uses heuristics to distinguish variable declarations from
-        executable statements. Statements typically contain:
-        - Operators and expressions
-        - Function calls with parentheses
-        - Complex multi-word constructs
-        
-        This helps avoid misclassifying complex expressions as declarations.
-        """
-        upper_line = line.upper()
-        return (
-            # Contains operators or complex expressions
-            any(word in upper_line for word in ['(', ')', '+', '-', '*', '/', '=', '<', '>', 'AND', 'OR']) or
-            # Complex expressions tend to have more spaces
-            line.count(' ') > 3
-        )
-
-    def _parse_line_contextual(self, line: str, location: SourceLocation) -> Optional[TALNode]:
-        """
-        Parse a source line based on TAL language constructs and context.
-        
-        Args:
-            line: Source line to parse
+            line: Source code line to parse
             location: Source location for error reporting
+            in_statements: Whether we're in the statements section (after BEGIN)
             
         Returns:
-            TALNode representing the parsed construct, or None if not parseable
-            
-        Central dispatch method that identifies TAL language constructs
-        and delegates to appropriate specialized parsing methods:
-        
-        - Comments: Lines starting with '!'
-        - Declarations: NAME, STRUCT, LITERAL, DEFINE  
-        - Variables: Type-prefixed declarations
-        - Control flow: WHILE, CASE, SCAN, IF statements
-        - Procedures: RETURN, CALL statements
-        - Assignments: Lines containing ':=' operator
-        - General statements: Fallback for other constructs
-        
-        Skips procedure-related keywords that are handled at a higher level.
+            Parsed AST node or None if line should be skipped
         """
         line = line.strip()
         if not line:
             return None
         
-        try:
-            # Handle comments
-            if line.startswith('!'):
-                return self._parse_comment(line, location)
-            
-            # Skip procedure-related keywords (handled in _parse_to_ast)
-            upper_line = line.upper()
-            if (any(upper_line.startswith(p) for p in ['PROC ', 'INT PROC ', 'STRING PROC ', 'REAL PROC ']) or
-                upper_line in ['BEGIN', 'END;']):
-                return None
-            
-            # Dispatch to appropriate parser based on line content
-            if upper_line.startswith('NAME '):
-                return self._parse_name_declaration(line, location)
-            elif upper_line.startswith('STRUCT '):
-                return self._parse_struct_declaration(line, location)
-            elif upper_line.startswith('LITERAL '):
-                return self._parse_literal_declaration(line, location)
-            elif upper_line.startswith('DEFINE '):
-                return self._parse_define_declaration(line, location)
-            elif self._is_variable_declaration_line(line):
-                return self._parse_variable_declaration(line, location)
-            elif upper_line.startswith('WHILE '):
-                return self._parse_while_statement(line, location)
-            elif upper_line.startswith('CASE '):
-                return self._parse_case_statement(line, location)
-            elif upper_line.startswith('SCAN '):
-                return self._parse_scan_statement(line, location)
-            elif upper_line.startswith('RETURN '):
-                return self._parse_return_statement(line, location)
-            elif upper_line.startswith('CALL ') or line.startswith('$'):
-                return self._parse_call_statement(line, location)
-            elif upper_line.startswith('IF '):
-                return self._parse_if_statement(line, location)
-            elif ':=' in line:
-                return self._parse_assignment(line, location)
-            else:
-                return self._parse_general_statement(line, location)
-                
-        except Exception as e:
-            self.add_error(
-                f"Error parsing line: {e}",
-                location,
-                ErrorSeverity.ERROR,
-                "E003"
-            )
-            return None
-
-    def _parse_parameters_fixed(self, param_text: str, location: SourceLocation) -> Optional[TALNode]:
-        """
-        Parse procedure parameter list with improved type detection.
-        
-        Args:
-            param_text: Parameter text including parentheses
-            location: Source location for error reporting
-            
-        Returns:
-            TALNode containing parameter specifications, or None if empty
-            
-        TAL procedure parameters can be:
-        - Typed parameters: INT param1, STRING(20) param2
-        - Struct parameters: struct_name param3  
-        - Pointer parameters: INT .pointer_param (leading dot)
-        - Mixed parameter lists with comma separation
-        
-        Handles parentheses removal and comma-separated parameter parsing
-        with proper type classification and pointer detection.
-        """
-        if not param_text or param_text == '()':
-            return None
-        
-        params_node = TALNode('parameters')
-        params_node.location = location
-        
-        # Remove parentheses and split by comma
-        param_text = param_text.strip('()')
-        if not param_text:
-            return params_node
-        
-        param_parts = self._smart_split(param_text, ',')
-        
-        for param in param_parts:
-            param = param.strip()
-            if param:
-                param_node = TALNode('parameter')
-                param_node.location = location
-                
-                parts = param.split()
-                param_type = TALType.UNKNOWN
-                param_name = ""
-                is_pointer = False
-                struct_name = None
-                
-                if len(parts) >= 2:
-                    first_part = parts[0].upper()
-                    second_part = parts[1]
-                    
-                    # Check if first part is a standard TAL type
-                    if first_part in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR']:
-                        param_type = TALType(first_part)
-                        if second_part.startswith('.'):
-                            is_pointer = True
-                            param_name = second_part[1:]
-                        else:
-                            param_name = second_part
-                    else:
-                        # Struct parameter type
-                        param_type = TALType.STRUCT
-                        struct_name = parts[0]
-                        if second_part.startswith('.'):
-                            is_pointer = True
-                            param_name = second_part[1:]
-                        else:
-                            param_name = second_part
-                            
-                elif len(parts) == 1:
-                    # Single part - just parameter name
-                    if parts[0].startswith('.'):
-                        is_pointer = True
-                        param_name = parts[0][1:]
-                    else:
-                        param_name = parts[0]
-                
-                # Set parameter attributes
-                param_node.name = param_name
-                param_node.attributes['type'] = param_type.value
-                if is_pointer:
-                    param_node.attributes['pointer'] = True
-                if struct_name:
-                    param_node.attributes['struct_name'] = struct_name
-                param_node.value = param
-                
-                params_node.add_child(param_node)
-        
-        return params_node
-
-    def _extract_struct_bodies(self, processed_lines: List[Tuple[str, int, int]]) -> Dict[str, List[TALNode]]:
-        """
-        Extract struct member definitions from BEGIN...END blocks.
-        
-        Args:
-            processed_lines: Preprocessed source lines with location info
-            
-        Returns:
-            Dictionary mapping struct names to lists of member nodes
-            
-        TAL struct definitions can have member lists in BEGIN...END blocks:
-        
-        STRUCT data_packet_def;
-        BEGIN
-            INT sequence_number;
-            STRING(20) message_text;
-            REAL timestamp;
-        END;
-        
-        This method identifies such structures and extracts the member
-        definitions for later attachment to struct declaration nodes.
-        Must distinguish struct bodies from procedure bodies.
-        """
-        struct_bodies = {}
-        i = 0
-        
-        while i < len(processed_lines):
-            line_text, line_num, column = processed_lines[i]
-            
-            # Look for struct declaration not followed by PROC
-            if (line_text.upper().startswith('STRUCT ') and 
-                'PROC' not in line_text.upper()):
-                
-                # Extract struct name from declaration
-                struct_name = line_text.split()[1].rstrip('(*);')
-                i += 1
-                
-                # Look for BEGIN on following lines
-                while i < len(processed_lines):
-                    next_line, next_line_num, next_column = processed_lines[i]
-                    if next_line.upper().strip() == 'BEGIN':
-                        # Found struct body - collect members until END
-                        members = []
-                        i += 1
-                        
-                        while i < len(processed_lines):
-                            member_line, member_line_num, member_column = processed_lines[i]
-                            member_upper = member_line.upper().strip()
-                            
-                            # Check for end of struct body
-                            if member_upper in ['END;', 'END']:
-                                break
-                                
-                            # Parse non-empty, non-comment lines as struct members
-                            if member_line.strip() and not member_line.startswith('!'):
-                                member_node = self._parse_struct_member(member_line, SourceLocation(self.filename, member_line_num, member_column))
-                                if member_node:
-                                    members.append(member_node)
-                            i += 1
-                        
-                        struct_bodies[struct_name] = members
-                        break
-                    elif (next_line.upper().startswith('PROC ') or 
-                          'PROC ' in next_line.upper()):
-                        # This is actually a procedure, not a struct with body
-                        break
-                    i += 1
-            else:
-                i += 1
-        
-        return struct_bodies
-    
-    def _parse_struct_member(self, line: str, location: SourceLocation) -> Optional[TALNode]:
-        """
-        Parse a single struct member declaration.
-        
-        Args:
-            line: Source line containing member declaration
-            location: Source location for error reporting
-            
-        Returns:
-            TALNode representing the struct member
-            
-        Struct members follow standard TAL variable declaration syntax:
-        - TYPE member_name;
-        - TYPE .pointer_member; (for pointer members)
-        - TYPE member_array[bounds]; (for array members)
-        
-        Creates a struct_member node with type and name information.
-        """
-        line = line.strip().rstrip(';')
-        if not line:
-            return None
-            
-        member_node = TALNode('struct_member')
-        member_node.location = location
-        member_node.value = line
-        
-        # Parse member: TYPE [.] name
-        parts = line.split()
-        if len(parts) >= 2:
-            member_type = parts[0].upper()
-            member_name = parts[1]
-            
-            # Handle pointer members (leading dot)
-            if member_name.startswith('.'):
-                member_node.attributes['is_pointer'] = True
-                member_name = member_name[1:]
-            
-            member_node.name = member_name
-            member_node.attributes['type'] = member_type
-        
-        return member_node
-    
-    def _is_struct_body_line(self, line: str, struct_bodies: Dict[str, List[TALNode]]) -> bool:
-        """
-        Check if line is part of an already-processed struct body.
-        
-        Args:
-            line: Source line to check
-            struct_bodies: Previously extracted struct bodies
-            
-        Returns:
-            True if line was already processed as part of a struct body
-            
-        Prevents double-processing of struct member lines that were
-        already extracted in the struct body extraction phase.
-        Checks for BEGIN/END keywords and member declaration patterns.
-        """
         upper_line = line.upper()
         
-        # Skip BEGIN/END and member declarations that are part of struct bodies
-        if upper_line == 'BEGIN' or upper_line == 'END;' or upper_line == 'END':
+        # Variable declarations (before BEGIN or explicitly typed)
+        if not in_statements and self._is_variable_declaration(line):
+            return self._parse_variable_declaration_comprehensive(line, location)
+        
+        # Assignment statements (with := or ':=' operators)
+        elif ':=' in line or "':='" in line:
+            return self._parse_assignment_comprehensive(line, location)
+        
+        # Control flow statements
+        elif upper_line.startswith('IF '):
+            return self._parse_if_statement_comprehensive(line, location)
+        elif upper_line.startswith('WHILE '):
+            return self._parse_while_statement_comprehensive(line, location)
+        elif upper_line.startswith('FOR '):
+            return self._parse_for_statement_comprehensive(line, location)
+        elif upper_line.startswith('CASE '):
+            return self._parse_case_statement_comprehensive(line, location)
+        elif upper_line.startswith('SCAN '):
+            return self._parse_scan_statement_comprehensive(line, location)
+        elif upper_line.startswith('RSCAN '):
+            return self._parse_rscan_statement_comprehensive(line, location)
+        elif upper_line.startswith('GOTO '):
+            return self._parse_goto_statement_comprehensive(line, location)
+        
+        # Procedure calls and returns
+        elif upper_line.startswith('CALL ') or line.startswith('$'):
+            return self._parse_call_statement_comprehensive(line, location)
+        elif upper_line.startswith('RETURN'):
+            return self._parse_return_statement_comprehensive(line, location)
+        
+        # TAL-specific statements
+        elif upper_line.startswith('INTERRUPT '):
+            return self._parse_interrupt_statement_comprehensive(line, location)
+        elif upper_line.startswith('ASSERT '):
+            return self._parse_assert_statement_comprehensive(line, location)
+        elif upper_line.startswith('STOP'):
+            return self._parse_stop_statement_comprehensive(line, location)
+        elif upper_line.startswith('ABORT'):
+            return self._parse_abort_statement_comprehensive(line, location)
+        
+        # Label definitions
+        elif self._is_label(line):
+            return self._parse_label_comprehensive(line, location)
+        
+        # General statements (fallback with rich analysis)
+        else:
+            return self._parse_general_statement_comprehensive(line, location)
+    
+    def _is_variable_declaration(self, line: str) -> bool:
+        """
+        Determine if a line represents a variable declaration.
+        
+        Checks for TAL data type keywords and declaration patterns to identify
+        variable declarations vs. other statements.
+        
+        Args:
+            line: Source code line to analyze
+            
+        Returns:
+            True if line appears to be a variable declaration
+        """
+        upper_line = line.upper()
+        tal_types = ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT']
+        
+        # Direct type keyword match
+        if any(upper_line.startswith(t) for t in tal_types):
             return True
         
-        # Check if this looks like a struct member that was already processed
+        # Heuristic: identifier followed by type (but not control flow)
         parts = line.split()
-        if len(parts) >= 2:
-            potential_type = parts[0].upper()
-            if potential_type in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR']:
-                # This might be a struct member - check against extracted bodies
-                return any(any(member.value and line.strip().rstrip(';') in member.value 
-                              for member in members) 
-                          for members in struct_bodies.values())
+        if (len(parts) >= 2 and 
+            not any(upper_line.startswith(kw) for kw in ['IF ', 'WHILE ', 'CASE ', 'CALL ', 'RETURN ']) and
+            not ':=' in line):
+            return True
         
         return False
     
-    def _looks_like_struct_member(self, line: str) -> bool:
+    def _is_statement_node(self, node: tal_proc_parser.TALNode) -> bool:
         """
-        Check if line looks like struct member rather than variable declaration.
+        Classify whether an AST node represents an executable statement.
+        
+        This helps determine proper placement within the procedure AST structure.
         
         Args:
-            line: Source line to analyze
+            node: AST node to classify
             
         Returns:
-            True if line appears to be a struct member
-            
-        Helps distinguish between local variable declarations and struct
-        member definitions. Struct members typically have simpler syntax
-        and appear in struct definition context.
+            True if node represents an executable statement
         """
-        # Heuristic based on parsing context and line structure
-        return (self.in_struct or 
-                len(line.split()) == 2 and  # Simple "TYPE name" pattern
-                not line.endswith(';'))
+        statement_types = ['assignment', 'call_stmt', 'return_stmt', 'if_stmt', 'while_stmt', 'for_stmt', 'case_stmt', 'scan_stmt', 'rscan_stmt', 'goto_stmt', 'statement', 'interrupt_stmt', 'assert_stmt', 'stop_stmt', 'abort_stmt', 'label']
+        return node.type in statement_types
     
-    def _parse_comment(self, line: str, location: SourceLocation) -> TALNode:
+    def _is_label(self, line: str) -> bool:
         """
-        Parse TAL comment line (starts with '!').
+        Identify TAL label definitions.
+        
+        Labels in TAL end with a colon and mark jump targets for GOTO statements.
         
         Args:
-            line: Comment line including '!' prefix
-            location: Source location for documentation
+            line: Source code line to check
             
         Returns:
-            TALNode representing the comment
-            
-        TAL uses '!' for line comments. Comments are preserved in the AST
-        for documentation generation and code analysis tools.
+            True if line appears to be a label definition
         """
-        node = TALNode('comment', value=line[1:].strip())
-        node.location = location
-        return node
+        stripped = line.strip()
+        if stripped.endswith(':') and not any(op in stripped for op in [':=', "':='"]):
+            # Ensure it's not a case label or other construct
+            label_name = stripped[:-1].strip()
+            # Valid label names are typically identifiers
+            if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', label_name):
+                return True
+        return False
     
-    def _handle_begin(self, location: SourceLocation) -> Optional[TALNode]:
+    def _parse_variable_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Handle BEGIN statement in procedure context.
+        Parse variable declarations with comprehensive type and attribute analysis.
+        
+        Handles various TAL variable declaration formats including arrays,
+        pointers, initializers, and multiple variable declarations.
         
         Args:
-            location: Source location of BEGIN
+            line: Variable declaration line
+            location: Source location for error reporting
             
         Returns:
-            TALNode for begin block, or None if not in procedure
-            
-        BEGIN marks the start of executable statements in procedures.
-        Sets the collecting_statements flag to indicate that subsequent
-        lines should be added to the procedure body.
+            AST node representing the variable declaration
         """
-        self.collecting_statements = True
-        if self.current_procedure:
-            begin_node = TALNode('begin_block')
-            begin_node.location = location
-            return begin_node
-        return None
-    
-    def _parse_name_declaration(self, line: str, location: SourceLocation) -> TALNode:
-        """
-        Parse TAL NAME declaration.
+        var_node = tal_proc_parser.TALNode('var_decl', location=location, value=line.rstrip(';'))
         
-        Args:
-            line: NAME declaration line
-            location: Source location
-            
-        Returns:
-            TALNode representing the name declaration
-            
-        TAL NAME declarations define module or compilation unit names:
-        NAME module_name;
-        
-        Used for modular programming and symbol visibility control.
-        """
-        name = line.split()[1].rstrip(';')
-        node = TALNode('name_decl', name=name)
-        node.location = location
-        return node
-    
-    def _parse_struct_declaration(self, line: str, location: SourceLocation) -> TALNode:
-        """
-        Parse TAL STRUCT type declaration.
-        
-        Args:
-            line: STRUCT declaration line
-            location: Source location
-            
-        Returns:
-            TALNode representing the struct declaration
-            
-        TAL STRUCT declarations define composite data types:
-        STRUCT type_name;
-        
-        May be followed by BEGIN...END block with member definitions,
-        which are handled separately and attached later.
-        """
-        node = TALNode('struct_decl')
-        node.location = location
-        
-        # Extract struct name from declaration
         parts = line.split()
         if len(parts) >= 2:
-            struct_name = parts[1].rstrip('(*);')
-            node.name = struct_name
+            var_type = parts[0].upper()
+            var_node.attributes['type'] = var_type
+            
+            # Parse variable specifications (may be multiple, comma-separated)
+            remaining = ' '.join(parts[1:]).rstrip(';')
+            var_specs = self._smart_split(remaining, ',')
+            
+            for var_spec in var_specs:
+                var_spec = var_spec.strip()
+                if var_spec:
+                    spec_node = self._parse_variable_spec_comprehensive(var_spec, var_type, location)
+                    if spec_node:
+                        var_node.add_child(spec_node)
         
-        # Struct body members are added later if found
-        return node
+        return var_node
     
-    def _parse_procedure_declaration(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_variable_spec_comprehensive(self, var_spec: str, var_type: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL procedure declaration with return type and parameters.
+        Parse individual variable specifications within declarations.
+        
+        Extracts variable name, array bounds, pointer indicators, and initializers
+        from variable specification strings.
         
         Args:
-            line: Procedure declaration line
+            var_spec: Individual variable specification (e.g., "array[0:9]" or ".pointer")
+            var_type: Data type of the variable
             location: Source location
             
         Returns:
-            TALNode representing the procedure
-            
-        TAL procedures can have optional return types and parameters:
-        PROC procedure_name (param1, param2);
-        INT PROC function_name (INT param);
-        STRING PROC formatter (STRING input);
-        
-        Creates procedure node with parameter and local declaration sections.
-        Manages symbol table scope entry and parsing state for procedure body.
+            AST node for the variable specification
         """
-        proc_node = TALNode('procedure')
-        proc_node.location = location
-        
-        # Determine return type based on declaration prefix
-        upper_line = line.upper()
-        return_type = TALType.UNKNOWN
-        name_start = 1
-        
-        if upper_line.startswith('INT PROC'):
-            return_type = TALType.INT
-            name_start = 2
-        elif upper_line.startswith('STRING PROC'):
-            return_type = TALType.STRING
-            name_start = 2
-        elif upper_line.startswith('REAL PROC'):
-            return_type = TALType.REAL
-            name_start = 2
-        
-        proc_node.attributes['return_type'] = return_type.value
-        
-        # Extract procedure name and parameters
-        if '(' in line:
-            name_part = line.split('(')[0]
-            param_part = line[line.find('('):line.rfind(')')+1] if ')' in line else ''
-        else:
-            name_part = line.rstrip(';')
-            param_part = ''
-        
-        # Get procedure name from appropriate position
-        name_parts = name_part.split()
-        if len(name_parts) >= name_start + 1:
-            proc_name = name_parts[name_start]
-            proc_node.name = proc_name
-            
-            # Check for MAIN procedure
-            if 'MAIN' in line.upper():
-                proc_node.attributes['main'] = True
-            
-            # Enter new scope for procedure
-            self.symbol_table.enter_scope(proc_name)
-        
-        # Parse parameter list if present
-        if param_part:
-            params_node = self._parse_parameters_fixed(param_part, location)
-            if params_node:
-                proc_node.add_child(params_node)
-        
-        # Add standard procedure sections
-        locals_node = TALNode('local_declarations')
-        locals_node.location = location
-        proc_node.add_child(locals_node)
-        
-        statements_node = TALNode('statements')
-        statements_node.location = location
-        proc_node.add_child(statements_node)
-        
-        # Set as current procedure for subsequent parsing
-        self.current_procedure = proc_node
-        # Don't start collecting statements until BEGIN
-        
-        return proc_node
-    
-    def _parse_variable_spec(self, var_spec: str, var_type: str, location: SourceLocation) -> TALNode:
-        """
-        Parse individual variable specification within a declaration.
-        
-        Args:
-            var_spec: Single variable specification string
-            var_type: TAL type for this variable
-            location: Source location
-            
-        Returns:
-            TALNode representing the variable specification
-            
-        Variable specifications can include:
-        - Simple names: variable_name
-        - Pointers: .pointer_variable  
-        - Arrays: array_name[start:end]
-        - Initialization: variable := initial_value
-        
-        Extracts all attributes and creates clean AST representation.
-        """
-        spec_node = TALNode('var_spec')
-        spec_node.location = location
+        spec_node = tal_proc_parser.TALNode('var_spec', location=location)
         
         is_pointer = False
         is_array = False
         var_name = ""
         initializer = None
         
-        # Handle initialization expressions
+        # Handle initialization (var := value)
         if ':=' in var_spec:
             name_part, init_part = var_spec.split(':=', 1)
             name_part = name_part.strip()
@@ -1706,7 +819,7 @@ class EnhancedTALParser:
         else:
             name_part = var_spec.strip()
         
-        # Handle array declarations with bounds
+        # Handle array declarations (var[bounds])
         if '[' in name_part and ']' in name_part:
             is_array = True
             bracket_start = name_part.find('[')
@@ -1717,16 +830,15 @@ class EnhancedTALParser:
         else:
             var_name = name_part
         
-        # Handle pointer variables (leading dot)
+        # Handle pointer declarations (.var)
         if var_name.startswith('.'):
             is_pointer = True
             var_name = var_name[1:]
         
-        # Clean up variable name
         var_name = var_name.strip().rstrip(';').rstrip(',')
         
         spec_node.name = var_name
-        spec_node.value = var_name  # Clean, simple value
+        spec_node.value = var_name
         
         if is_pointer:
             spec_node.attributes['pointer'] = True
@@ -1735,159 +847,265 @@ class EnhancedTALParser:
         
         return spec_node
     
-    def _parse_literal_declaration(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_assignment_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL LITERAL constant declaration.
+        Parse assignment statements with operator and bit field detection.
+        
+        Handles both standard assignments (:=) and string assignments (':='),
+        including TAL-specific bit field assignments.
         
         Args:
-            line: LITERAL declaration line
+            line: Assignment statement line
             location: Source location
             
         Returns:
-            TALNode representing literal declarations
-            
-        TAL LITERAL declarations define compile-time constants:
-        LITERAL MAX_SIZE = 100, DEFAULT_NAME = "SYSTEM";
-        
-        Multiple assignments can be specified in a single declaration.
+            AST node for the assignment
         """
-        literal_node = TALNode('literal_decl')
-        literal_node.location = location
+        assign_node = tal_proc_parser.TALNode('assignment', location=location, value=line.rstrip(';'))
         
-        # Extract content after LITERAL keyword
-        content = line[7:].strip().rstrip(';')
-        assignments = self._smart_split(content, ',')
+        # Determine assignment operator type
+        if "':='" in line:
+            target, value = line.split("':='", 1)
+            assign_node.attributes['operator'] = "':='"
+            assign_node.attributes['assignment_type'] = 'string_move'
+        elif ':=' in line:
+            target, value = line.split(':=', 1)
+            assign_node.attributes['operator'] = ':='
+            assign_node.attributes['assignment_type'] = 'standard'
+        else:
+            return assign_node
         
-        for assignment in assignments:
-            if '=' in assignment:
-                name, value = assignment.split('=', 1)
-                assign_node = TALNode('assignment')
-                assign_node.name = name.strip()
-                assign_node.value = value.strip()
-                assign_node.location = location
-                literal_node.add_child(assign_node)
+        target = target.strip()
+        value = value.strip().rstrip(';')
         
-        return literal_node
+        assign_node.name = target
+        assign_node.attributes['target'] = target
+        assign_node.attributes['value'] = value
+        
+        # Check for TAL bit field syntax in assignment target
+        if self._has_bit_field_syntax(target):
+            assign_node.attributes['bit_field_assignment'] = True
+            bit_field_info = self._parse_bit_field_expression(target)
+            if bit_field_info:
+                assign_node.attributes['bit_field'] = bit_field_info
+        
+        # Parse the assignment value for system functions and operators
+        value_expr = self._parse_expression_comprehensive(value, location)
+        if value_expr:
+            assign_node.add_child(value_expr)
+        
+        return assign_node
     
-    def _parse_define_declaration(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_expression_comprehensive(self, expr: str, location: tal_proc_parser.SourceLocation) -> Optional[tal_proc_parser.TALNode]:
         """
-        Parse TAL DEFINE preprocessor declaration.
+        Parse expressions with system function and operator detection.
+        
+        Analyzes expressions to identify and catalog system functions, operators,
+        and other language constructs for comprehensive AST representation.
         
         Args:
-            line: DEFINE declaration line
+            expr: Expression string to parse
             location: Source location
             
         Returns:
-            TALNode representing define declarations
-            
-        TAL DEFINE declarations create preprocessor macros:
-        DEFINE MAX_USERS = 50, DEBUG_MODE = 1 #;
-        
-        Similar to LITERAL but processed at compile time.
-        Can end with # or #; to mark preprocessor directives.
+            AST node representing the expression
         """
-        define_node = TALNode('define_decl')
-        define_node.location = location
+        expr = expr.strip()
+        if not expr:
+            return None
         
-        # Extract content after DEFINE keyword, handle # terminators
-        content = line[6:].strip()
-        if content.endswith('#'):
-            content = content[:-1]
-        if content.endswith(';'):
-            content = content[:-1]
+        expr_node = tal_proc_parser.TALNode('expression', value=expr, location=location)
         
-        assignments = self._smart_split(content, ',')
-        for assignment in assignments:
-            if '=' in assignment:
-                name, value = assignment.split('=', 1)
-                assign_node = TALNode('assignment')
-                assign_node.name = name.strip()
-                assign_node.value = value.strip()
-                assign_node.location = location
-                define_node.add_child(assign_node)
+        # Extract and create nodes for system functions
+        system_funcs = self._extract_system_functions_from_expr(expr)
+        for func_name, func_info in system_funcs:
+            func_node = tal_proc_parser.TALNode('system_function', name=func_name, location=location)
+            func_node.attributes.update(func_info)
+            expr_node.add_child(func_node)
         
-        return define_node
+        # Extract and create nodes for operators
+        operators = self._extract_operators_from_expr(expr)
+        for op_name, op_type in operators:
+            op_node = tal_proc_parser.TALNode('operator', name=op_name, location=location)
+            op_node.attributes['operator_type'] = op_type
+            expr_node.add_child(op_node)
+        
+        return expr_node
     
-    def _parse_while_statement(self, line: str, location: SourceLocation) -> TALNode:
+    def _extract_system_functions_from_expr(self, expr: str) -> List[Tuple[str, Dict[str, Any]]]:
         """
-        Parse TAL WHILE loop statement.
+        Extract system function calls from expression strings.
+        
+        Uses pattern matching to identify system function calls (starting with $)
+        and retrieves their metadata from the system function registry.
+        
+        Args:
+            expr: Expression string to analyze
+            
+        Returns:
+            List of (function_name, function_info) tuples
+        """
+        functions = []
+        
+        # Pattern to match system functions: $FUNCTION_NAME
+        pattern = r'\$[A-Z_][A-Z0-9_]*'
+        matches = re.findall(pattern, expr.upper())
+        
+        for match in matches:
+            func_info = self.system_functions.get_function_info(match)
+            if func_info:
+                functions.append((match, func_info))
+            else:
+                # Record unknown system functions for analysis
+                functions.append((match, {
+                    'params': -1, 
+                    'returns': 'UNKNOWN', 
+                    'description': 'Unknown system function',
+                    'unknown': True
+                }))
+        
+        return functions
+    
+    def _extract_operators_from_expr(self, expr: str) -> List[Tuple[str, str]]:
+        """
+        Extract operators from expression strings.
+        
+        Tokenizes expressions and identifies TAL operators, classifying them
+        by type for semantic analysis.
+        
+        Args:
+            expr: Expression string to analyze
+            
+        Returns:
+            List of (operator, operator_type) tuples
+        """
+        operators = []
+        
+        # Simple tokenization to identify operators
+        tokens = re.findall(r'\w+|[^\w\s]', expr.upper())
+        
+        for token in tokens:
+            if self.operators.is_operator(token):
+                op_type = self.operators.get_operator_type(token)
+                operators.append((token, op_type))
+        
+        return operators
+    
+    def _parse_if_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse IF statements with condition analysis.
+        
+        Extracts the conditional expression and parses it for system functions
+        and operators.
+        
+        Args:
+            line: IF statement line
+            location: Source location
+            
+        Returns:
+            AST node for the IF statement
+        """
+        if_node = tal_proc_parser.TALNode('if_stmt', location=location, value=line.rstrip(';'))
+        
+        if ' THEN' in line.upper():
+            condition = line.split(' THEN')[0][2:].strip()  # Remove 'IF'
+            if_node.attributes['condition'] = condition
+            
+            # Parse condition for system functions and operators
+            condition_expr = self._parse_expression_comprehensive(condition, location)
+            if condition_expr:
+                if_node.add_child(condition_expr)
+        
+        return if_node
+    
+    def _parse_while_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse WHILE statements with loop condition analysis.
         
         Args:
             line: WHILE statement line
             location: Source location
             
         Returns:
-            TALNode representing the while loop
-            
-        TAL WHILE loops have the form:
-        WHILE condition DO
-        
-        The condition expression is extracted and stored as an attribute.
+            AST node for the WHILE statement
         """
-        while_node = TALNode('while_stmt')
-        while_node.location = location
-        while_node.value = line.rstrip(';')
+        while_node = tal_proc_parser.TALNode('while_stmt', location=location, value=line.rstrip(';'))
         
-        # Extract condition between WHILE and DO
         if ' DO' in line.upper():
             condition = line.split(' DO')[0][5:].strip()  # Remove 'WHILE'
             while_node.attributes['condition'] = condition
+            
+            # Parse condition for system functions and operators
+            condition_expr = self._parse_expression_comprehensive(condition, location)
+            if condition_expr:
+                while_node.add_child(condition_expr)
         
         return while_node
     
-    def _parse_case_statement(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_for_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL CASE statement for multi-way branching.
+        Parse FOR loop statements.
+        
+        Args:
+            line: FOR statement line
+            location: Source location
+            
+        Returns:
+            AST node for the FOR statement
+        """
+        for_node = tal_proc_parser.TALNode('for_stmt', location=location, value=line.rstrip(';'))
+        
+        # Extract FOR loop specification
+        for_content = line[3:].strip()  # Remove 'FOR'
+        if ' DO' in for_content.upper():
+            loop_spec, rest = for_content.split(' DO', 1)
+            for_node.attributes['loop_spec'] = loop_spec.strip()
+        
+        return for_node
+    
+    def _parse_case_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse CASE statements with expression analysis.
         
         Args:
             line: CASE statement line
             location: Source location
             
         Returns:
-            TALNode representing the case statement
-            
-        TAL CASE statements have the form:
-        CASE expression OF
-        
-        The expression to switch on is extracted and stored as an attribute.
+            AST node for the CASE statement
         """
-        case_node = TALNode('case_stmt')
-        case_node.location = location
-        case_node.value = line.rstrip(';')
+        case_node = tal_proc_parser.TALNode('case_stmt', location=location, value=line.rstrip(';'))
         
-        # Extract expression between CASE and OF
         if ' OF' in line.upper():
             expression = line.split(' OF')[0][4:].strip()  # Remove 'CASE'
             case_node.attributes['expression'] = expression
+            
+            # Parse expression for system functions
+            expr_node = self._parse_expression_comprehensive(expression, location)
+            if expr_node:
+                case_node.add_child(expr_node)
         
         return case_node
     
-    def _parse_scan_statement(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_scan_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL SCAN statement for array/string scanning.
+        Parse TAL SCAN statements (string scanning construct).
+        
+        SCAN is a TAL-specific construct for iterating through strings or arrays.
         
         Args:
             line: SCAN statement line
             location: Source location
             
         Returns:
-            TALNode representing the scan statement
-            
-        TAL SCAN statements iterate through data structures:
-        SCAN variable WHILE condition -> label;
-        
-        Extracts the variable, condition, and target label components.
+            AST node for the SCAN statement
         """
-        scan_node = TALNode('scan_stmt')
-        scan_node.location = location
-        scan_node.value = line.rstrip(';')
+        scan_node = tal_proc_parser.TALNode('scan_stmt', location=location, value=line.rstrip(';'))
         
-        # Parse SCAN components
         parts = line.split()
         if len(parts) >= 2:
             scan_node.attributes['variable'] = parts[1]
         
-        # Extract WHILE condition and target if present
         if 'WHILE' in line.upper():
             while_idx = line.upper().find('WHILE')
             condition_part = line[while_idx + 5:].strip()
@@ -1895,61 +1113,76 @@ class EnhancedTALParser:
                 condition, target = condition_part.split('->', 1)
                 scan_node.attributes['condition'] = condition.strip()
                 scan_node.attributes['target'] = target.strip()
-            else:
-                scan_node.attributes['condition'] = condition_part
         
         return scan_node
     
-    def _parse_return_statement(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_rscan_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL RETURN statement for procedure exit.
+        Parse TAL RSCAN statements (reverse string scanning).
+        
+        RSCAN is similar to SCAN but operates in reverse direction.
         
         Args:
-            line: RETURN statement line
+            line: RSCAN statement line
             location: Source location
             
         Returns:
-            TALNode representing the return statement
-            
-        TAL RETURN statements can optionally return values:
-        RETURN;
-        RETURN expression;
-        
-        The return expression is extracted if present.
+            AST node for the RSCAN statement
         """
-        return_node = TALNode('return_stmt')
-        return_node.location = location
-        return_expr = line[7:].rstrip(';')  # Remove 'RETURN' prefix
-        return_node.value = return_expr
+        rscan_node = tal_proc_parser.TALNode('rscan_stmt', location=location, value=line.rstrip(';'))
         
-        # Store return expression if present
-        if return_expr:
-            return_node.attributes['expression'] = return_expr
+        parts = line.split()
+        if len(parts) >= 2:
+            rscan_node.attributes['variable'] = parts[1]
         
-        return return_node
+        if 'WHILE' in line.upper():
+            while_idx = line.upper().find('WHILE')
+            condition_part = line[while_idx + 5:].strip()
+            if '->' in condition_part:
+                condition, target = condition_part.split('->', 1)
+                rscan_node.attributes['condition'] = condition.strip()
+                rscan_node.attributes['target'] = target.strip()
+        
+        return rscan_node
     
-    def _parse_call_statement(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_goto_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL procedure call statement.
+        Parse GOTO statements with target label extraction.
         
         Args:
-            line: CALL statement line
+            line: GOTO statement line
             location: Source location
             
         Returns:
-            TALNode representing the procedure call
-            
-        TAL procedure calls can use different syntaxes:
-        CALL procedure_name(arg1, arg2);
-        $procedure_name(arg1, arg2);  (short form)
-        
-        Extracts function name and argument list for analysis.
+            AST node for the GOTO statement
         """
-        call_node = TALNode('call_stmt')
-        call_node.location = location
-        call_node.value = line.rstrip(';')
+        goto_node = tal_proc_parser.TALNode('goto_stmt', location=location, value=line.rstrip(';'))
         
-        # Extract function call expression
+        parts = line.split()
+        if len(parts) >= 2:
+            target = parts[1].rstrip(';')
+            goto_node.attributes['target'] = target
+        
+        return goto_node
+    
+    def _parse_call_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse procedure calls and system function calls with enhanced validation.
+        
+        This method handles both regular procedure calls (CALL proc) and system
+        function calls (starting with $), providing argument validation for
+        system functions.
+        
+        Args:
+            line: Call statement line
+            location: Source location
+            
+        Returns:
+            AST node for the call statement
+        """
+        call_node = tal_proc_parser.TALNode('call_stmt', location=location, value=line.rstrip(';'))
+        
+        # Extract the function call expression
         if line.startswith('CALL '):
             call_expr = line[5:].strip()
         elif line.startswith('$'):
@@ -1957,183 +1190,329 @@ class EnhancedTALParser:
         else:
             call_expr = line
         
-        # Parse function name and arguments
+        func_name = ""
         if '(' in call_expr:
             func_name = call_expr.split('(')[0].strip()
             if func_name.startswith('$'):
-                func_name = func_name[1:]
-            call_node.attributes['function'] = func_name
+                # System function call
+                original_func_name = func_name
+                func_name = func_name[1:]  # Remove $ for attribute storage
+                call_node.attributes['function'] = func_name
+                call_node.attributes['original_name'] = original_func_name
+                
+                # Validate against system function registry
+                func_info = self.system_functions.get_function_info(original_func_name)
+                if func_info:
+                    call_node.attributes['system_function'] = True
+                    call_node.attributes.update(func_info)
+                    call_node.type = 'system_function_call'
+                else:
+                    call_node.attributes['system_function'] = True
+                    call_node.attributes['unknown_system_function'] = True
+                    self.warnings.append(tal_proc_parser.ParseError(
+                        f"Unknown system function: {original_func_name}",
+                        location,
+                        tal_proc_parser.ErrorSeverity.WARNING,
+                        error_code="W301"
+                    ))
+            else:
+                # Regular procedure call
+                call_node.attributes['function'] = func_name
             
-            # Extract and parse argument list
+            # Parse function arguments
             arg_part = call_expr[call_expr.find('(')+1:call_expr.rfind(')')]
             if arg_part:
                 args = self._smart_split(arg_part, ',')
                 call_node.attributes['arguments'] = [arg.strip() for arg in args]
+                call_node.attributes['argument_count'] = len(args)
+                
+                # Validate argument count for known system functions
+                if (call_node.attributes.get('system_function') and 
+                    func_info and 
+                    func_info.get('params', -1) >= 0 and
+                    len(args) != func_info['params']):
+                    self.warnings.append(tal_proc_parser.ParseError(
+                        f"Function {original_func_name} expects {func_info['params']} arguments, got {len(args)}",
+                        location,
+                        tal_proc_parser.ErrorSeverity.WARNING,
+                        error_code="W302"
+                    ))
+        else:
+            # Function call without parentheses (parameter-less)
+            if call_expr.startswith('$'):
+                func_name = call_expr
+                call_node.attributes['function'] = func_name[1:]
+                call_node.attributes['original_name'] = func_name
+                call_node.attributes['system_function'] = True
+                
+                func_info = self.system_functions.get_function_info(func_name)
+                if func_info:
+                    call_node.attributes.update(func_info)
+                    call_node.type = 'system_function_call'
         
         return call_node
     
-    def _parse_if_statement(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_return_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL IF conditional statement.
+        Parse RETURN statements with expression and bit field analysis.
         
         Args:
-            line: IF statement line
+            line: RETURN statement line
             location: Source location
             
         Returns:
-            TALNode representing the if statement
-            
-        TAL IF statements have the form:
-        IF condition THEN
-        
-        The condition expression is extracted for later analysis.
+            AST node for the RETURN statement
         """
-        if_node = TALNode('if_stmt')
-        if_node.location = location
-        if_node.value = line.rstrip(';')
+        return_node = tal_proc_parser.TALNode('return_stmt', location=location)
+        return_expr = line[6:].rstrip(';') if line.upper().startswith('RETURN') else line
+        return_node.value = return_expr
         
-        # Extract condition between IF and THEN
-        if ' THEN' in line.upper():
-            condition = line.split(' THEN')[0][2:].strip()  # Remove 'IF'
-            if_node.attributes['condition'] = condition
+        if return_expr:
+            return_node.attributes['expression'] = return_expr
+            
+            # Check for TAL bit field syntax in return expression
+            if self._has_bit_field_syntax(return_expr):
+                return_node.attributes['bit_field_return'] = True
+                bit_field_info = self._parse_bit_field_expression(return_expr)
+                if bit_field_info:
+                    return_node.attributes['bit_field'] = bit_field_info
+            
+            # Parse return expression for system functions and operators
+            expr_node = self._parse_expression_comprehensive(return_expr, location)
+            if expr_node:
+                return_node.add_child(expr_node)
         
-        return if_node
+        return return_node
     
-    def _parse_assignment(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_interrupt_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse TAL assignment statement with multiple assignment operators.
+        Parse TAL INTERRUPT statements.
+        
+        INTERRUPT is a TAL-specific statement for interrupt handling.
         
         Args:
-            line: Assignment statement line
+            line: INTERRUPT statement line
             location: Source location
             
         Returns:
-            TALNode representing the assignment
-            
-        TAL supports different assignment operators:
-        - := standard assignment
-        - ':=' string assignment (special operator for string handling)
-        
-        Extracts target variable, value expression, and operator type.
+            AST node for the INTERRUPT statement
         """
-        assign_node = TALNode('assignment')
-        assign_node.location = location
-        assign_node.value = line.rstrip(';')
+        interrupt_node = tal_proc_parser.TALNode('interrupt_stmt', location=location, value=line.rstrip(';'))
         
-        # Handle different TAL assignment operators
-        if "':='" in line:
-            # Special TAL string assignment operator
-            lhs, rhs = line.split("':='", 1)
-            assign_node.name = lhs.strip()
-            assign_node.attributes['target'] = lhs.strip()
-            assign_node.attributes['value'] = rhs.strip().rstrip(';')
-            assign_node.attributes['operator'] = "':='"
-        elif ':=' in line:
-            # Standard TAL assignment
-            lhs, rhs = line.split(':=', 1)
-            assign_node.name = lhs.strip()
-            assign_node.attributes['target'] = lhs.strip()
-            assign_node.attributes['value'] = rhs.strip().rstrip(';')
-            assign_node.attributes['operator'] = ':='
+        parts = line.split()
+        if len(parts) >= 2:
+            interrupt_node.attributes['interrupt_number'] = parts[1].rstrip(';')
         
-        return assign_node
+        return interrupt_node
     
-    def _parse_general_statement(self, line: str, location: SourceLocation) -> TALNode:
+    def _parse_assert_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
-        Parse general TAL statement that doesn't match specific patterns.
+        Parse ASSERT statements with condition analysis.
         
         Args:
-            line: Statement line
+            line: ASSERT statement line
             location: Source location
             
         Returns:
-            TALNode representing the generic statement
-            
-        Fallback parser for TAL constructs that don't match specific
-        patterns. Preserves the original text for later analysis or
-        specialized handling.
+            AST node for the ASSERT statement
         """
-        stmt_node = TALNode('statement')
-        stmt_node.location = location
-        stmt_node.value = line.rstrip(';')
+        assert_node = tal_proc_parser.TALNode('assert_stmt', location=location, value=line.rstrip(';'))
+        
+        condition = line[6:].strip().rstrip(';')  # Remove 'ASSERT'
+        if condition:
+            assert_node.attributes['condition'] = condition
+            # Parse condition for system functions
+            condition_expr = self._parse_expression_comprehensive(condition, location)
+            if condition_expr:
+                assert_node.add_child(condition_expr)
+        
+        return assert_node
+    
+    def _parse_stop_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse STOP statements with optional stop codes.
+        
+        Args:
+            line: STOP statement line
+            location: Source location
+            
+        Returns:
+            AST node for the STOP statement
+        """
+        stop_node = tal_proc_parser.TALNode('stop_stmt', location=location, value=line.rstrip(';'))
+        
+        # STOP might have an optional code
+        if len(line.strip()) > 4:
+            code = line[4:].strip().rstrip(';')
+            if code:
+                stop_node.attributes['stop_code'] = code
+        
+        return stop_node
+    
+    def _parse_abort_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse ABORT statements with optional abort codes.
+        
+        Args:
+            line: ABORT statement line
+            location: Source location
+            
+        Returns:
+            AST node for the ABORT statement
+        """
+        abort_node = tal_proc_parser.TALNode('abort_stmt', location=location, value=line.rstrip(';'))
+        
+        # ABORT might have an optional code
+        if len(line.strip()) > 5:
+            code = line[5:].strip().rstrip(';')
+            if code:
+                abort_node.attributes['abort_code'] = code
+        
+        return abort_node
+    
+    def _parse_label_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse label definitions for GOTO targets.
+        
+        Args:
+            line: Label definition line
+            location: Source location
+            
+        Returns:
+            AST node for the label
+        """
+        label_name = line.strip().rstrip(':')
+        label_node = tal_proc_parser.TALNode('label', name=label_name, location=location, value=label_name)
+        label_node.attributes['label_name'] = label_name
+        
+        return label_node
+    
+
+    def _parse_general_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse general statements with comprehensive analysis and classification.
+        
+        This is the fallback parser for statements that don't match specific
+        patterns. It applies various heuristics to classify and analyze the
+        statement content.
+        
+        Args:
+            line: Statement line to parse
+            location: Source location
+            
+        Returns:
+            AST node for the general statement
+        """
+        stmt_node = tal_proc_parser.TALNode('statement', location=location, value=line.rstrip(';'))
+        
+        # Debug input processing if enabled
+        if self.debug_mode:
+            print(f"DEBUG INPUT: Raw line = '{line}'")
+            print(f"DEBUG INPUT: After rstrip(';') = '{line.rstrip(';')}'")
+
+        # Check if this should actually be parsed as a variable declaration
+        if self._is_variable_declaration(line):
+            if self.debug_mode:
+                print(f"DEBUG: Line identified as variable declaration")
+            return self._parse_variable_declaration_comprehensive(line, location)
+        else:
+            if self.debug_mode:
+                print(f"DEBUG: Line processed as general statement")
+        
+        # Classify the statement type using various heuristics
+        upper_line = line.upper().strip()
+        
+        # Extract system functions if present
+        if '$' in line:
+            system_funcs = self._extract_system_functions_from_expr(line)
+            for func_name, func_info in system_funcs:
+                func_node = tal_proc_parser.TALNode('system_function', name=func_name, location=location)
+                func_node.attributes.update(func_info)
+                stmt_node.add_child(func_node)
+        
+        # Extract operators if present
+        operators = self._extract_operators_from_expr(line)
+        for op_name, op_type in operators:
+            op_node = tal_proc_parser.TALNode('operator', name=op_name, location=location)
+            op_node.attributes['operator_type'] = op_type
+            stmt_node.add_child(op_node)
+        
+        # Enhanced classification of potential statement types
+        if any(keyword in upper_line for keyword in ['DROP', 'ADD', 'SUB', 'MOVE']):
+            stmt_node.attributes['potential_type'] = 'tal_instruction'
+        elif re.search(r'^[A-Z_][A-Z0-9_\^]*$', upper_line.rstrip(';')):
+            stmt_node.attributes['potential_type'] = 'identifier_reference'
+        elif any(char in line for char in '()[]'):
+            stmt_node.attributes['potential_type'] = 'complex_expression'
+        elif self._has_bit_field_syntax(line):
+            stmt_node.attributes['potential_type'] = 'bit_field_operation'
+            bit_field_info = self._parse_bit_field_expression(line)
+            if bit_field_info:
+                stmt_node.attributes['bit_field'] = bit_field_info
+        elif '.' in line and not line.startswith('!'):
+            stmt_node.attributes['potential_type'] = 'pointer_or_field_access'
+        elif '@' in line:
+            stmt_node.attributes['potential_type'] = 'address_operation'
+        
+        # Debug output after processing (if enabled)
+        if self.debug_mode:
+            print(f"DEBUG: Final node children count: {len(stmt_node.children)}")
+            print(f"DEBUG: Final node attributes: {stmt_node.attributes}")
+            
+            # Show S-expression construction process
+            attrs_str = str(stmt_node.attributes)
+            print(f"DEBUG ATTRS: attrs_str = '{attrs_str}'")
+            
+            debug_result = f"(statement :value {stmt_node.value}"
+            if stmt_node.attributes:
+                debug_result += f" :attrs {attrs_str}"
+            print(f"DEBUG RESULT: after attrs = '{debug_result}'")
+            
+            final_result = stmt_node.to_sexp()
+            print(f"DEBUG FINAL: final result = '{final_result}'")
+            print(f"DEBUG: Created statement node: {stmt_node.to_sexp()}")
+            
+            # Debug problematic patterns
+            stripped_line = line.strip()
+            if (stripped_line.endswith(');') and 
+                not ' ' in stripped_line.replace(');', '').replace('^', '').replace('_', '') and
+                len(stripped_line) > 3):
+                print(f"DEBUG: Processing potential procedure continuation line: '{line}'")
+                print(f"DEBUG: Node structure: type={stmt_node.type}, value='{stmt_node.value}'")
+                print(f"DEBUG: Attributes: {stmt_node.attributes}")
+                
+                manual_sexp = f"(statement :value {stmt_node.value})"
+                if stmt_node.attributes:
+                    manual_sexp = f"(statement :value {stmt_node.value} :attrs {stmt_node.attributes})"
+                print(f"DEBUG: Expected S-exp format: {manual_sexp}")
+        
         return stmt_node
-    
-    def _generate_cross_references(self, program: TALNode):
-        """
-        Generate cross-references between symbols and their usage.
-        
-        Args:
-            program: Root AST node to analyze
-            
-        Analyzes the AST to build relationships between symbol declarations
-        and references. Useful for:
-        - IDE "go to definition" features
-        - Unused variable detection
-        - Call graph generation
-        - Dependency analysis
-        
-        Currently a placeholder for future implementation.
-        """
-        # TODO: Implementation for cross-reference generation
-        # Would traverse AST to find symbol references and link to declarations
-        pass
-    
-    def _export_symbol_table(self) -> Dict[str, Any]:
-        """
-        Export symbol table to dictionary format for analysis tools.
-        
-        Returns:
-            Dictionary representation of the complete symbol table
-            
-        Converts the internal symbol table structure to a format suitable
-        for JSON serialization and external tool consumption. Includes
-        all symbol metadata and reference locations.
-        """
-        symbols = {}
-        for scope_name, scope_symbols in self.symbol_table.scopes.items():
-            symbols[scope_name] = {}
-            for sym_name, symbol in scope_symbols.items():
-                symbols[scope_name][sym_name] = {
-                    'type': symbol.symbol_type.value,
-                    'location': f"{symbol.location.filename}:{symbol.location.line}:{symbol.location.column}",
-                    'is_pointer': symbol.is_pointer,
-                    'is_array': symbol.is_array,
-                    'references': [f"{ref.filename}:{ref.line}:{ref.column}" for ref in symbol.references]
-                }
-        return symbols
+
     
     def _smart_split(self, text: str, delimiter: str) -> List[str]:
         """
-        Split text by delimiter while respecting nested structures.
+        Split text while respecting nested structures like parentheses and quotes.
+        
+        This utility function properly handles splitting complex expressions
+        that contain nested parentheses, brackets, or quoted strings, ensuring
+        that splits only occur at the appropriate delimiter positions.
         
         Args:
             text: Text to split
             delimiter: Character to split on
             
         Returns:
-            List of text segments split at delimiter
-            
-        Unlike simple string split, this method respects:
-        - Nested parentheses and brackets
-        - Quoted string literals (single and double quotes)
-        - Balanced delimiter counting
-        
-        Essential for parsing parameter lists and complex expressions
-        where commas might appear inside nested structures.
-        
-        Example:
-        "func(a, b), array[1, 2], \"hello, world\"" 
-        splits to: ["func(a, b)", "array[1, 2]", "\"hello, world\""]
+            List of split text parts
         """
         parts = []
         current = ""
-        paren_level = 0      # Track () nesting
-        bracket_level = 0    # Track [] nesting  
+        paren_level = 0
+        bracket_level = 0
         in_quotes = False
         quote_char = None
         
         for char in text:
-            # Handle quote character transitions
+            # Handle quote state changes
             if char in '"\'':
                 if not in_quotes:
                     in_quotes = True
@@ -2142,7 +1521,7 @@ class EnhancedTALParser:
                     in_quotes = False
                     quote_char = None
             
-            # Only track delimiters outside of quotes
+            # Track nesting levels only when not in quotes
             if not in_quotes:
                 if char == '(':
                     paren_level += 1
@@ -2153,7 +1532,7 @@ class EnhancedTALParser:
                 if char == ']':
                     bracket_level -= 1
                 
-                # Split only when all delimiters are balanced
+                # Split only when not nested and not in quotes
                 if (char == delimiter and 
                     paren_level == 0 and bracket_level == 0):
                     parts.append(current.strip())
@@ -2162,432 +1541,1069 @@ class EnhancedTALParser:
             
             current += char
         
-        # Add final part if non-empty
         if current.strip():
             parts.append(current.strip())
         
         return parts
     
-    def _count_nodes(self, node: TALNode) -> int:
+    def _add_global_content_rich(self, lines: List[str], program: tal_proc_parser.TALNode, proc_lines: set):
         """
-        Recursively count total nodes in AST.
+        Add global content (non-procedure code) with comprehensive parsing.
+        
+        This method processes all lines that are not part of procedure bodies,
+        applying rich parsing to global declarations, directives, and other
+        top-level constructs.
+        
+        Args:
+            lines: All source code lines
+            program: Program AST node to add content to
+            proc_lines: Set of line numbers that belong to procedures
+        """
+        
+        if self.debug_mode:
+            print(f"DEBUG: Initial proc_lines = {sorted(proc_lines)}")
+        
+        # Expand proc_lines to include all procedure declaration lines
+        proc_declarations = tal_proc_parser.find_procedure_declarations('\n'.join(lines))
+        if self.debug_mode:
+            print(f"DEBUG: Found {len(proc_declarations)} procedure declarations")
+        
+        for start_line, proc_name, declaration in proc_declarations:
+            declaration_line_count = declaration.count('\n') + 1
+            if self.debug_mode:
+                print(f"DEBUG: Procedure {proc_name} starts at line {start_line}, spans {declaration_line_count} lines")
+                print(f"DEBUG: Declaration:\n{declaration}")
+            
+            # Mark all declaration lines as procedure content
+            for line_num in range(start_line, start_line + declaration_line_count):
+                proc_lines.add(line_num)
+                if self.debug_mode:
+                    print(f"DEBUG: Added line {line_num} to proc_lines")
+        
+        if self.debug_mode:
+            print(f"DEBUG: Final proc_lines = {sorted(proc_lines)}")
+        
+        # Process each line that's not part of a procedure
+        for i, line in enumerate(lines, 1):
+            if i in proc_lines:
+                if self.debug_mode:
+                    print(f"DEBUG: Skipping line {i} (in proc_lines): '{line.strip()}'")
+                continue
+    
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            
+            location = tal_proc_parser.SourceLocation(self.filename, i, 1)
+            
+            # Handle global comments
+            if line_stripped.startswith('!'):
+                comment_node = tal_proc_parser.TALNode('comment', value=line_stripped[1:].strip(), location=location)
+                program.add_child(comment_node)
+                continue
+            
+            # Parse global lines with comprehensive analysis
+            try:
+                node = self._parse_global_line_comprehensive(line_stripped, location)
+                if node:
+                    program.add_child(node)
+            except Exception as e:
+                self.errors.append(tal_proc_parser.ParseError(
+                    f"Error parsing global line: {e}",
+                    location,
+                    tal_proc_parser.ErrorSeverity.WARNING,
+                    error_code="E200"
+                ))
+    
+    def _parse_global_line_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> Optional[tal_proc_parser.TALNode]:
+        """
+        Parse global-level constructs with comprehensive pattern matching.
+        
+        This method handles all top-level TAL constructs including compiler
+        directives, module declarations, data structures, and global variables.
+        
+        Args:
+            line: Global source line to parse
+            location: Source location for error reporting
+            
+        Returns:
+            AST node for the global construct or None to skip
+        """
+        line = line.strip()
+        if not line:
+            return None
+        
+        upper_line = line.upper()
+        
+        # Handle procedure continuation lines that weren't properly filtered
+        if (line.strip().endswith(');') and 
+            not any(upper_line.startswith(keyword) for keyword in ['PROC ', 'INT PROC ', 'STRING PROC ', 'REAL PROC ']) and
+            not upper_line.startswith('?') and
+            '(' not in line and
+            not any(upper_line.startswith(keyword) for keyword in ['CALL ', 'IF ', 'WHILE ', 'FOR ', 'CASE '])):
+            if self.debug_mode: 
+                print(f"DEBUG: Skipping procedure continuation line: '{line}'")
+            return None
+        
+        # Handle parameter continuation lines (indented with commas)
+        if (line.strip().endswith(',') and 
+            not upper_line.startswith('?') and
+            not ':=' in line and
+            not any(upper_line.startswith(keyword) for keyword in ['STRING ', 'INT ', 'REAL ', 'STRUCT ', 'LITERAL ', 'CONST ']) and
+            len(line) - len(line.lstrip()) > 10):
+            print(f"DEBUG: Skipping parameter continuation line: '{line}'")
+            return None
+        
+        # Handle isolated parameter names that end with );
+        stripped = line.strip()
+        if (stripped.endswith(');') and 
+            not ' ' in stripped.replace(');', '').replace('^', '').replace('_', '') and
+            not any(c in stripped for c in ['(', '[', ':', '=', '<', '>', '+', '-', '*', '/'])):
+            print(f"DEBUG: Skipping isolated parameter ending: '{line}'")
+            return None
+        
+        # Compiler directives
+        if upper_line.startswith('?PAGE '):
+            return self._parse_page_directive_comprehensive(line, location)
+        elif upper_line.startswith('?SECTION '):
+            return self._parse_section_directive_comprehensive(line, location)
+        elif upper_line.startswith('?SOURCE '):
+            return self._parse_source_directive_comprehensive(line, location)
+        elif upper_line.startswith('?NOLIST'):
+            return tal_proc_parser.TALNode('nolist_directive', value=line, location=location)
+        elif upper_line.startswith('?LIST'):
+            return tal_proc_parser.TALNode('list_directive', value=line, location=location)
+        elif upper_line.startswith('?SYMBOLS'):
+            return tal_proc_parser.TALNode('symbols_directive', value=line, location=location)
+        elif upper_line.startswith('?NOSYMBOLS'):
+            return tal_proc_parser.TALNode('nosymbols_directive', value=line, location=location)
+        elif upper_line.startswith('?SAVE'):
+            return tal_proc_parser.TALNode('save_directive', value=line, location=location)
+        elif upper_line.startswith('?RESTORE'):
+            return tal_proc_parser.TALNode('restore_directive', value=line, location=location)
+        elif upper_line.startswith('?HEAP'):
+            return tal_proc_parser.TALNode('heap_directive', value=line, location=location)
+        elif upper_line.startswith('?STACK'):
+            return tal_proc_parser.TALNode('stack_directive', value=line, location=location)
+        
+        # Module declarations
+        elif upper_line.startswith('NAME '):
+            name = line.split()[1].rstrip(';')
+            node = tal_proc_parser.TALNode('name_decl', name=name, location=location)
+            node.attributes['module_name'] = name
+            return node
+            
+        # Structure definitions
+        elif upper_line.startswith('STRUCT '):
+            return self._parse_struct_declaration_comprehensive(line, location)
+            
+        # Template definitions
+        elif upper_line.startswith('TEMPLATE '):
+            return self._parse_template_declaration_comprehensive(line, location)
+            
+        # Subtype definitions
+        elif upper_line.startswith('SUBTYPE '):
+            return self._parse_subtype_declaration_comprehensive(line, location)
+            
+        # External declarations
+        elif upper_line.startswith('EXTERNAL '):
+            return self._parse_external_declaration_comprehensive(line, location)
+            
+        # Forward declarations
+        elif upper_line.startswith('FORWARD '):
+            return self._parse_forward_declaration_comprehensive(line, location)
+            
+        # Constants and literals
+        elif upper_line.startswith('LITERAL '):
+            return self._parse_literal_declaration_comprehensive(line, location)
+        elif upper_line.startswith('DEFINE '):
+            return self._parse_define_declaration_comprehensive(line, location)
+        elif upper_line.startswith('CONST '):
+            return self._parse_const_declaration_comprehensive(line, location)
+            
+        # Equates
+        elif upper_line.startswith('EQU '):
+            return self._parse_equ_declaration_comprehensive(line, location)
+            
+        # Variable declarations
+        elif self._is_global_variable_declaration(line):
+            return self._parse_global_variable_declaration_comprehensive(line, location)
+            
+        # Use/Include statements
+        elif upper_line.startswith('USE '):
+            return self._parse_use_statement_comprehensive(line, location)
+        elif upper_line.startswith('INCLUDE '):
+            return self._parse_include_statement_comprehensive(line, location)
+            
+        # Conditional compilation
+        elif upper_line.startswith('?IF '):
+            return self._parse_conditional_compilation_comprehensive(line, location)
+        elif upper_line.startswith('?ENDIF'):
+            return tal_proc_parser.TALNode('endif_directive', value=line, location=location)
+        elif upper_line.startswith('?ELSE'):
+            return tal_proc_parser.TALNode('else_directive', value=line, location=location)
+            
+        else:
+            # Enhanced fallback with system function detection
+            global_node = tal_proc_parser.TALNode('global_statement', value=line, location=location)
+            
+            # Analyze for system functions in global context
+            if '$' in line:
+                system_funcs = self._extract_system_functions_from_expr(line)
+                for func_name, func_info in system_funcs:
+                    func_node = tal_proc_parser.TALNode('system_function', name=func_name, location=location)
+                    func_node.attributes.update(func_info)
+                    global_node.add_child(func_node)
+            
+            return global_node
+    
+    # Comprehensive parsers for specific global constructs
+    
+    def _parse_page_directive_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse ?PAGE compiler directive with title extraction.
+        
+        ?PAGE directives control page formatting in compiler listings.
+        
+        Args:
+            line: ?PAGE directive line
+            location: Source location
+            
+        Returns:
+            AST node for the page directive
+        """
+        page_node = tal_proc_parser.TALNode('page_directive', value=line, location=location)
+        
+        # Extract page title if present
+        if len(line) > 6:
+            title_part = line[6:].strip()
+            if title_part.startswith('"') and title_part.endswith('"'):
+                page_node.attributes['title'] = title_part[1:-1]
+            else:
+                page_node.attributes['title'] = title_part
+        
+        return page_node
+    
+    def _parse_section_directive_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse ?SECTION compiler directive.
+        
+        ?SECTION directives organize code into logical sections.
+        
+        Args:
+            line: ?SECTION directive line
+            location: Source location
+            
+        Returns:
+            AST node for the section directive
+        """
+        section_node = tal_proc_parser.TALNode('section_directive', value=line, location=location)
+        
+        parts = line.split()
+        if len(parts) > 1:
+            section_node.attributes['section_name'] = parts[1]
+        
+        return section_node
+    
+    def _parse_source_directive_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse ?SOURCE compiler directive for file inclusion.
+        
+        Args:
+            line: ?SOURCE directive line
+            location: Source location
+            
+        Returns:
+            AST node for the source directive
+        """
+        source_node = tal_proc_parser.TALNode('source_directive', value=line, location=location)
+        
+        if len(line) > 7:
+            filename = line[7:].strip()
+            source_node.attributes['filename'] = filename
+        
+        return source_node
+    
+    def _parse_struct_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse STRUCT declarations with template parameter support.
+        
+        STRUCT defines user-defined data types in TAL.
+        
+        Args:
+            line: STRUCT declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the struct declaration
+        """
+        struct_node = tal_proc_parser.TALNode('struct_decl', location=location)
+        
+        # Extract struct name and attributes
+        parts = line.split()
+        if len(parts) >= 2:
+            struct_name = parts[1].rstrip('(*);')
+            struct_node.name = struct_name
+            struct_node.attributes['struct_name'] = struct_name
+        
+        # Check for template parameters
+        if '(' in line and ')' in line:
+            param_start = line.find('(')
+            param_end = line.find(')')
+            params = line[param_start+1:param_end]
+            if params.strip():
+                struct_node.attributes['template_params'] = params.strip()
+        
+        return struct_node
+    
+    def _parse_template_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse TEMPLATE declarations for generic programming.
+        
+        Args:
+            line: TEMPLATE declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the template declaration
+        """
+        template_node = tal_proc_parser.TALNode('template_decl', location=location, value=line)
+        
+        parts = line.split()
+        if len(parts) >= 2:
+            template_node.name = parts[1].rstrip(';')
+            template_node.attributes['template_name'] = parts[1].rstrip(';')
+        
+        return template_node
+    
+    def _parse_subtype_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse SUBTYPE declarations for type aliases.
+        
+        Args:
+            line: SUBTYPE declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the subtype declaration
+        """
+        subtype_node = tal_proc_parser.TALNode('subtype_decl', location=location, value=line)
+        
+        # Parse SUBTYPE name = base_type;
+        if '=' in line:
+            name_part, type_part = line.split('=', 1)
+            subtype_name = name_part.split()[1].strip()
+            base_type = type_part.strip().rstrip(';')
+            
+            subtype_node.name = subtype_name
+            subtype_node.attributes['subtype_name'] = subtype_name
+            subtype_node.attributes['base_type'] = base_type
+        
+        return subtype_node
+    
+    def _parse_external_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse EXTERNAL declarations for external symbol references.
+        
+        Args:
+            line: EXTERNAL declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the external declaration
+        """
+        external_node = tal_proc_parser.TALNode('external_decl', location=location, value=line)
+        
+        # Extract external symbol information
+        content = line[8:].strip().rstrip(';')  # Remove 'EXTERNAL'
+        external_node.attributes['external_name'] = content
+        
+        return external_node
+    
+    def _parse_forward_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse FORWARD declarations for forward procedure references.
+        
+        Args:
+            line: FORWARD declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the forward declaration
+        """
+        forward_node = tal_proc_parser.TALNode('forward_decl', location=location, value=line)
+        
+        content = line[7:].strip().rstrip(';')  # Remove 'FORWARD'
+        forward_node.attributes['forward_name'] = content
+        
+        return forward_node
+    
+    def _parse_const_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse CONST declarations for named constants.
+        
+        Args:
+            line: CONST declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the const declaration
+        """
+        const_node = tal_proc_parser.TALNode('const_decl', location=location, value=line)
+        
+        # Parse CONST name = value;
+        if '=' in line:
+            name_part, value_part = line.split('=', 1)
+            const_name = name_part.split()[1].strip()
+            const_value = value_part.strip().rstrip(';')
+            
+            const_node.name = const_name
+            const_node.attributes['const_name'] = const_name
+            const_node.attributes['const_value'] = const_value
+        
+        return const_node
+    
+    def _parse_equ_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse EQU declarations for symbolic constants.
+        
+        Args:
+            line: EQU declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the equate declaration
+        """
+        equ_node = tal_proc_parser.TALNode('equ_decl', location=location, value=line)
+        
+        parts = line.split()
+        if len(parts) >= 3:  # EQU name value
+            equ_node.name = parts[1]
+            equ_node.attributes['equ_name'] = parts[1]
+            equ_node.attributes['equ_value'] = parts[2].rstrip(';')
+        
+        return equ_node
+    
+    def _parse_use_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse USE statements for module inclusion.
+        
+        Args:
+            line: USE statement line
+            location: Source location
+            
+        Returns:
+            AST node for the use statement
+        """
+        use_node = tal_proc_parser.TALNode('use_stmt', location=location, value=line)
+        
+        module_name = line[3:].strip().rstrip(';')  # Remove 'USE'
+        use_node.attributes['module_name'] = module_name
+        
+        return use_node
+    
+    def _parse_include_statement_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse INCLUDE statements for file inclusion.
+        
+        Args:
+            line: INCLUDE statement line
+            location: Source location
+            
+        Returns:
+            AST node for the include statement
+        """
+        include_node = tal_proc_parser.TALNode('include_stmt', location=location, value=line)
+        
+        filename = line[7:].strip().rstrip(';')  # Remove 'INCLUDE'
+        include_node.attributes['filename'] = filename
+        
+        return include_node
+    
+    def _parse_conditional_compilation_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse conditional compilation directives like ?IF.
+        
+        Args:
+            line: Conditional compilation line
+            location: Source location
+            
+        Returns:
+            AST node for the conditional compilation directive
+        """
+        if_node = tal_proc_parser.TALNode('conditional_compilation', location=location, value=line)
+        
+        condition = line[3:].strip()  # Remove '?IF'
+        if_node.attributes['condition'] = condition
+        
+        return if_node
+    
+    def _parse_literal_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse LITERAL declarations with multiple assignments.
+        
+        LITERAL creates compile-time string constants.
+        
+        Args:
+            line: LITERAL declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the literal declaration
+        """
+        literal_node = tal_proc_parser.TALNode('literal_decl', location=location)
+        content = line[7:].strip().rstrip(';')
+        assignments = self._smart_split(content, ',')
+        
+        for assignment in assignments:
+            if '=' in assignment:
+                name, value = assignment.split('=', 1)
+                assign_node = tal_proc_parser.TALNode('assignment', name=name.strip(), value=value.strip(), location=location)
+                literal_node.add_child(assign_node)
+        
+        return literal_node
+    
+    def _parse_define_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse DEFINE declarations for preprocessor-style definitions.
+        
+        Args:
+            line: DEFINE declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the define declaration
+        """
+        define_node = tal_proc_parser.TALNode('define_decl', location=location)
+        content = line[6:].strip()
+        if content.endswith('#'):
+            content = content[:-1]
+        if content.endswith(';'):
+            content = content[:-1]
+        
+        assignments = self._smart_split(content, ',')
+        for assignment in assignments:
+            if '=' in assignment:
+                name, value = assignment.split('=', 1)
+                assign_node = tal_proc_parser.TALNode('assignment', name=name.strip(), value=value.strip(), location=location)
+                define_node.add_child(assign_node)
+        
+        return define_node
+    
+    def _is_global_variable_declaration(self, line: str) -> bool:
+        """
+        Identify global variable declarations (not within procedures).
+        
+        Args:
+            line: Source code line to check
+            
+        Returns:
+            True if line appears to be a global variable declaration
+        """
+        upper_line = line.upper()
+        tal_types = ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT']
+        
+        if any(upper_line.startswith(t) for t in tal_types) and 'PROC ' not in upper_line:
+            return True
+        
+        return False
+    
+    def _parse_global_variable_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse global variable declarations with full type analysis.
+        
+        Args:
+            line: Global variable declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the global variable declaration
+        """
+        var_node = tal_proc_parser.TALNode('var_decl', location=location, value=line.rstrip(';'))
+        
+        parts = line.split()
+        if len(parts) >= 2:
+            var_type = parts[0].upper()
+            var_node.attributes['type'] = var_type
+            
+            remaining = ' '.join(parts[1:]).rstrip(';')
+            var_specs = self._smart_split(remaining, ',')
+            
+            for var_spec in var_specs:
+                var_spec = var_spec.strip()
+                if var_spec:
+                    spec_node = self._parse_variable_spec_comprehensive(var_spec, var_type, location)
+                    if spec_node:
+                        var_node.add_child(spec_node)
+        
+        return var_node
+    
+    def _collect_system_functions(self, node: tal_proc_parser.TALNode) -> Dict[str, Any]:
+        """
+        Recursively collect all system functions used throughout the program.
+        
+        This method traverses the entire AST to catalog system function usage,
+        providing statistics and location information for analysis.
+        
+        Args:
+            node: Root AST node to search from
+            
+        Returns:
+            Dictionary of system functions with usage statistics
+        """
+        system_funcs = {}
+        
+        def collect_recursive(n):
+            if n.type in ['system_function_call', 'system_function']:
+                func_name = n.attributes.get('original_name', n.name)
+                if func_name not in system_funcs:
+                    system_funcs[func_name] = {
+                        'count': 0,
+                        'locations': [],
+                        'info': n.attributes.copy()
+                    }
+                system_funcs[func_name]['count'] += 1
+                if n.location:
+                    system_funcs[func_name]['locations'].append({
+                        'line': n.location.line,
+                        'column': n.location.column
+                    })
+            
+            for child in n.children:
+                collect_recursive(child)
+        
+        collect_recursive(node)
+        return system_funcs
+    
+    def _extract_procedure_info(self, procedures: List[tal_proc_parser.TALNode]) -> Dict[str, Any]:
+        """
+        Extract comprehensive information about all procedures in the program.
+        
+        This method analyzes each procedure to extract metadata including
+        parameters, local variables, statement counts, and system function usage.
+        
+        Args:
+            procedures: List of procedure AST nodes
+            
+        Returns:
+            Dictionary mapping procedure names to their detailed information
+        """
+        proc_info = {}
+        
+        for proc in procedures:
+            info = {
+                'name': proc.name,
+                'return_type': proc.attributes.get('return_type', 'void'),
+                'is_main': proc.attributes.get('is_main', False),
+                'is_forward': proc.attributes.get('is_forward', False),
+                'is_external': proc.attributes.get('is_external', False),
+                'parameters': [],
+                'local_variables': [],
+                'statements_count': 0,
+                'system_functions_used': []
+            }
+            
+            # Extract parameter information
+            params_node = proc.find_child_by_name('parameters')
+            if params_node:
+                for param in params_node.children:
+                    param_info = {
+                        'name': param.name,
+                        'type': param.attributes.get('type', 'UNKNOWN'),
+                        'is_pointer': param.attributes.get('pointer', False),
+                        'is_array': param.attributes.get('array', False)
+                    }
+                    info['parameters'].append(param_info)
+            
+            # Extract local variable information
+            local_decls = proc.find_child_by_name('local_declarations')
+            if local_decls:
+                for decl in local_decls.children:
+                    if decl.type == 'var_decl':
+                        for var_spec in decl.children:
+                            if var_spec.type == 'var_spec':
+                                var_info = {
+                                    'name': var_spec.name,
+                                    'type': decl.attributes.get('type', 'UNKNOWN'),
+                                    'is_pointer': var_spec.attributes.get('pointer', False),
+                                    'is_array': var_spec.attributes.get('array', False)
+                                }
+                                info['local_variables'].append(var_info)
+            
+            # Count statements and collect system functions
+            statements = proc.find_child_by_name('statements')
+            if statements:
+                info['statements_count'] = len(statements.children)
+                
+                # Collect system functions used specifically in this procedure
+                proc_system_funcs = self._collect_system_functions(proc)
+                info['system_functions_used'] = list(proc_system_funcs.keys())
+            
+            proc_info[proc.name] = info
+        
+        return proc_info
+    
+    def _ast_to_json(self, node: tal_proc_parser.TALNode) -> Dict[str, Any]:
+        """
+        Convert the AST to JSON format for serialization and analysis.
+        
+        This method recursively converts the AST structure to a JSON-serializable
+        dictionary, preserving all node information and metadata.
+        
+        Args:
+            node: AST node to convert
+            
+        Returns:
+            Dictionary representation of the AST node
+        """
+        result = {
+            'type': node.type,
+            'name': node.name,
+            'value': node.value,
+            'attributes': node.attributes.copy(),
+            'children': []
+        }
+        
+        if node.location:
+            result['location'] = {
+                'filename': node.location.filename,
+                'line': node.location.line,
+                'column': node.location.column
+            }
+        
+        for child in node.children:
+            result['children'].append(self._ast_to_json(child))
+        
+        return result
+    
+    def _count_nodes(self, node: tal_proc_parser.TALNode) -> int:
+        """
+        Count the total number of nodes in the AST.
+        
+        This provides a metric for AST complexity and parsing completeness.
         
         Args:
             node: Root node to count from
             
         Returns:
-            Total number of nodes in the subtree
-            
-        Used for performance analysis and complexity metrics.
-        Counts all nodes in the tree rooted at the given node.
+            Total number of AST nodes
         """
         count = 1
         for child in node.children:
             count += self._count_nodes(child)
         return count
     
-    def _analyze_structure(self, program: TALNode) -> Dict[str, Any]:
+    def _analyze_structure(self, program: tal_proc_parser.TALNode) -> Dict[str, Any]:
         """
-        Analyze program structure with detailed metrics and organization.
+        Analyze the overall program structure and generate comprehensive statistics.
+        
+        This method provides high-level metrics about the parsed program including
+        procedure counts, variable declarations, system function usage, and more.
         
         Args:
             program: Root program AST node
             
         Returns:
-            Dictionary with comprehensive structural analysis
-            
-        Provides detailed analysis of the TAL program including:
-        - Node counts by type (procedures, variables, etc.)
-        - Complexity metrics for maintainability assessment
-        - Lists of program entities (procedures, variables, structs)
-        - Organizational structure analysis
-        
-        Useful for:
-        - Code quality assessment
-        - Documentation generation
-        - Refactoring planning
-        - Project metrics
+            Dictionary containing structural analysis results
         """
         structure = {
             'total_nodes': self._count_nodes(program),
-            'globals': 0,
             'procedures': 0,
-            'comments': 0,
-            'statements': 0,
             'variables': 0,
-            'structs': 0,
-            'literals': 0,
-            'defines': 0,
-            'complexity_score': 0,
+            'statements': 0,
             'procedure_list': [],
-            'global_variables': [],
-            'struct_list': []
+            'system_functions_count': 0,
+            'directives_count': 0,
+            'global_variables': 0
         }
         
-        # Analyze program children by type
+        # Analyze global elements
         for child in program.children:
-            if child.type == 'name_decl':
-                structure['globals'] += 1
-            elif child.type == 'struct_decl':
-                structure['globals'] += 1
-                structure['structs'] += 1
-                structure['struct_list'].append(child.name)
-            elif child.type == 'var_decl':
-                structure['globals'] += 1
-                structure['variables'] += 1
-                # Extract variable names from specifications
-                for spec in child.children:
-                    if spec.name:
-                        structure['global_variables'].append(spec.name)
-            elif child.type == 'literal_decl':
-                structure['globals'] += 1
-                structure['literals'] += 1
-            elif child.type == 'define_decl':
-                structure['globals'] += 1
-                structure['defines'] += 1
-            elif child.type == 'procedure':
+            if child.type == 'procedure':
                 structure['procedures'] += 1
                 structure['procedure_list'].append({
                     'name': child.name,
                     'return_type': child.attributes.get('return_type', 'void'),
-                    'is_main': child.attributes.get('main', False)
+                    'is_main': child.attributes.get('is_main', False)
                 })
-                # Count statements within procedure
+                
+                # Count statements and variables within procedures
                 for proc_child in child.children:
                     if proc_child.type == 'statements':
                         structure['statements'] += len(proc_child.children)
-            elif child.type == 'comment':
-                structure['comments'] += 1
-        
-        # Calculate complexity score based on program elements
-        # Higher scores indicate more complex programs requiring more maintenance
-        structure['complexity_score'] = (
-            structure['procedures'] * 10 +      # Procedures add significant complexity
-            structure['statements'] * 2 +       # Each statement adds complexity
-            structure['variables'] * 1 +        # Variables add some complexity
-            structure['structs'] * 5           # Structs add moderate complexity
-        )
+                    elif proc_child.type == 'local_declarations':
+                        structure['variables'] += len(proc_child.children)
+            
+            elif child.type in ['system_function_call', 'system_function']:
+                structure['system_functions_count'] += 1
+            
+            elif child.type.endswith('_directive'):
+                structure['directives_count'] += 1
+            
+            elif child.type == 'var_decl':
+                structure['global_variables'] += 1
         
         return structure
-    
-    def _should_be_global_variable(self, line: str, location: SourceLocation) -> bool:
-        """
-        Determine if variable declaration should be placed at global scope.
-        
-        Args:
-            line: Variable declaration line
-            location: Source location
-            
-        Returns:
-            True if variable should be global, False if local
-            
-        TAL scoping rules for variable placement:
-        - Outside any procedure: always global
-        - Before BEGIN in procedure: could be global (context dependent)
-        - After BEGIN in procedure: always local to procedure
-        
-        Used to correctly place variable declarations in the AST.
-        """
-        # If we're not in a procedure, it's definitely global
-        if not self.current_procedure:
-            return True
-        
-        # If we haven't started collecting statements (before BEGIN), 
-        # it could be global depending on context
-        if not self.collecting_statements:
-            return True
-            
-        # If we're inside a procedure body (after BEGIN), it's local
-        return False
-
-    def _parse_variable_declaration(self, line: str, location: SourceLocation) -> TALNode:
-        """
-        Parse TAL variable declarations with comprehensive type and attribute support.
-        
-        Args:
-            line: Variable declaration line
-            location: Source location
-            
-        Returns:
-            TALNode representing the variable declaration
-            
-        TAL variable declarations support:
-        - Standard types: INT, STRING, REAL, FIXED, BYTE, CHAR
-        - Struct variables: struct_name variable_name
-        - Pointers: indicated by leading dot (.)
-        - Arrays: with bounds [start:end]
-        - Multiple variables: comma-separated lists
-        - Initialization: variable := initial_value
-        
-        Handles both global and local variable contexts with proper
-        scoping and type analysis.
-        """
-        var_node = TALNode('var_decl')
-        var_node.location = location
-        
-        parts = line.split()
-        if not parts:
-            return var_node
-        
-        # Handle struct variable declarations (not standard types)
-        if len(parts) >= 2 and not any(parts[0].upper().startswith(t) for t in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR']):
-            # Struct variable declaration: struct_name var_name
-            struct_name = parts[0]
-            var_name = parts[1]
-            
-            # Handle pointer indicator and clean up name
-            is_pointer = False
-            if var_name.startswith('.'):
-                is_pointer = True
-                var_name = var_name[1:]
-            
-            # Clean up variable name (remove punctuation)
-            var_name = var_name.rstrip(';').rstrip(',')
-            
-            # Set struct variable attributes
-            var_node.attributes['type'] = 'STRUCT'
-            var_node.attributes['struct_name'] = struct_name
-            if is_pointer:
-                var_node.attributes['pointer'] = True
-            
-            # Create variable specification node
-            spec_node = TALNode('var_spec')
-            spec_node.name = var_name
-            spec_node.location = location
-            spec_node.value = var_name
-            if is_pointer:
-                spec_node.attributes['pointer'] = True
-            
-            var_node.add_child(spec_node)
-            
-        else:
-            # Standard TAL type declaration (INT, STRING, etc.)
-            var_type_full = parts[0]
-            var_type_str = var_type_full.upper()
-            
-            # Handle types with size specifiers like STRING(20)
-            if '(' in var_type_str:
-                base_type = var_type_str.split('(')[0]
-                var_node.attributes['type'] = base_type
-                var_node.attributes['type_full'] = var_type_full
-            else:
-                var_node.attributes['type'] = var_type_str
-            
-            # Extract variable specifications from remaining text
-            remaining = ' '.join(parts[1:]).rstrip(';')
-            
-            # Handle comma-separated variable lists
-            if ',' in remaining:
-                var_specs = self._smart_split(remaining, ',')
-            else:
-                var_specs = [remaining] if remaining else []
-            
-            # Parse each individual variable specification
-            for var_spec in var_specs:
-                var_spec = var_spec.strip()
-                if var_spec:
-                    spec_node = self._parse_variable_spec(var_spec, var_type_str, location)
-                    if spec_node:
-                        var_node.add_child(spec_node)
-        
-        return var_node
-
-    def _is_variable_declaration(self, line: str) -> bool:
-        """
-        Determine if a source line represents a variable declaration.
-        
-        Args:
-            line: Source line to analyze
-            
-        Returns:
-            True if line appears to be a variable declaration
-            
-        Comprehensive detection of TAL variable declaration patterns:
-        - Standard type prefixes: INT, STRING, REAL, etc.
-        - Struct variable patterns: struct_name variable_name
-        - Exclusion of non-declaration constructs
-        
-        Must distinguish from similar-looking constructs like procedure
-        declarations, control statements, and complex expressions.
-        """
-        upper_line = line.upper()
-        
-        # Standard TAL type declarations (excluding procedure declarations)
-        if (any(upper_line.startswith(t) for t in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR']) 
-            and 'PROC ' not in upper_line):
-            return True
-        
-        # Struct variable declarations with careful exclusion filtering
-        if (len(line.split()) >= 2 and 
-            not any(upper_line.startswith(kw) for kw in ['NAME ', 'STRUCT ', 'LITERAL ', 'DEFINE ', 'PROC ', 'WHILE ', 'CASE ', 'SCAN ', 'RETURN ', 'CALL ', 'IF ']) and
-            not ':=' in line and  # Not an assignment statement
-            not self._looks_like_struct_member(line) and  # Not a struct member
-            not line.strip().endswith('DO') and  # Not a control structure
-            not line.strip().endswith('THEN')):  # Not a conditional
-            return True
-        
-        return False
-
 
 def main():
     """
-    Enhanced main function with comprehensive command-line interface.
+    Enhanced main function providing a comprehensive command-line interface.
     
-    Provides a full-featured command-line interface for the TAL parser with:
-    - Multiple output format options (S-expressions, JSON, DOT graphs)
-    - Detailed analysis and reporting modes
-    - Symbol table export capabilities
-    - Performance statistics and error reporting
-    - Flexible output redirection
+    This function implements a full-featured CLI for the TAL parser with support
+    for different output formats, verbose reporting, system function analysis,
+    and optional LLM integration for code analysis.
     
-    Command-line usage supports both simple parsing and advanced analysis
-    workflows for different use cases:
-    - Quick syntax checking with error-only mode
-    - Detailed analysis for code quality assessment  
-    - Graph generation for visualization
-    - JSON export for tool integration
+    The CLI supports:
+    - Multiple output formats (S-expressions, JSON)
+    - Detailed system function reporting and validation
+    - Verbose parsing statistics and error reporting
+    - Extensible LLM analysis integration
+    - Comprehensive error handling and user feedback
+    
+    Returns:
+        Exit code (0 for success, 1 for error)
     """
     parser = argparse.ArgumentParser(
-        description='Enhanced TAL parser with comprehensive analysis',
+        description='Enhanced TAL parser with comprehensive system function support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Output formats:
-  sexp    : S-expression format (default) - Human-readable tree structure
-  json    : JSON format - JSON format - Machine-readable structured data  
-  dot     : Graphviz DOT format - Graph visualization
-  pretty  : Pretty-printed TAL - Formatted source code
-  
 Examples:
-  %(prog)s input.tal                    # Parse and show S-expression
-  %(prog)s input.tal -f json -o out.json # Output JSON format to file
-  %(prog)s input.tal -a -v             # Verbose output with detailed analysis
-  %(prog)s input.tal -f dot | dot -Tpng -o ast.png  # Generate AST visualization
-  %(prog)s input.tal -e               # Show only errors and warnings
-  %(prog)s input.tal -s --stats       # Display symbol table and statistics
+  %(prog)s input.tal                          # Parse and output to input.tal.ast
+  %(prog)s input.tal -f json -o output.json   # Output JSON format to specific file
+  %(prog)s input.tal -usellm                  # Parse and analyze with LLM
+  %(prog)s input.tal -usellm -analysis security  # Security-focused LLM analysis
+  %(prog)s input.tal --show-system-funcs      # Show detailed system function usage
         """
     )
     
-    # Required and optional arguments
+    # Required arguments
     parser.add_argument('input_file', help='Input TAL file to parse')
-    parser.add_argument('-o', '--output', help='Output file (default: stdout)')
-    parser.add_argument('-f', '--format', choices=['sexp', 'json', 'dot', 'pretty'], 
-                       default='sexp', help='Output format selection')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output with detailed information')
-    parser.add_argument('-a', '--analyze', action='store_true', help='Show detailed structural analysis')
-    parser.add_argument('-s', '--symbols', action='store_true', help='Display symbol table with cross-references')
-    parser.add_argument('-e', '--errors-only', action='store_true', help='Show only errors and warnings')
-    parser.add_argument('--no-semantic', action='store_true', help='Skip semantic analysis phase')
-    parser.add_argument('--stats', action='store_true', help='Show detailed parsing statistics')
+    
+    # Optional arguments
+    parser.add_argument('-f', '--format', choices=['sexp', 'json'], 
+                       default='sexp', help='Output format (default: sexp)')
+    parser.add_argument('-o', '--output', help='Output file (default: input_file.tal.ast)')
+    parser.add_argument('-usellm', '--use-llm', action='store_true', 
+                       help='Analyze code with LLM after parsing')
+    parser.add_argument('-analysis', '--analysis-type', 
+                       choices=['general', 'security', 'performance', 'maintainability'],
+                       default='general', help='Type of LLM analysis (default: general)')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--show-system-funcs', action='store_true', 
+                       help='Show detailed system function usage')
+    parser.add_argument('--validate-system-funcs', action='store_true',
+                       help='Validate system function usage and arguments')
+    parser.add_argument('--llm-model', default='gpt-4', help='LLM model to use (default: gpt-4)')
+    parser.add_argument('--llm-tokens', type=int, default=2000, help='Max tokens for LLM (default: 2000)')
     
     args = parser.parse_args()
     
+    # Validate input file existence
+    if not os.path.exists(args.input_file):
+        print(f"Error: File '{args.input_file}' not found")
+        return 1
+    
+    # Generate default output filename if not specified
+    if not args.output:
+        base_name = os.path.splitext(args.input_file)[0]
+        extension = '.ast' if args.format == 'sexp' else '.json'
+        args.output = base_name + '.tal' + extension
+    
+    # Display configuration if verbose
     if args.verbose:
-        print(f"Enhanced TAL Parser - Processing: {args.input_file}")
+        print(f"Enhanced TAL Parser v2.0 - Processing: {args.input_file}")
+        print(f"Output format: {args.format}")
+        print(f"Output file: {args.output}")
+        if args.use_llm:
+            print(f"LLM analysis: {args.analysis_type} using {args.llm_model}")
     
-    # Initialize parser and process file
-    tal_parser = EnhancedTALParser()
-    result = tal_parser.parse_file(args.input_file)
-    
-    # Display errors and warnings with context
-    if result.get('errors') or result.get('warnings'):
-        if not args.errors_only:
-            print("=== PARSE RESULTS ===", file=sys.stderr)
+    try:
+        # Initialize and run the enhanced TAL parser
+        tal_parser = EnhancedTALParser()
+        result = tal_parser.parse_file(args.input_file)
         
-        # Show all errors with full context
-        for error in result.get('errors', []):
-            print(error, file=sys.stderr)
+        print(f"Parsing TAL file: {args.input_file}")
+        print("=" * 60)
         
-        # Show warnings if not in error-only mode
-        for warning in result.get('warnings', []):
-            print(warning, file=sys.stderr)
+        # Display parsing errors and warnings
+        if tal_parser.errors:
+            print(f"\nFound {len(tal_parser.errors)} error(s):")
+            print("-" * 40)
+            for error in tal_parser.errors:
+                print(f"{error}\n")
         
-        # Exit early if only showing errors
-        if args.errors_only:
-            sys.exit(1 if result.get('errors') else 0)
-    
-    # Display parsing statistics
-    if args.stats and 'stats' in result:
-        print("=== PARSING STATISTICS ===")
-        stats = result['stats']
-        print(f"Parse time: {stats['parse_time']:.3f} seconds")
-        print(f"Lines processed: {stats['lines_processed']}")
-        print(f"AST nodes created: {stats['nodes_created']}")
-        print(f"Symbols declared: {stats['symbols_declared']}")
-        print(f"Errors found: {stats['errors_found']}")
-        print(f"Warnings issued: {stats['warnings_issued']}")
-        print()
-    
-    # Display detailed structural analysis
-    if args.analyze and 'structure' in result:
-        print("=== STRUCTURAL ANALYSIS ===")
-        structure = result['structure']
-        print(f"Total AST nodes: {structure['total_nodes']}")
-        print(f"Procedures defined: {structure['procedures']}")
-        print(f"Global variables: {structure['variables']}")
-        print(f"Struct types: {structure['structs']}")
-        print(f"Executable statements: {structure['statements']}")
-        print(f"Complexity score: {structure['complexity_score']}")
+        if tal_parser.warnings:
+            print(f"\nFound {len(tal_parser.warnings)} warning(s):")
+            print("-" * 40)
+            for warning in tal_parser.warnings:
+                print(f"{warning}\n")
         
-        # List procedures with details
-        if structure['procedure_list']:
-            print("\nProcedures:")
-            for proc in structure['procedure_list']:
-                main_marker = " (MAIN ENTRY POINT)" if proc['is_main'] else ""
-                print(f"  - {proc['name']}: returns {proc['return_type']}{main_marker}")
+        # Check for fatal parsing errors
+        if not result.get('success'):
+            print(f"Parse failed: {result.get('error', 'Unknown error')}")
+            return 1
         
-        # List struct types
-        if structure['struct_list']:
-            print(f"\nStruct types: {', '.join(structure['struct_list'])}")
+        # Extract procedure information for reporting
+        procedures = []
+        if result.get('ast'):
+            for child in result['ast'].children:
+                if child.type == 'procedure':
+                    procedures.append(child)
         
-        print()
-    
-    # Display symbol table with cross-references
-    if args.symbols and 'symbols' in result:
-        print("=== SYMBOL TABLE ===")
-        symbols = result['symbols']
-        for scope_name, scope_symbols in symbols.items():
-            print(f"\nScope: {scope_name}")
-            for sym_name, sym_info in scope_symbols.items():
-                # Format symbol information
-                refs = f" (referenced {len(sym_info['references'])} times)" if sym_info['references'] else " (unused)"
-                pointer_marker = " *" if sym_info['is_pointer'] else ""
-                array_marker = " []" if sym_info['is_array'] else ""
-                print(f"  {sym_name}: {sym_info['type']}{pointer_marker}{array_marker} @ {sym_info['location']}{refs}")
-        print()
-    
-    # Generate and output the parsed result
-    if result.get('success'):
-        # Select appropriate output format
+        # Display procedure information
+        if procedures:
+            print(f"\nFound {len(procedures)} procedure(s):")
+            print("-" * 40)
+            for i, proc in enumerate(procedures, 1):
+                print(f"\nProcedure {i}: {proc.name}")
+                
+                # Show procedure attributes
+                attrs = []
+                if proc.attributes.get('return_type'):
+                    attrs.append(f"returns {proc.attributes['return_type']}")
+                if proc.attributes.get('is_main'):
+                    attrs.append("MAIN")
+                if proc.attributes.get('is_forward'):
+                    attrs.append("FORWARD")
+                if proc.attributes.get('is_external'):
+                    attrs.append("EXTERNAL")
+                
+                if attrs:
+                    print(f"  Attributes: {', '.join(attrs)}")
+                
+                # Show detailed information in verbose mode
+                if args.verbose:
+                    params_node = proc.find_child_by_name('parameters')
+                    if params_node and params_node.children:
+                        print(f"  Parameters:")
+                        for param in params_node.children:
+                            param_info = param.name
+                            if param.attributes.get('type') != 'UNKNOWN':
+                                param_info += f" ({param.attributes['type']}"
+                                if param.attributes.get('pointer'):
+                                    param_info += " pointer"
+                                param_info += ")"
+                            print(f"    - {param_info}")
+                    
+                    # Show content counts
+                    local_decls = proc.find_child_by_name('local_declarations')
+                    statements = proc.find_child_by_name('statements')
+                    
+                    if local_decls:
+                        print(f"  Local declarations: {len(local_decls.children)}")
+                    if statements:
+                        print(f"  Statements: {len(statements.children)}")
+        
+        # Display system function usage analysis
+        if args.show_system_funcs or args.verbose:
+            system_funcs = result.get('system_functions_used', {})
+            if system_funcs:
+                print(f"\nSystem Functions Used ({len(system_funcs)}):")
+                print("-" * 40)
+                for func_name, func_info in system_funcs.items():
+                    count = func_info['count']
+                    description = func_info['info'].get('description', 'Unknown function')
+                    returns = func_info['info'].get('returns', 'Unknown')
+                    
+                    print(f"  {func_name}: used {count} time(s)")
+                    print(f"    Description: {description}")
+                    print(f"    Returns: {returns}")
+                    
+                    if func_info['info'].get('unknown'):
+                        print(f"    ⚠️  Unknown system function")
+                    
+                    if args.verbose and func_info['locations']:
+                        locations = func_info['locations'][:3]  # Show first 3 locations
+                        loc_str = ', '.join([f"line {loc['line']}" for loc in locations])
+                        if len(func_info['locations']) > 3:
+                            loc_str += f" (+{len(func_info['locations']) - 3} more)"
+                        print(f"    Locations: {loc_str}")
+                    print()
+        
+        # System function validation reporting
+        if args.validate_system_funcs:
+            print("\nSystem Function Validation:")
+            print("-" * 40)
+            validation_warnings = []
+            for error in tal_parser.warnings:
+                if hasattr(error, 'error_code') and error.error_code.startswith('W3'):
+                    validation_warnings.append(error)
+            
+            if validation_warnings:
+                for warning in validation_warnings:
+                    print(f"  ⚠️  {warning}")
+            else:
+                print("  ✅ No system function validation issues found")
+        
+        # Generate output content based on requested format
         if args.format == 'sexp':
-            output = result['sexp']
+            output_content = result['sexp']
         elif args.format == 'json':
-            output = json.dumps(result['json'], indent=2)
-        elif args.format == 'dot':
-            output = result['dot']
-        elif args.format == 'pretty':
-            # Pretty-printing would need additional implementation
-            output = result['sexp']  # Fallback to S-expression
+            # Create comprehensive JSON output with all analysis data
+            json_output = {
+                'success': result['success'],
+                'filename': args.input_file,
+                'ast': result['json'],
+                'procedures': result.get('procedures', {}),
+                'system_functions_used': result.get('system_functions_used', {}),
+                'statistics': {
+                    'node_count': result['node_count'],
+                    'procedure_count': len(procedures),
+                    'error_count': len(tal_parser.errors),
+                    'warning_count': len(tal_parser.warnings),
+                    'system_functions_count': len(result.get('system_functions_used', {}))
+                },
+                'structure': result.get('structure', {})
+            }
+            output_content = json.dumps(json_output, indent=2)
         
-        if args.verbose and not args.errors_only:
-            print(f"Parse successful! Output format: {args.format}")
-        
-        # Write output to file or stdout
-        if args.output:
+        # Write output to file
+        try:
             with open(args.output, 'w', encoding='utf-8') as f:
-                f.write(output)
+                f.write(output_content)
+            
             if args.verbose:
-                print(f"Output written to: {args.output}")
-        else:
-            # Only print output if not showing analysis information
-            if not (args.analyze or args.symbols or args.stats):
-                print(output)
-    
-    else:
-        # Handle parse failure
-        print(f"Parse failed: {result.get('error', 'Unknown error')}", file=sys.stderr)
-        sys.exit(1)
-
+                print(f"\nAST written to: {args.output}")
+            else:
+                print(f"\nOutput written to: {args.output}")
+                
+        except Exception as e:
+            print(f"Error writing output file: {e}")
+            return 1
+        
+        # LLM Analysis integration (placeholder for future implementation)
+        if args.use_llm:
+            print("\n" + "=" * 60)
+            print("LLM ANALYSIS:")
+            print("=" * 60)
+            
+            try:
+                # Note: LLM analysis would need separate implementation
+                # This provides the interface structure for future extension
+                print(f"Analysis Type: {args.analysis_type}")
+                print(f"Model: {args.llm_model}")
+                print("LLM analysis feature requires separate implementation")
+                
+            except Exception as e:
+                print(f"Error during LLM analysis: {e}")
+        
+        # Display comprehensive parsing summary
+        print(f"\n" + "=" * 60)
+        print("Parsing Summary:")
+        print(f"  Total AST nodes: {result['node_count']}")
+        print(f"  Procedures found: {len(procedures)}")
+        print(f"  System functions used: {len(result.get('system_functions_used', {}))}")
+        print(f"  Errors: {len(tal_parser.errors)}")
+        print(f"  Warnings: {len(tal_parser.warnings)}")
+        if args.use_llm:
+            print(f"  LLM analysis: {args.analysis_type}")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return 1
 
 if __name__ == "__main__":
-    main()
+    exit(main())
 
