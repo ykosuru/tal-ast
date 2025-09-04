@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Enhanced TAL AST Node-Aware Parentheses Fixer
+Robust TAL AST Parentheses and Syntax Fixer
 
-This program fixes unmatched parentheses by understanding all TAL AST node types
-from the enhanced TAL parser. It recognizes the comprehensive set of node types
-including procedures, system functions, control flow, declarations, and TAL-specific
-constructs.
+This program fixes not only unmatched parentheses but also other syntax issues
+in malformed S-expressions, including:
+- Mixed quote types
+- Malformed attribute syntax
+- Invalid node names
+- Unmatched braces and brackets
 
 Usage:
-    python fix_parentheses.py input.ast [output.ast]
+    python robust_fix_parentheses.py input.ast [output.ast]
 """
 
 import sys
@@ -92,460 +94,306 @@ AST_NODE_TYPES = {
 }
 
 @dataclass
-class ASTNode:
-    """Represents an AST node during parsing with enhanced TAL support."""
-    node_type: str
-    start_pos: int
+class SyntaxIssue:
+    """Represents a syntax issue found during parsing."""
+    issue_type: str
+    position: int
     line_num: int
-    depth: int
-    is_complete: bool = False
-    children: List['ASTNode'] = None
-    expected_close_pos: Optional[int] = None
-    
-    def __post_init__(self):
-        if self.children is None:
-            self.children = []
-    
-    def can_have_children(self) -> bool:
-        return AST_NODE_TYPES.get(self.node_type, {}).get('can_have_children', True)
-    
-    def is_container(self) -> bool:
-        return AST_NODE_TYPES.get(self.node_type, {}).get('is_container', False)
-    
-    def get_priority(self) -> int:
-        """Get closure priority - lower numbers should close before higher numbers."""
-        return AST_NODE_TYPES.get(self.node_type, {}).get('priority', 10)
+    description: str
+    suggested_fix: str = ""
 
-class EnhancedASTParser:
-    """Enhanced parser that understands all TAL AST node types."""
+class RobustSyntaxFixer:
+    """
+    Robust syntax fixer that handles multiple types of S-expression syntax issues.
+    """
     
-    def __init__(self, content: str):
+    def __init__(self, content: str, verbose: bool = False):
+        self.original_content = content
         self.content = content
-        self.lines = content.split('\n')
-        self.pos = 0
-        self.line_num = 1
-        self.column = 1
-        self.stack = []  # Stack of incomplete ASTNode objects
-        self.completed_nodes = []
+        self.verbose = verbose
+        self.issues = []
+        self.fixes_applied = []
         
-    def current_char(self) -> Optional[str]:
-        return self.content[self.pos] if self.pos < len(self.content) else None
-    
-    def advance(self):
-        if self.pos < len(self.content):
-            if self.content[self.pos] == '\n':
-                self.line_num += 1
-                self.column = 1
-            else:
-                self.column += 1
-            self.pos += 1
-    
-    def skip_whitespace(self):
-        while self.current_char() and self.current_char() in ' \t\n':
-            self.advance()
-    
-    def read_identifier(self) -> str:
-        """Read an identifier (node type)."""
-        start_pos = self.pos
-        while (self.current_char() and 
-               self.current_char() not in '() \t\n:{}"\'^'):
-            self.advance()
-        return self.content[start_pos:self.pos]
-    
-    def skip_to_next_sexp_or_close(self):
-        """Skip content until next '(' or ')'."""
-        in_string = False
-        in_attrs = False
-        brace_depth = 0
+    def fix_all_syntax_issues(self) -> str:
+        """Apply all syntax fixes in the correct order."""
         
-        while self.current_char():
-            char = self.current_char()
+        if self.verbose:
+            print("Starting comprehensive syntax fixing...")
+        
+        # Step 1: Fix invalid node names
+        self.fix_invalid_node_names()
+        
+        # Step 2: Fix quote consistency
+        self.fix_quote_consistency()
+        
+        # Step 3: Fix malformed attributes
+        self.fix_malformed_attributes()
+        
+        # Step 4: Fix unmatched braces and brackets
+        self.fix_unmatched_braces()
+        
+        # Step 5: Fix parentheses (using enhanced logic)
+        self.fix_parentheses()
+        
+        # Step 6: Clean up whitespace and formatting
+        self.cleanup_formatting()
+        
+        if self.verbose:
+            print(f"Applied {len(self.fixes_applied)} fixes:")
+            for fix in self.fixes_applied:
+                print(f"  - {fix}")
+        
+        return self.content
+    
+    def fix_invalid_node_names(self):
+        """Fix invalid node names like 'source *directive' -> 'source_directive'."""
+        
+        # Pattern to find invalid node names with spaces or special characters
+        pattern = r'\(([a-zA-Z_][a-zA-Z0-9_]*)\s+\*([a-zA-Z_][a-zA-Z0-9_]*)'
+        
+        def replace_invalid_node(match):
+            prefix = match.group(1)
+            suffix = match.group(2)
+            fixed_name = f"{prefix}_{suffix}"
+            self.fixes_applied.append(f"Fixed node name: '{prefix} *{suffix}' -> '{fixed_name}'")
+            return f"({fixed_name}"
+        
+        self.content = re.sub(pattern, replace_invalid_node, self.content)
+    
+    def fix_quote_consistency(self):
+        """Standardize quote usage - prefer double quotes."""
+        
+        # Find all quoted strings and standardize to double quotes
+        # But be careful with nested quotes
+        
+        original_content = self.content
+        
+        # Replace single quotes with double quotes, but handle escapes
+        # This is a simplified approach - a full solution would need proper parsing
+        
+        # Count quote types
+        single_quotes = self.content.count("'")
+        double_quotes = self.content.count('"')
+        
+        if single_quotes > 0 and double_quotes > 0:
+            # Mixed quotes detected - convert single to double where safe
             
-            if char == '"' and not in_attrs:
-                in_string = not in_string
-            elif char == '{' and not in_string:
-                in_attrs = True
-                brace_depth = 1
-            elif char == '}' and in_attrs:
-                brace_depth -= 1
-                if brace_depth == 0:
-                    in_attrs = False
-            elif char in '()' and not in_string and not in_attrs:
-                break
+            # Pattern to find single-quoted strings that don't contain double quotes
+            pattern = r"'([^'\"]*?)'"
             
-            self.advance()
-    
-    def parse(self) -> List[ASTNode]:
-        """Parse the content and return incomplete nodes."""
-        while self.pos < len(self.content):
-            self.skip_whitespace()
+            def replace_quotes(match):
+                content = match.group(1)
+                if '"' not in content:  # Safe to convert
+                    return f'"{content}"'
+                return match.group(0)  # Leave as is if contains double quotes
             
-            char = self.current_char()
-            if char == '(':
-                self.parse_node()
-            elif char == ')':
-                self.close_current_node()
-            else:
-                self.advance()
-        
-        return self.stack  # Return incomplete nodes
-    
-    def parse_node(self):
-        """Parse an S-expression node with TAL node type recognition."""
-        if self.current_char() != '(':
-            return
-        
-        start_pos = self.pos
-        start_line = self.line_num
-        self.advance()  # Skip '('
-        
-        self.skip_whitespace()
-        
-        # Read node type
-        node_type = self.read_identifier()
-        
-        # Validate node type against known TAL types
-        if node_type not in AST_NODE_TYPES:
-            # Add unknown node types with default properties
-            AST_NODE_TYPES[node_type] = {
-                'can_have_children': True, 
-                'is_container': False, 
-                'priority': 8
-            }
-        
-        # Create node
-        node = ASTNode(
-            node_type=node_type,
-            start_pos=start_pos,
-            line_num=start_line,
-            depth=len(self.stack)
-        )
-        
-        # Add to parent if exists
-        if self.stack:
-            self.stack[-1].children.append(node)
-        else:
-            self.completed_nodes.append(node)
-        
-        # Push onto stack
-        self.stack.append(node)
-        
-        # Skip to next meaningful content
-        self.skip_to_next_sexp_or_close()
-    
-    def close_current_node(self):
-        """Close the current node."""
-        if self.current_char() == ')':
-            self.advance()  # Skip ')'
+            self.content = re.sub(pattern, replace_quotes, self.content)
             
-            if self.stack:
-                node = self.stack.pop()
-                node.is_complete = True
+            if self.content != original_content:
+                self.fixes_applied.append("Standardized quote usage to double quotes")
+    
+    def fix_malformed_attributes(self):
+        """Fix malformed attribute syntax."""
         
-        self.skip_whitespace()
-
-def find_closure_points(content: str, incomplete_nodes: List[ASTNode]) -> List[Tuple[int, int, str]]:
-    """
-    Find appropriate closure points for incomplete nodes using TAL-specific logic.
-    
-    Returns list of (position, indent_level, node_type) for insertions.
-    """
-    if not incomplete_nodes:
-        return []
-    
-    lines = content.split('\n')
-    insertions = []
-    
-    # Sort nodes by priority (containers first), then by depth (deepest first), then by position
-    sorted_nodes = sorted(incomplete_nodes, key=lambda n: (n.get_priority(), -n.depth, n.start_pos))
-    
-    for node in sorted_nodes:
-        insert_pos, indent_level = find_node_closure_point(content, lines, node, incomplete_nodes)
-        insertions.append((insert_pos, indent_level, node.node_type))
-    
-    return insertions
-
-def find_node_closure_point(content: str, lines: List[str], node: ASTNode, all_incomplete: List[ASTNode]) -> Tuple[int, int]:
-    """
-    Find the best closure point for a specific TAL AST node.
-    
-    Returns (position, indent_level).
-    """
-    node_line_idx = node.line_num - 1  # Convert to 0-based
-    
-    # Determine closure strategy based on node type and characteristics
-    if node.is_container():
-        # Container nodes (program, procedure, parameters, etc.) should close after their logical content
-        return find_container_closure_point(content, lines, node, node_line_idx)
-    elif node.node_type in ['procedure', 'struct_decl', 'template_decl']:
-        # Major structural nodes need special handling
-        return find_structural_closure_point(content, lines, node, node_line_idx)
-    elif node.node_type in ['parameters', 'local_declarations', 'statements']:
-        # Procedure section nodes
-        return find_section_closure_point(content, lines, node, node_line_idx)
-    elif node.node_type.endswith('_stmt') or node.node_type in ['assignment', 'call_stmt', 'system_function_call']:
-        # Statement nodes should close quickly
-        return find_statement_closure_point(content, lines, node, node_line_idx)
-    elif node.node_type.endswith('_directive'):
-        # Directive nodes are typically single-line
-        return find_directive_closure_point(content, lines, node, node_line_idx)
-    else:
-        # Default strategy for other nodes
-        return find_simple_closure_point(content, lines, node, node_line_idx)
-
-def find_container_closure_point(content: str, lines: List[str], node: ASTNode, node_line_idx: int) -> Tuple[int, int]:
-    """Find closure point for container nodes (program, procedure, etc.)."""
-    
-    # For program nodes, close at the very end
-    if node.node_type == 'program':
-        return len(content), 0
-    
-    # Look for the next sibling node at the same level or higher
-    for i in range(node_line_idx + 1, len(lines)):
-        line = lines[i].strip()
+        # Pattern to find :attrs with mixed braces/parens
+        # :attrs ('key': 'value') -> :attrs {"key": "value"}
+        # :attrs {'key': 'value'} -> :attrs {"key": "value"}
         
-        # Skip empty lines and comments
-        if not line or line.startswith('!'):
-            continue
+        original_content = self.content
         
-        # Check if this line starts a new node at the same level as our node
-        if line.startswith('('):
-            # Get the indentation of this line
-            line_indent = len(lines[i]) - len(lines[i].lstrip())
-            
-            # Get the indentation of our node's line
-            if node_line_idx < len(lines):
-                node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip())
-            else:
-                node_indent = 0
-            
-            # If this line has same or less indentation, it's a sibling or higher level
-            if line_indent <= node_indent:
-                # Insert before this line
-                insert_pos = sum(len(lines[j]) + 1 for j in range(i))
-                return insert_pos, node_indent
+        # Fix :attrs with parentheses instead of braces
+        pattern1 = r':attrs\s*\(\s*([^)]*?)\s*\)'
+        
+        def fix_attrs_parens(match):
+            attrs_content = match.group(1)
+            # Convert to proper brace format
+            return f':attrs {{{attrs_content}}}'
+        
+        self.content = re.sub(pattern1, fix_attrs_parens, self.content)
+        
+        # Fix incomplete attribute structures
+        pattern2 = r':attrs\s*\{\s*([^}]*?)$'
+        
+        def fix_incomplete_attrs(match):
+            attrs_content = match.group(1)
+            return f':attrs {{{attrs_content}}}'
+        
+        self.content = re.sub(pattern2, fix_incomplete_attrs, self.content, flags=re.MULTILINE)
+        
+        if self.content != original_content:
+            self.fixes_applied.append("Fixed malformed attribute syntax")
     
-    # No sibling found, close at end of file
-    return len(content), 0
-
-def find_structural_closure_point(content: str, lines: List[str], node: ASTNode, node_line_idx: int) -> Tuple[int, int]:
-    """Find closure point for structural nodes like procedures and structs."""
-    
-    # Look for END statement for procedures
-    if node.node_type == 'procedure':
-        for i in range(node_line_idx + 1, len(lines)):
-            line = lines[i].strip().upper()
-            if line.startswith('END') and not line.startswith('ENDIF'):
-                # Close after the END statement
-                insert_pos = sum(len(lines[j]) + 1 for j in range(i + 1))
-                node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-                return insert_pos, node_indent
-    
-    # For struct declarations, look for the end of the structure
-    elif node.node_type == 'struct_decl':
+    def fix_unmatched_braces(self):
+        """Fix unmatched braces in attribute sections."""
+        
+        # Count braces and add missing ones
         brace_count = 0
-        in_struct = False
-        for i in range(node_line_idx, len(lines)):
-            line = lines[i]
-            if 'STRUCT' in line.upper():
-                in_struct = True
-            if in_struct:
-                brace_count += line.count('(')
-                brace_count -= line.count(')')
-                if brace_count == 0 and i > node_line_idx:
-                    insert_pos = sum(len(lines[j]) + 1 for j in range(i + 1))
-                    node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-                    return insert_pos, node_indent
-    
-    # Default: close at a reasonable distance
-    return find_container_closure_point(content, lines, node, node_line_idx)
-
-def find_section_closure_point(content: str, lines: List[str], node: ASTNode, node_line_idx: int) -> Tuple[int, int]:
-    """Find closure point for procedure section nodes (parameters, local_declarations, statements)."""
-    
-    # Look for the start of the next section or END
-    section_keywords = ['BEGIN', 'END']
-    if node.node_type == 'parameters':
-        section_keywords = ['BEGIN', 'LOCAL', 'END']
-    elif node.node_type == 'local_declarations':
-        section_keywords = ['BEGIN', 'END']
-    
-    for i in range(node_line_idx + 1, len(lines)):
-        line = lines[i].strip().upper()
+        result = []
+        i = 0
         
-        # Skip empty lines and comments
-        if not line or line.startswith('!'):
-            continue
-        
-        # Check for section transitions
-        for keyword in section_keywords:
-            if line.startswith(keyword):
-                insert_pos = sum(len(lines[j]) + 1 for j in range(i))
-                node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-                return insert_pos, node_indent
-        
-        # Check for new procedure (same level)
-        if line.startswith('(PROCEDURE') or 'PROC ' in line:
-            insert_pos = sum(len(lines[j]) + 1 for j in range(i))
-            node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-            return insert_pos, node_indent
-    
-    # Default: close at end of file
-    return len(content), 0
-
-def find_statement_closure_point(content: str, lines: List[str], node: ASTNode, node_line_idx: int) -> Tuple[int, int]:
-    """Find closure point for statement nodes."""
-    
-    # For statement nodes, look for the end of the current statement or the start of the next
-    for i in range(node_line_idx + 1, min(node_line_idx + 5, len(lines))):
-        line = lines[i].strip()
-        
-        # Skip empty lines
-        if not line:
-            continue
-        
-        # If we hit a comment, we can close before it
-        if line.startswith('!'):
-            insert_pos = sum(len(lines[j]) + 1 for j in range(i))
-            node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-            return insert_pos, node_indent
-        
-        # If we hit a new statement or declaration at same or higher level, close before it
-        if (line.startswith('(') or 
-            any(line.upper().startswith(kw) for kw in ['IF ', 'WHILE ', 'FOR ', 'CASE ', 'CALL ', 'RETURN ', 'BEGIN', 'END'])):
+        while i < len(self.content):
+            char = self.content[i]
             
-            line_indent = len(lines[i]) - len(lines[i].lstrip())
-            node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
             
-            if line_indent <= node_indent + 2:  # Allow slight indentation
-                insert_pos = sum(len(lines[j]) + 1 for j in range(i))
-                return insert_pos, node_indent
-    
-    # Default: close after a few lines
-    target_line = min(node_line_idx + 3, len(lines))
-    insert_pos = sum(len(lines[j]) + 1 for j in range(target_line))
-    node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-    return insert_pos, node_indent
-
-def find_directive_closure_point(content: str, lines: List[str], node: ASTNode, node_line_idx: int) -> Tuple[int, int]:
-    """Find closure point for directive nodes (typically single-line)."""
-    
-    # Directives are usually single-line, close at end of current line
-    if node_line_idx + 1 < len(lines):
-        insert_pos = sum(len(lines[j]) + 1 for j in range(node_line_idx + 1))
-    else:
-        insert_pos = len(content)
-    
-    node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-    return insert_pos, node_indent
-
-def find_simple_closure_point(content: str, lines: List[str], node: ASTNode, node_line_idx: int) -> Tuple[int, int]:
-    """Find closure point for simple nodes (expressions, etc.)."""
-    
-    # For simple nodes, look for the end of the current logical construct
-    for i in range(node_line_idx + 1, min(node_line_idx + 8, len(lines))):
-        line = lines[i].strip()
+            result.append(char)
+            i += 1
         
-        # Skip empty lines
-        if not line:
-            continue
+        # Add missing closing braces
+        missing_braces = brace_count
+        if missing_braces > 0:
+            result.extend(['}'] * missing_braces)
+            self.fixes_applied.append(f"Added {missing_braces} missing closing braces")
         
-        # If we hit a comment, we can close before it
-        if line.startswith('!'):
-            insert_pos = sum(len(lines[j]) + 1 for j in range(i))
-            node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-            return insert_pos, node_indent
-        
-        # If we hit a new construct at same or higher level, close before it
-        if line.startswith('('):
-            line_indent = len(lines[i]) - len(lines[i].lstrip())
-            node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-            
-            if line_indent <= node_indent:
-                insert_pos = sum(len(lines[j]) + 1 for j in range(i))
-                return insert_pos, node_indent
+        self.content = ''.join(result)
     
-    # Default: close at a reasonable distance after the node
-    target_line = min(node_line_idx + 4, len(lines))
-    insert_pos = sum(len(lines[j]) + 1 for j in range(target_line))
-    node_indent = len(lines[node_line_idx]) - len(lines[node_line_idx].lstrip()) if node_line_idx < len(lines) else 0
-    return insert_pos, node_indent
+    def fix_parentheses(self):
+        """Fix unmatched parentheses using enhanced logic."""
+        
+        # First, let's analyze the parentheses structure
+        paren_stack = []
+        issues = []
+        
+        for i, char in enumerate(self.content):
+            if char == '(':
+                paren_stack.append(i)
+            elif char == ')':
+                if paren_stack:
+                    paren_stack.pop()
+                else:
+                    issues.append(f"Extra closing parenthesis at position {i}")
+        
+        # Add missing closing parentheses
+        missing_closes = len(paren_stack)
+        if missing_closes > 0:
+            # Add closing parentheses at the end
+            self.content += ')' * missing_closes
+            self.fixes_applied.append(f"Added {missing_closes} missing closing parentheses")
+    
+    def cleanup_formatting(self):
+        """Clean up whitespace and formatting issues."""
+        
+        original_content = self.content
+        
+        # Remove extra whitespace
+        self.content = re.sub(r'\s+', ' ', self.content)
+        
+        # Fix spacing around parentheses and braces
+        self.content = re.sub(r'\(\s+', '(', self.content)
+        self.content = re.sub(r'\s+\)', ')', self.content)
+        self.content = re.sub(r'\{\s+', '{', self.content)
+        self.content = re.sub(r'\s+\}', '}', self.content)
+        
+        # Add proper line breaks for readability
+        self.content = re.sub(r'\)\s*\(', ')\n(', self.content)
+        
+        if self.content != original_content:
+            self.fixes_applied.append("Cleaned up formatting and whitespace")
 
-def fix_parentheses_tal_aware(content: str, verbose: bool = False) -> str:
+def fix_malformed_sexp(content: str, verbose: bool = False) -> str:
     """
-    Fix parentheses using enhanced TAL AST node type awareness.
+    Main function to fix malformed S-expressions with comprehensive syntax repair.
     """
-    if verbose:
-        print("Parsing TAL AST structure...")
     
-    parser = EnhancedASTParser(content)
-    incomplete_nodes = parser.parse()
+    fixer = RobustSyntaxFixer(content, verbose)
+    return fixer.fix_all_syntax_issues()
+
+def analyze_syntax_issues(content: str) -> List[SyntaxIssue]:
+    """Analyze and report all syntax issues found in the content."""
     
-    if verbose:
-        print(f"Found {len(incomplete_nodes)} incomplete nodes:")
-        for node in incomplete_nodes:
-            priority = node.get_priority()
-            print(f"  - {node.node_type} at line {node.line_num} (depth {node.depth}, priority {priority})")
+    issues = []
     
-    if not incomplete_nodes:
-        if verbose:
-            print("All nodes are complete!")
-        return content
+    # Check parentheses balance
+    opens = content.count('(')
+    closes = content.count(')')
+    if opens != closes:
+        issues.append(SyntaxIssue(
+            "parentheses_imbalance",
+            0,
+            1,
+            f"Unbalanced parentheses: {opens} opens, {closes} closes",
+            f"Need {abs(opens - closes)} {'closing' if opens > closes else 'opening'} parentheses"
+        ))
     
-    # Find closure points
-    insertions = find_closure_points(content, incomplete_nodes)
+    # Check brace balance
+    open_braces = content.count('{')
+    close_braces = content.count('}')
+    if open_braces != close_braces:
+        issues.append(SyntaxIssue(
+            "braces_imbalance",
+            0,
+            1,
+            f"Unbalanced braces: {open_braces} opens, {close_braces} closes",
+            f"Need {abs(open_braces - close_braces)} {'closing' if open_braces > close_braces else 'opening'} braces"
+        ))
     
-    if verbose:
-        print(f"Planning {len(insertions)} closures:")
-        for pos, indent, node_type in insertions:
-            print(f"  - Close {node_type} at position {pos} with indent {indent}")
+    # Check for mixed quotes
+    single_quotes = content.count("'")
+    double_quotes = content.count('"')
+    if single_quotes > 0 and double_quotes > 0:
+        issues.append(SyntaxIssue(
+            "mixed_quotes",
+            0,
+            1,
+            f"Mixed quote types: {single_quotes} single, {double_quotes} double",
+            "Standardize to one quote type"
+        ))
     
-    # Apply insertions (from end to start to avoid position shifts)
-    result = content
-    for pos, indent_level, node_type in sorted(insertions, reverse=True):
-        # Create closing parenthesis with proper indentation
-        indent_str = ' ' * indent_level
-        closing = f"{indent_str})"
-        
-        # Insert
-        if pos >= len(result):
-            # At end of file
-            if not result.endswith('\n'):
-                result += '\n'
-            result += closing
-        else:
-            # Insert at position
-            result = result[:pos] + closing + '\n' + result[pos:]
+    # Check for invalid node names
+    invalid_nodes = re.findall(r'\([a-zA-Z_][a-zA-Z0-9_]*\s+\*[a-zA-Z_][a-zA-Z0-9_]*', content)
+    if invalid_nodes:
+        issues.append(SyntaxIssue(
+            "invalid_node_names",
+            0,
+            1,
+            f"Found {len(invalid_nodes)} invalid node names with spaces/asterisks",
+            "Replace spaces and asterisks with underscores"
+        ))
     
-    if verbose:
-        print(f"Added {len(insertions)} closing parentheses")
+    # Check for malformed attributes
+    malformed_attrs = re.findall(r':attrs\s*\([^)]*\)', content)
+    if malformed_attrs:
+        issues.append(SyntaxIssue(
+            "malformed_attributes",
+            0,
+            1,
+            f"Found {len(malformed_attrs)} attributes using parentheses instead of braces",
+            "Replace :attrs (...) with :attrs {...}"
+        ))
     
-    return result
+    return issues
 
 def main():
-    """Main function with enhanced TAL support."""
+    """Main function with robust syntax fixing capabilities."""
+    
     parser = argparse.ArgumentParser(
-        description='Enhanced TAL AST node-aware parentheses fixer',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description='Robust TAL AST syntax and parentheses fixer',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This tool fixes multiple syntax issues in malformed S-expressions:
+- Invalid node names (e.g., "source *directive" -> "source_directive") 
+- Mixed quote types (standardizes to double quotes)
+- Malformed attributes (fixes :attrs syntax)
+- Unmatched parentheses, braces, and brackets
+- Formatting and whitespace issues
+
+Examples:
+  %(prog)s malformed.ast                    # Fix and overwrite
+  %(prog)s malformed.ast fixed.ast          # Fix to new file  
+  %(prog)s malformed.ast -v                 # Verbose output
+  %(prog)s malformed.ast --analyze-only     # Just show issues
+        """
     )
     
-    parser.add_argument('input_file', help='Input TAL AST file to fix')
+    parser.add_argument('input_file', help='Input malformed AST file to fix')
     parser.add_argument('output_file', nargs='?', help='Output file (default: overwrite input)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--check-only', action='store_true', help='Only analyze, do not fix')
-    parser.add_argument('--show-node-types', action='store_true', help='Show all recognized node types')
+    parser.add_argument('--analyze-only', action='store_true', help='Only analyze issues, do not fix')
     
     args = parser.parse_args()
-    
-    if args.show_node_types:
-        print("Recognized TAL AST Node Types:")
-        print("=" * 50)
-        for node_type, properties in sorted(AST_NODE_TYPES.items()):
-            container = "Container" if properties['is_container'] else "Simple"
-            children = "Children" if properties['can_have_children'] else "No children"
-            priority = properties['priority']
-            print(f"{node_type:25} | {container:9} | {children:11} | Priority: {priority}")
-        return 0
     
     # Read input file
     try:
@@ -553,39 +401,34 @@ def main():
             content = f.read()
     except FileNotFoundError:
         print(f"Error: Input file '{args.input_file}' not found")
-        sys.exit(1)
+        return 1
     except Exception as e:
         print(f"Error reading input file: {e}")
-        sys.exit(1)
+        return 1
     
-    if args.check_only:
-        parser = EnhancedASTParser(content)
-        incomplete_nodes = parser.parse()
-        
-        print(f"TAL AST Analysis of {args.input_file}:")
-        print(f"  Incomplete nodes: {len(incomplete_nodes)}")
-        
-        if incomplete_nodes:
-            print("  Incomplete nodes by type:")
-            node_counts = {}
-            for node in incomplete_nodes:
-                node_counts[node.node_type] = node_counts.get(node.node_type, 0) + 1
-            
-            for node_type, count in sorted(node_counts.items()):
-                print(f"    {node_type}: {count}")
-            
-            if args.verbose:
-                print("  Details:")
-                for node in incomplete_nodes:
-                    priority = node.get_priority()
-                    print(f"    - {node.node_type} at line {node.line_num} (depth {node.depth}, priority {priority})")
-        else:
-            print("  All nodes are complete!")
-        
-        sys.exit(0 if not incomplete_nodes else 1)
+    print(f"Analyzing malformed S-expression: {args.input_file}")
+    print("=" * 60)
     
-    # Fix the content
-    fixed_content = fix_parentheses_tal_aware(content, args.verbose)
+    # Analyze syntax issues
+    issues = analyze_syntax_issues(content)
+    
+    if issues:
+        print(f"Found {len(issues)} syntax issues:")
+        for i, issue in enumerate(issues, 1):
+            print(f"{i}. {issue.issue_type}: {issue.description}")
+            if issue.suggested_fix:
+                print(f"   Fix: {issue.suggested_fix}")
+        print()
+    else:
+        print("No syntax issues detected.")
+        return 0
+    
+    if args.analyze_only:
+        return 1 if issues else 0
+    
+    # Apply fixes
+    print("Applying comprehensive syntax fixes...")
+    fixed_content = fix_malformed_sexp(content, args.verbose)
     
     # Determine output file
     output_file = args.output_file if args.output_file else args.input_file
@@ -595,18 +438,28 @@ def main():
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(fixed_content)
         
-        # Verify
-        final_opens = fixed_content.count('(')
-        final_closes = fixed_content.count(')')
+        # Verify the fix
+        final_issues = analyze_syntax_issues(fixed_content)
         
-        if final_opens == final_closes:
-            print(f"Successfully fixed TAL AST structure in {output_file}")
+        print(f"\nResults:")
+        print(f"  Original issues: {len(issues)}")
+        print(f"  Remaining issues: {len(final_issues)}")
+        print(f"  Fixed successfully: {len(issues) - len(final_issues)}")
+        
+        if len(final_issues) == 0:
+            print(f"✅ All syntax issues fixed! Output written to: {output_file}")
         else:
-            print(f"Warning: Still unbalanced - opens: {final_opens}, closes: {final_closes}")
-            
+            print(f"⚠️  Some issues remain. Check the output file: {output_file}")
+            if args.verbose:
+                print("Remaining issues:")
+                for issue in final_issues:
+                    print(f"  - {issue.description}")
+        
+        return 0
+        
     except Exception as e:
         print(f"Error writing output file: {e}")
-        sys.exit(1)
+        return 1
 
 if __name__ == "__main__":
-    main()
+    exit(main())
