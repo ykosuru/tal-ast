@@ -1,465 +1,421 @@
 #!/usr/bin/env python3
 """
-Robust TAL AST Parentheses and Syntax Fixer
+Flattened Stack-Based S-Expression Fixer
 
-This program fixes not only unmatched parentheses but also other syntax issues
-in malformed S-expressions, including:
-- Mixed quote types
-- Malformed attribute syntax
-- Invalid node names
-- Unmatched braces and brackets
+Strategy:
+1. Remove all newlines and carriage returns to flatten content
+2. Process character by character with a stack
+3. Push nodes when encountering opening parentheses
+4. Pop and close nodes when encountering closing parentheses
+5. Insert closing parentheses before sibling nodes begin
 
-Usage:
-    python robust_fix_parentheses.py input.ast [output.ast]
+This approach eliminates multi-line parsing complexity and focuses on
+pure structural S-expression balance.
 """
 
 import sys
 import argparse
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
-# Comprehensive AST node types from the enhanced TAL parser
-AST_NODE_TYPES = {
-    # Top-level program structure
-    'program': {'can_have_children': True, 'is_container': True, 'priority': 1},
-    'module': {'can_have_children': True, 'is_container': True, 'priority': 1},
-    
-    # Procedure-related nodes
-    'procedure': {'can_have_children': True, 'is_container': True, 'priority': 2},
-    'parameters': {'can_have_children': True, 'is_container': True, 'priority': 3},
-    'parameter': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'local_declarations': {'can_have_children': True, 'is_container': True, 'priority': 3},
-    'statements': {'can_have_children': True, 'is_container': True, 'priority': 3},
-    
-    # Declaration nodes
-    'var_decl': {'can_have_children': True, 'is_container': False, 'priority': 4},
-    'var_spec': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    'const_decl': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'literal_decl': {'can_have_children': True, 'is_container': False, 'priority': 4},
-    'struct_decl': {'can_have_children': True, 'is_container': False, 'priority': 4},
-    'template_decl': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'subtype_decl': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'external_decl': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'forward_decl': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'equ_decl': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'define_decl': {'can_have_children': True, 'is_container': False, 'priority': 4},
-    'name_decl': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    
-    # Statement nodes
-    'statement': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'assignment': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'call_stmt': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'system_function_call': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'return_stmt': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'if_stmt': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'while_stmt': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'for_stmt': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'case_stmt': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'scan_stmt': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    'rscan_stmt': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    'goto_stmt': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    'interrupt_stmt': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    'assert_stmt': {'can_have_children': True, 'is_container': False, 'priority': 5},
-    'stop_stmt': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    'abort_stmt': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    'label': {'can_have_children': False, 'is_container': False, 'priority': 5},
-    
-    # Expression and operator nodes
-    'expression': {'can_have_children': True, 'is_container': False, 'priority': 6},
-    'system_function': {'can_have_children': False, 'is_container': False, 'priority': 6},
-    'operator': {'can_have_children': False, 'is_container': False, 'priority': 6},
-    
-    # Directive nodes
-    'comment': {'can_have_children': False, 'is_container': False, 'priority': 7},
-    'page_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'section_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'source_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'nolist_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'list_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'symbols_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'nosymbols_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'save_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'restore_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'heap_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'stack_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'conditional_compilation': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'endif_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'else_directive': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    
-    # Global statement nodes
-    'global_statement': {'can_have_children': True, 'is_container': False, 'priority': 4},
-    'use_stmt': {'can_have_children': False, 'is_container': False, 'priority': 4},
-    'include_stmt': {'can_have_children': False, 'is_container': False, 'priority': 4},
-}
-
 @dataclass
-class SyntaxIssue:
-    """Represents a syntax issue found during parsing."""
-    issue_type: str
-    position: int
-    line_num: int
-    description: str
-    suggested_fix: str = ""
+class StackNode:
+    """Represents a node on the parsing stack."""
+    node_type: str
+    start_pos: int
+    depth: int
+    has_content: bool = False
 
-class RobustSyntaxFixer:
+class FlattenedSExpParser:
     """
-    Robust syntax fixer that handles multiple types of S-expression syntax issues.
+    Simple stack-based parser that works on flattened (no newlines) content.
     """
     
     def __init__(self, content: str, verbose: bool = False):
         self.original_content = content
-        self.content = content
         self.verbose = verbose
-        self.issues = []
-        self.fixes_applied = []
+        # Step 1: Flatten content by removing all newlines and normalizing whitespace
+        self.flattened_content = self._flatten_content(content)
+        self.stack = []
+        self.incomplete_nodes = []
         
-    def fix_all_syntax_issues(self) -> str:
-        """Apply all syntax fixes in the correct order."""
+    def _flatten_content(self, content: str) -> str:
+        """Remove all newlines and normalize whitespace."""
+        # Remove newlines and carriage returns
+        flattened = content.replace('\n', ' ').replace('\r', ' ')
+        
+        # Normalize multiple spaces to single spaces
+        flattened = re.sub(r'\s+', ' ', flattened)
+        
+        # Clean up spaces around parentheses and braces
+        flattened = re.sub(r'\s*\(\s*', '(', flattened)
+        flattened = re.sub(r'\s*\)\s*', ')', flattened)
+        flattened = re.sub(r'\s*\{\s*', '{', flattened)
+        flattened = re.sub(r'\s*\}\s*', '}', flattened)
+        
+        return flattened.strip()
+    
+    def parse_and_fix(self) -> str:
+        """Parse the flattened content and fix parentheses balance."""
         
         if self.verbose:
-            print("Starting comprehensive syntax fixing...")
+            print(f"Original length: {len(self.original_content)} chars")
+            print(f"Flattened length: {len(self.flattened_content)} chars")
+            print("Flattened content preview:")
+            print(self.flattened_content[:200] + "..." if len(self.flattened_content) > 200 else self.flattened_content)
+            print()
         
-        # Step 1: Fix invalid node names
-        self.fix_invalid_node_names()
-        
-        # Step 2: Fix quote consistency
-        self.fix_quote_consistency()
-        
-        # Step 3: Fix malformed attributes
-        self.fix_malformed_attributes()
-        
-        # Step 4: Fix unmatched braces and brackets
-        self.fix_unmatched_braces()
-        
-        # Step 5: Fix parentheses (using enhanced logic)
-        self.fix_parentheses()
-        
-        # Step 6: Clean up whitespace and formatting
-        self.cleanup_formatting()
-        
-        if self.verbose:
-            print(f"Applied {len(self.fixes_applied)} fixes:")
-            for fix in self.fixes_applied:
-                print(f"  - {fix}")
-        
-        return self.content
-    
-    def fix_invalid_node_names(self):
-        """Fix invalid node names like 'source *directive' -> 'source_directive'."""
-        
-        # Pattern to find invalid node names with spaces or special characters
-        pattern = r'\(([a-zA-Z_][a-zA-Z0-9_]*)\s+\*([a-zA-Z_][a-zA-Z0-9_]*)'
-        
-        def replace_invalid_node(match):
-            prefix = match.group(1)
-            suffix = match.group(2)
-            fixed_name = f"{prefix}_{suffix}"
-            self.fixes_applied.append(f"Fixed node name: '{prefix} *{suffix}' -> '{fixed_name}'")
-            return f"({fixed_name}"
-        
-        self.content = re.sub(pattern, replace_invalid_node, self.content)
-    
-    def fix_quote_consistency(self):
-        """Standardize quote usage - prefer double quotes."""
-        
-        # Find all quoted strings and standardize to double quotes
-        # But be careful with nested quotes
-        
-        original_content = self.content
-        
-        # Replace single quotes with double quotes, but handle escapes
-        # This is a simplified approach - a full solution would need proper parsing
-        
-        # Count quote types
-        single_quotes = self.content.count("'")
-        double_quotes = self.content.count('"')
-        
-        if single_quotes > 0 and double_quotes > 0:
-            # Mixed quotes detected - convert single to double where safe
-            
-            # Pattern to find single-quoted strings that don't contain double quotes
-            pattern = r"'([^'\"]*?)'"
-            
-            def replace_quotes(match):
-                content = match.group(1)
-                if '"' not in content:  # Safe to convert
-                    return f'"{content}"'
-                return match.group(0)  # Leave as is if contains double quotes
-            
-            self.content = re.sub(pattern, replace_quotes, self.content)
-            
-            if self.content != original_content:
-                self.fixes_applied.append("Standardized quote usage to double quotes")
-    
-    def fix_malformed_attributes(self):
-        """Fix malformed attribute syntax."""
-        
-        # Pattern to find :attrs with mixed braces/parens
-        # :attrs ('key': 'value') -> :attrs {"key": "value"}
-        # :attrs {'key': 'value'} -> :attrs {"key": "value"}
-        
-        original_content = self.content
-        
-        # Fix :attrs with parentheses instead of braces
-        pattern1 = r':attrs\s*\(\s*([^)]*?)\s*\)'
-        
-        def fix_attrs_parens(match):
-            attrs_content = match.group(1)
-            # Convert to proper brace format
-            return f':attrs {{{attrs_content}}}'
-        
-        self.content = re.sub(pattern1, fix_attrs_parens, self.content)
-        
-        # Fix incomplete attribute structures
-        pattern2 = r':attrs\s*\{\s*([^}]*?)$'
-        
-        def fix_incomplete_attrs(match):
-            attrs_content = match.group(1)
-            return f':attrs {{{attrs_content}}}'
-        
-        self.content = re.sub(pattern2, fix_incomplete_attrs, self.content, flags=re.MULTILINE)
-        
-        if self.content != original_content:
-            self.fixes_applied.append("Fixed malformed attribute syntax")
-    
-    def fix_unmatched_braces(self):
-        """Fix unmatched braces in attribute sections."""
-        
-        # Count braces and add missing ones
-        brace_count = 0
         result = []
         i = 0
+        in_string = False
+        string_char = None
         
-        while i < len(self.content):
-            char = self.content[i]
+        while i < len(self.flattened_content):
+            char = self.flattened_content[i]
             
-            if char == '{':
-                brace_count += 1
-            elif char == '}':
-                brace_count -= 1
+            # Handle string boundaries
+            if char in '"\'':
+                if not in_string:
+                    in_string = True
+                    string_char = char
+                elif char == string_char:
+                    in_string = False
+                    string_char = None
+                result.append(char)
+                i += 1
+                continue
             
-            result.append(char)
+            # If we're inside a string, just append and continue
+            if in_string:
+                result.append(char)
+                i += 1
+                continue
+            
+            # Handle opening parentheses
+            if char == '(':
+                # Before opening a new node, check if we need to close incomplete siblings
+                self._close_incomplete_siblings_before_new_node(result, i)
+                
+                result.append(char)
+                
+                # Read the node type
+                node_type = self._read_node_type(i + 1)
+                
+                # Create stack entry
+                stack_node = StackNode(
+                    node_type=node_type,
+                    start_pos=len(result) - 1,
+                    depth=len(self.stack)
+                )
+                
+                self.stack.append(stack_node)
+                
+                if self.verbose:
+                    print(f"Opened node: {node_type} at depth {stack_node.depth}")
+                
+                i += 1
+                
+            # Handle closing parentheses
+            elif char == ')':
+                if self.stack:
+                    closed_node = self.stack.pop()
+                    if self.verbose:
+                        print(f"Closed node: {closed_node.node_type} at depth {closed_node.depth}")
+                else:
+                    if self.verbose:
+                        print("Warning: Extra closing parenthesis")
+                
+                result.append(char)
+                i += 1
+                
+            # Handle other characters
+            else:
+                # Mark current node as having content
+                if self.stack and char.strip():
+                    self.stack[-1].has_content = True
+                
+                result.append(char)
+                i += 1
+        
+        # Close any remaining incomplete nodes
+        while self.stack:
+            closed_node = self.stack.pop()
+            result.append(')')
+            if self.verbose:
+                print(f"Auto-closed incomplete node: {closed_node.node_type}")
+        
+        fixed_content = ''.join(result)
+        
+        # Add back some formatting for readability
+        formatted_content = self._add_basic_formatting(fixed_content)
+        
+        return formatted_content
+    
+    def _close_incomplete_siblings_before_new_node(self, result: List[str], current_pos: int):
+        """Close incomplete sibling nodes before starting a new node at the same level."""
+        
+        if not self.stack:
+            return
+        
+        # Look ahead to see what kind of node is starting
+        upcoming_node_type = self._read_node_type(current_pos + 1)
+        
+        # If we're about to start a new top-level node or sibling, close incomplete nodes
+        current_depth = len(self.stack)
+        
+        # Close nodes that should be siblings of the upcoming node
+        while (self.stack and 
+               self._should_close_before_sibling(self.stack[-1], upcoming_node_type, current_depth)):
+            
+            closed_node = self.stack.pop()
+            result.append(')')
+            
+            if self.verbose:
+                print(f"Auto-closed sibling: {closed_node.node_type} before {upcoming_node_type}")
+    
+    def _should_close_before_sibling(self, current_node: StackNode, upcoming_node_type: str, upcoming_depth: int) -> bool:
+        """Determine if a node should be closed before a sibling starts."""
+        
+        # Close if we're at the same depth (siblings)
+        if current_node.depth >= upcoming_depth:
+            return True
+        
+        # Close certain node types before others (based on AST structure knowledge)
+        if self._are_sibling_node_types(current_node.node_type, upcoming_node_type):
+            return True
+        
+        # Close nodes that typically don't have children when another node starts
+        non_container_types = {
+            'comment', 'var_spec', 'parameter', 'system_function', 'operator',
+            'const_decl', 'equ_decl', 'use_stmt', 'include_stmt', 'label',
+            'goto_stmt', 'scan_stmt', 'rscan_stmt', 'stop_stmt', 'abort_stmt'
+        }
+        
+        if current_node.node_type in non_container_types:
+            return True
+        
+        return False
+    
+    def _are_sibling_node_types(self, current_type: str, upcoming_type: str) -> bool:
+        """Check if two node types are typically siblings in the AST."""
+        
+        # Directive types are usually siblings
+        directive_types = {
+            'page_directive', 'section_directive', 'source_directive', 
+            'list_directive', 'nolist_directive', 'symbols_directive'
+        }
+        
+        if current_type in directive_types and upcoming_type in directive_types:
+            return True
+        
+        # Declaration types are usually siblings
+        declaration_types = {
+            'var_decl', 'const_decl', 'literal_decl', 'struct_decl',
+            'template_decl', 'external_decl', 'forward_decl'
+        }
+        
+        if current_type in declaration_types and upcoming_type in declaration_types:
+            return True
+        
+        # Statement types are usually siblings
+        statement_types = {
+            'statement', 'assignment', 'call_stmt', 'return_stmt',
+            'if_stmt', 'while_stmt', 'for_stmt', 'case_stmt'
+        }
+        
+        if current_type in statement_types and upcoming_type in statement_types:
+            return True
+        
+        # Global content types are siblings
+        global_types = {'global_statement', 'use_stmt', 'include_stmt'}
+        
+        if current_type in global_types and upcoming_type in global_types:
+            return True
+        
+        return False
+    
+    def _read_node_type(self, start_pos: int) -> str:
+        """Read the node type starting from the given position."""
+        
+        if start_pos >= len(self.flattened_content):
+            return "unknown"
+        
+        # Skip whitespace
+        i = start_pos
+        while i < len(self.flattened_content) and self.flattened_content[i].isspace():
             i += 1
         
-        # Add missing closing braces
-        missing_braces = brace_count
-        if missing_braces > 0:
-            result.extend(['}'] * missing_braces)
-            self.fixes_applied.append(f"Added {missing_braces} missing closing braces")
+        if i >= len(self.flattened_content):
+            return "unknown"
         
-        self.content = ''.join(result)
-    
-    def fix_parentheses(self):
-        """Fix unmatched parentheses using enhanced logic."""
+        # Read identifier
+        node_type = ""
+        while (i < len(self.flattened_content) and 
+               self.flattened_content[i] not in ' \t(){}:"\'' and
+               not self.flattened_content[i].isspace()):
+            node_type += self.flattened_content[i]
+            i += 1
         
-        # First, let's analyze the parentheses structure
-        paren_stack = []
-        issues = []
+        return node_type if node_type else "unknown"
+    
+    def _add_basic_formatting(self, content: str) -> str:
+        """Add basic formatting to make the output more readable."""
         
-        for i, char in enumerate(self.content):
-            if char == '(':
-                paren_stack.append(i)
-            elif char == ')':
-                if paren_stack:
-                    paren_stack.pop()
-                else:
-                    issues.append(f"Extra closing parenthesis at position {i}")
+        # Add line breaks between top-level S-expressions
+        formatted = re.sub(r'\)\s*\(', ')\n(', content)
         
-        # Add missing closing parentheses
-        missing_closes = len(paren_stack)
-        if missing_closes > 0:
-            # Add closing parentheses at the end
-            self.content += ')' * missing_closes
-            self.fixes_applied.append(f"Added {missing_closes} missing closing parentheses")
-    
-    def cleanup_formatting(self):
-        """Clean up whitespace and formatting issues."""
+        # Add some indentation for nested structures (basic)
+        lines = formatted.split('\n')
+        result_lines = []
         
-        original_content = self.content
+        for line in lines:
+            if line.strip().startswith('('):
+                # Simple indentation based on nesting depth
+                depth = 0
+                indent = 0
+                for char in line:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                
+                # Basic indentation (could be improved)
+                result_lines.append('  ' * indent + line.strip())
+            else:
+                result_lines.append(line)
         
-        # Remove extra whitespace
-        self.content = re.sub(r'\s+', ' ', self.content)
-        
-        # Fix spacing around parentheses and braces
-        self.content = re.sub(r'\(\s+', '(', self.content)
-        self.content = re.sub(r'\s+\)', ')', self.content)
-        self.content = re.sub(r'\{\s+', '{', self.content)
-        self.content = re.sub(r'\s+\}', '}', self.content)
-        
-        # Add proper line breaks for readability
-        self.content = re.sub(r'\)\s*\(', ')\n(', self.content)
-        
-        if self.content != original_content:
-            self.fixes_applied.append("Cleaned up formatting and whitespace")
-
-def fix_malformed_sexp(content: str, verbose: bool = False) -> str:
-    """
-    Main function to fix malformed S-expressions with comprehensive syntax repair.
-    """
-    
-    fixer = RobustSyntaxFixer(content, verbose)
-    return fixer.fix_all_syntax_issues()
-
-def analyze_syntax_issues(content: str) -> List[SyntaxIssue]:
-    """Analyze and report all syntax issues found in the content."""
-    
-    issues = []
-    
-    # Check parentheses balance
-    opens = content.count('(')
-    closes = content.count(')')
-    if opens != closes:
-        issues.append(SyntaxIssue(
-            "parentheses_imbalance",
-            0,
-            1,
-            f"Unbalanced parentheses: {opens} opens, {closes} closes",
-            f"Need {abs(opens - closes)} {'closing' if opens > closes else 'opening'} parentheses"
-        ))
-    
-    # Check brace balance
-    open_braces = content.count('{')
-    close_braces = content.count('}')
-    if open_braces != close_braces:
-        issues.append(SyntaxIssue(
-            "braces_imbalance",
-            0,
-            1,
-            f"Unbalanced braces: {open_braces} opens, {close_braces} closes",
-            f"Need {abs(open_braces - close_braces)} {'closing' if open_braces > close_braces else 'opening'} braces"
-        ))
-    
-    # Check for mixed quotes
-    single_quotes = content.count("'")
-    double_quotes = content.count('"')
-    if single_quotes > 0 and double_quotes > 0:
-        issues.append(SyntaxIssue(
-            "mixed_quotes",
-            0,
-            1,
-            f"Mixed quote types: {single_quotes} single, {double_quotes} double",
-            "Standardize to one quote type"
-        ))
-    
-    # Check for invalid node names
-    invalid_nodes = re.findall(r'\([a-zA-Z_][a-zA-Z0-9_]*\s+\*[a-zA-Z_][a-zA-Z0-9_]*', content)
-    if invalid_nodes:
-        issues.append(SyntaxIssue(
-            "invalid_node_names",
-            0,
-            1,
-            f"Found {len(invalid_nodes)} invalid node names with spaces/asterisks",
-            "Replace spaces and asterisks with underscores"
-        ))
-    
-    # Check for malformed attributes
-    malformed_attrs = re.findall(r':attrs\s*\([^)]*\)', content)
-    if malformed_attrs:
-        issues.append(SyntaxIssue(
-            "malformed_attributes",
-            0,
-            1,
-            f"Found {len(malformed_attrs)} attributes using parentheses instead of braces",
-            "Replace :attrs (...) with :attrs {...}"
-        ))
-    
-    return issues
+        return '\n'.join(result_lines)
 
 def main():
-    """Main function with robust syntax fixing capabilities."""
+    """
+    Main function for flattened S-expression fixing with comprehensive command-line interface.
     
+    This function provides a command-line interface for the S-expression fixer, handling
+    argument parsing, file I/O, error handling, and result reporting.
+    
+    The tool implements a three-step process:
+    1. Read and validate input file
+    2. Apply the flattened stack-based parsing and fixing algorithm
+    3. Write results and provide verification feedback
+    
+    Returns:
+        Exit code: 0 for success, 1 for failure
+    """
+    
+    # Set up command-line argument parsing with detailed help
     parser = argparse.ArgumentParser(
-        description='Robust TAL AST syntax and parentheses fixer',
+        description='Flattened stack-based S-expression fixer',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-This tool fixes multiple syntax issues in malformed S-expressions:
-- Invalid node names (e.g., "source *directive" -> "source_directive") 
-- Mixed quote types (standardizes to double quotes)
-- Malformed attributes (fixes :attrs syntax)
-- Unmatched parentheses, braces, and brackets
-- Formatting and whitespace issues
+Algorithm Overview:
+This tool uses a simplified approach that eliminates multi-line parsing complexity:
+
+1. FLATTEN: Remove all newlines/carriage returns from input content
+2. TOKENIZE: Process character by character with string boundary awareness  
+3. STACK-PARSE: Use stack to track open nodes, push on '(', pop on ')'
+4. SIBLING-CLOSE: Automatically close incomplete nodes before siblings begin
+5. AUTO-COMPLETE: Close any remaining incomplete nodes at end of input
+6. FORMAT: Add basic formatting for readability
+
+Key Benefits:
+- Eliminates confusion from multi-line structures and varied indentation
+- Simple character-by-character processing is predictable and reliable  
+- Stack-based parsing naturally handles arbitrary nesting depth
+- Sibling detection prevents AST nodes from bleeding into each other
+- Respects string boundaries to avoid breaking quoted content
 
 Examples:
-  %(prog)s malformed.ast                    # Fix and overwrite
-  %(prog)s malformed.ast fixed.ast          # Fix to new file  
-  %(prog)s malformed.ast -v                 # Verbose output
-  %(prog)s malformed.ast --analyze-only     # Just show issues
+  %(prog)s input.ast                    # Fix and overwrite input file
+  %(prog)s input.ast -o output.ast      # Fix to new output file
+  %(prog)s input.ast -v                 # Show verbose parsing steps and decisions
         """
     )
     
-    parser.add_argument('input_file', help='Input malformed AST file to fix')
-    parser.add_argument('output_file', nargs='?', help='Output file (default: overwrite input)')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--analyze-only', action='store_true', help='Only analyze issues, do not fix')
+    # Define command-line arguments
+    parser.add_argument('input_file', 
+                       help='Input S-expression file to be fixed')
+    parser.add_argument('-o', '--output', 
+                       help='Output file (default: overwrite input file)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                       help='Show verbose parsing output including stack operations')
     
+    # Parse command-line arguments
     args = parser.parse_args()
     
-    # Read input file
+    # Step 1: Read and validate input file
     try:
         with open(args.input_file, 'r', encoding='utf-8') as f:
             content = f.read()
     except FileNotFoundError:
-        print(f"Error: Input file '{args.input_file}' not found")
+        print(f"Error: File '{args.input_file}' not found")
+        return 1
+    except PermissionError:
+        print(f"Error: Permission denied reading '{args.input_file}'")
         return 1
     except Exception as e:
-        print(f"Error reading input file: {e}")
+        print(f"Error reading file: {e}")
         return 1
     
-    print(f"Analyzing malformed S-expression: {args.input_file}")
-    print("=" * 60)
-    
-    # Analyze syntax issues
-    issues = analyze_syntax_issues(content)
-    
-    if issues:
-        print(f"Found {len(issues)} syntax issues:")
-        for i, issue in enumerate(issues, 1):
-            print(f"{i}. {issue.issue_type}: {issue.description}")
-            if issue.suggested_fix:
-                print(f"   Fix: {issue.suggested_fix}")
+    # Provide initial status if verbose
+    if args.verbose:
+        print(f"Processing: {args.input_file}")
+        print("=" * 50)
+        
+        # Show initial parentheses count for comparison
+        initial_opens = content.count('(')
+        initial_closes = content.count(')')
+        print(f"Initial state: {initial_opens} opens, {initial_closes} closes")
+        print(f"Imbalance: {initial_opens - initial_closes} missing closes")
         print()
+    
+    # Step 2: Create parser instance and apply fixing algorithm
+    parser_instance = FlattenedSExpParser(content, args.verbose)
+    fixed_content = parser_instance.parse_and_fix()
+    
+    # Step 3: Verify the fix by checking final parentheses balance
+    final_opens = fixed_content.count('(')
+    final_closes = fixed_content.count(')')
+    
+    print(f"Final parentheses balance: {final_opens} opens, {final_closes} closes")
+    
+    # Report success or remaining issues
+    if final_opens == final_closes:
+        print("✅ Successfully balanced all parentheses!")
     else:
-        print("No syntax issues detected.")
-        return 0
+        print(f"⚠️  Still unbalanced by {abs(final_opens - final_closes)} parentheses")
+        print("This may indicate malformed quoted strings or other structural issues.")
+        return 1
     
-    if args.analyze_only:
-        return 1 if issues else 0
+    # Step 4: Write results to output file
+    output_file = args.output if args.output else args.input_file
     
-    # Apply fixes
-    print("Applying comprehensive syntax fixes...")
-    fixed_content = fix_malformed_sexp(content, args.verbose)
-    
-    # Determine output file
-    output_file = args.output_file if args.output_file else args.input_file
-    
-    # Write fixed content
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(fixed_content)
         
-        # Verify the fix
-        final_issues = analyze_syntax_issues(fixed_content)
+        print(f"Fixed content written to: {output_file}")
         
-        print(f"\nResults:")
-        print(f"  Original issues: {len(issues)}")
-        print(f"  Remaining issues: {len(final_issues)}")
-        print(f"  Fixed successfully: {len(issues) - len(final_issues)}")
-        
-        if len(final_issues) == 0:
-            print(f"✅ All syntax issues fixed! Output written to: {output_file}")
-        else:
-            print(f"⚠️  Some issues remain. Check the output file: {output_file}")
-            if args.verbose:
-                print("Remaining issues:")
-                for issue in final_issues:
-                    print(f"  - {issue.description}")
+        # Provide summary statistics if verbose
+        if args.verbose:
+            print(f"\nSummary:")
+            print(f"  Input file: {args.input_file}")
+            print(f"  Output file: {output_file}")
+            print(f"  Original size: {len(content)} characters")
+            print(f"  Fixed size: {len(fixed_content)} characters")
+            print(f"  Parentheses added: {final_closes - content.count(')')}")
         
         return 0
         
+    except PermissionError:
+        print(f"Error: Permission denied writing to '{output_file}'")
+        return 1
     except Exception as e:
-        print(f"Error writing output file: {e}")
+        print(f"Error writing output: {e}")
         return 1
 
+# Entry point - run main function if script is executed directly
 if __name__ == "__main__":
     exit(main())
