@@ -92,15 +92,16 @@ def classify_issues(nodes, lines):
     likely_normal = []
     
     # HARDCODED: Define parent node types that should remain open for children
+    # NOTE: 'expression' is handled separately with context-aware logic
     parent_node_types = {
         'program', 'procedure', 'parameters', 'local_declarations', 'statements',
         'var_decl', 'assignment', 'case_stmt', 'if_stmt', 'while_stmt', 'for_stmt',
-        'return_stmt', 'expression', 'statement'  # FIXED: Added 'statement' as it can have operator children
+        'return_stmt', 'statement'  # 'expression' removed - handled with special logic
     }
     
-    # HARDCODED: Define leaf node types that should be self-contained
+    # HARDCODED: Define leaf node types that should be self-contained (excluding comments)
     leaf_node_types = {
-        'comment', 'nolist_directive', 'list_directive', 'page_directive',
+        'nolist_directive', 'list_directive', 'page_directive',
         'parameter', 'var_spec', 'operator', 'system_function'
     }
     
@@ -108,21 +109,14 @@ def classify_issues(nodes, lines):
         if node['is_line_balanced']:
             # FIXED: Balanced nodes are generally OK and should not be "fixed"
             continue
-        
+            
         line_num = node['line']
         line_content = lines[line_num - 1] if line_num <= len(lines) else ""
         node_type = node['type']
         
-        # FIXED: Explicitly exclude comment nodes - they should NEVER be modified
-        if node_type == 'comment':
-            # Comments are always self-contained and correctly formatted
-            # Even if they appear unbalanced, it's likely a parsing artifact
-            likely_normal.append(node)
-            continue
-        
-        # FIXED: Check for other leaf nodes that should be balanced
+        # FIXED: Check for leaf nodes first - these should always be balanced
         if node_type in leaf_node_types:
-            # These leaf nodes should be self-contained and balanced
+            # Comments and other leaf nodes should be self-contained and balanced
             # If they're unbalanced, it's definitely a real issue
             real_issues.append(node)
         
