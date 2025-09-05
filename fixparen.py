@@ -108,14 +108,21 @@ def classify_issues(nodes, lines):
         if node['is_line_balanced']:
             # FIXED: Balanced nodes are generally OK and should not be "fixed"
             continue
-            
+        
         line_num = node['line']
         line_content = lines[line_num - 1] if line_num <= len(lines) else ""
         node_type = node['type']
         
-        # FIXED: Check for leaf nodes first - these should always be balanced
+        # FIXED: Explicitly exclude comment nodes - they should NEVER be modified
+        if node_type == 'comment':
+            # Comments are always self-contained and correctly formatted
+            # Even if they appear unbalanced, it's likely a parsing artifact
+            likely_normal.append(node)
+            continue
+        
+        # FIXED: Check for other leaf nodes that should be balanced
         if node_type in leaf_node_types:
-            # Comments and other leaf nodes should be self-contained and balanced
+            # These leaf nodes should be self-contained and balanced
             # If they're unbalanced, it's definitely a real issue
             real_issues.append(node)
         
