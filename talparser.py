@@ -1817,11 +1817,18 @@ class EnhancedTALParser:
             AST node for the source directive
         """
         source_node = tal_proc_parser.TALNode('source_directive', value=line, location=location)
-        
+
         if len(line) > 7:
-            filename = line[7:].strip()
-            source_node.attributes['filename'] = filename
-        
+            content = line[7:].strip()
+            if content.startswith('='):
+                content = content[1:].strip()
+
+            if '(' in content:
+                base_name = content[:content.find('(')].strip()
+                source_node.attributes['filename'] = base_name
+            else:
+                source_node.attributes['filename'] = content
+
         return source_node
     
     def _parse_struct_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
@@ -2606,4 +2613,3 @@ Examples:
 
 if __name__ == "__main__":
     exit(main())
-
