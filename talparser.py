@@ -2078,17 +2078,17 @@ class EnhancedTALParser:
         """
         source_node = tal_proc_parser.TALNode('source_directive', value=line, location=location)
 
-        if len(line) > 7:
-            content = line[7:].strip()
-            if content.startswith('='):
-                content = content[1:].strip()
-
-            if '(' in content:
-                base_name = content[:content.find('(')].strip()
-                source_node.attributes['filename'] = base_name
-            else:
-                source_node.attributes['filename'] = content
-
+        if len(line) > 7: #"?SOURCE"
+            equals_pos = text.find('=')
+            paren_pos = text.find('(')
+    
+        if equals_pos != -1 and paren_pos != -1 and equals_pos < paren_pos:
+            function_name = text[equals_pos + 1:paren_pos]
+            #params passed into external func not extracted
+            source_node.attributes['function_name'] = function_name.strip()
+        else:
+            source_node.attributes['function_name'] = ''
+            
         return source_node
     
     def _parse_struct_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
