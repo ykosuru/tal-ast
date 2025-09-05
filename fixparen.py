@@ -95,7 +95,7 @@ def classify_issues(nodes, lines):
     parent_node_types = {
         'program', 'procedure', 'parameters', 'local_declarations', 'statements',
         'var_decl', 'assignment', 'case_stmt', 'if_stmt', 'while_stmt', 'for_stmt',
-        'return_stmt', 'expression'
+        'return_stmt', 'expression', 'statement'  # FIXED: Added 'statement' as it can have operator children
     }
     
     # HARDCODED: Define leaf node types that should be self-contained
