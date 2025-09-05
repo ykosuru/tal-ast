@@ -531,98 +531,10 @@ class EnhancedTALParser:
         return proc_node
 
     
-    def _parse_procedure_body_rich_old(self, proc_lines: List[str], local_decls_node: tal_proc_parser.TALNode, statements_node: tal_proc_parser.TALNode, start_line_num: int):
-        """
-        Parse procedure body lines with comprehensive AST generation.
-        
-        This method processes each line of a procedure body, determining whether
-        it represents a local declaration or an executable statement, and creates
-        appropriate rich AST nodes with detailed metadata.
-        
-        Args:
-            proc_lines: Lines of code within the procedure body
-            local_decls_node: AST node for local declarations
-            statements_node: AST node for executable statements
-            start_line_num: Starting line number for location tracking
-        """
-        in_statements = False
-        found_begin = False
-        
-        for line_idx, line_text in enumerate(proc_lines):
-            line_stripped = line_text.strip()
-            
-            # Skip empty lines
-            if not line_stripped:
-                continue
-            
-            # Handle comment lines (starting with !)
-            if line_stripped.startswith('!'):
-                location = tal_proc_parser.SourceLocation(self.filename, start_line_num + line_idx, 1)
-                comment_node = tal_proc_parser.TALNode('comment', value=line_stripped[1:].strip(), location=location)
-                if in_statements:
-                    statements_node.add_child(comment_node)
-                else:
-                    local_decls_node.add_child(comment_node)
-                continue
-            
-            # Extract and handle inline comments
-            comment_pos = line_stripped.find('!')
-            if comment_pos >= 0:
-                code_part = line_stripped[:comment_pos].strip()
-                # Create separate node for inline comment
-                inline_comment = line_stripped[comment_pos+1:].strip()
-                if inline_comment:
-                    location = tal_proc_parser.SourceLocation(self.filename, start_line_num + line_idx, comment_pos + 1)
-                    comment_node = tal_proc_parser.TALNode('comment', value=inline_comment, location=location)
-                    if in_statements:
-                        statements_node.add_child(comment_node)
-                    else:
-                        local_decls_node.add_child(comment_node)
-            else:
-                code_part = line_stripped
-            
-            # Skip lines with no executable content
-            if not code_part:
-                continue
-            
-            location = tal_proc_parser.SourceLocation(self.filename, start_line_num + line_idx, 1)
-            
-            # Skip the PROC declaration line (should already be handled)
-            if re.search(r'\bPROC\b', code_part, re.IGNORECASE):
-                continue
-            
-            # Detect BEGIN - switches from declarations to statements
-            if re.search(r'\bBEGIN\b', code_part, re.IGNORECASE):
-                found_begin = True
-                in_statements = True
-                continue
-            
-            # Detect END - stops parsing procedure body
-            if re.search(r'\bEND\b', code_part, re.IGNORECASE) and found_begin:
-                break
-            
-            # Parse the line using comprehensive rich parsing methods
-            try:
-                node = self._parse_body_line_comprehensive(code_part, location, in_statements)
-                if node:
-                    # Determine whether this belongs in declarations or statements
-                    if in_statements or self._is_statement_node(node):
-                        statements_node.add_child(node)
-                    else:
-                        local_decls_node.add_child(node)
-            except Exception as e:
-                # Log parsing errors but continue processing
-                self.errors.append(tal_proc_parser.ParseError(
-                    f"Error parsing line: {e}",
-                    location,
-                    tal_proc_parser.ErrorSeverity.WARNING,
-                    error_code="E100"
-                ))
-
     def _parse_procedure_body_rich(self, proc_lines: List[str], local_decls_node: tal_proc_parser.TALNode, statements_node: tal_proc_parser.TALNode, start_line_num: int):
         """
         Parse procedure body lines with comprehensive AST generation.
-        Now handles multi-line statements like IF conditions.
+        Now handles multi-line statements like IF conditions and SUBPROC declarations.
         """
         in_statements = False
         found_begin = False
@@ -687,6 +599,23 @@ class EnhancedTALParser:
             if re.search(r'\bEND\b', code_part, re.IGNORECASE) and found_begin:
                 break
             
+            # Check for SUBPROC declarations - these can appear in either section
+            if self._is_subproc_declaration(code_part):
+                complete_subproc, lines_consumed = self._parse_subproc_declaration(proc_lines, i, start_line_num)
+                
+                if self.debug_mode:
+                    print(f"DEBUG: Parsed SUBPROC spanning {lines_consumed} lines")
+                
+                if complete_subproc:
+                    # SUBPROCs can appear in either local declarations or statements section
+                    if in_statements:
+                        statements_node.add_child(complete_subproc)
+                    else:
+                        local_decls_node.add_child(complete_subproc)
+                
+                i += lines_consumed
+                continue
+            
             # Check for multi-line statements
             if self._is_multiline_statement_start(code_part):
                 complete_statement, lines_consumed = self._parse_multiline_statement(proc_lines, i)
@@ -726,6 +655,174 @@ class EnhancedTALParser:
                 ))
             
             i += 1
+
+    def _is_subproc_declaration(self, line: str) -> bool:
+        """
+        Check if a line starts a SUBPROC declaration.
+        
+        Args:
+            line: Source code line to check
+            
+        Returns:
+            True if line starts a SUBPROC declaration
+        """
+        upper_line = line.upper().strip()
+        
+        # Check for SUBPROC with optional return type
+        if upper_line.startswith('SUBPROC '):
+            return True
+        elif any(upper_line.startswith(ret_type + ' SUBPROC ') for ret_type in 
+                ['INT', 'STRING', 'REAL', 'FIXED', 'UNSIGNED', 'BYTE', 'CHAR']):
+            return True
+        
+        return False
+
+    def _parse_subproc_declaration(self, proc_lines: List[str], start_index: int, start_line_num: int) -> Tuple[tal_proc_parser.TALNode, int]:
+        """
+        Parse a complete SUBPROC declaration including its body.
+        
+        Args:
+            proc_lines: Lines within the procedure
+            start_index: Index of the SUBPROC declaration line
+            start_line_num: Starting line number for location tracking
+            
+        Returns:
+            Tuple of (subproc_node, lines_consumed)
+        """
+        if start_index >= len(proc_lines):
+            return None, 1
+        
+        location = tal_proc_parser.SourceLocation(self.filename, start_line_num + start_index, 1)
+        
+        # Parse the SUBPROC declaration line
+        decl_line = proc_lines[start_index].strip()
+        subproc_node = self._parse_subproc_header(decl_line, location)
+        
+        lines_consumed = 1
+        found_begin = False
+        begin_count = 0
+        end_count = 0
+        
+        # Create nodes for SUBPROC body sections
+        local_decls_node = tal_proc_parser.TALNode('local_declarations', location=location)
+        statements_node = tal_proc_parser.TALNode('statements', location=location)
+        subproc_node.add_child(local_decls_node)
+        subproc_node.add_child(statements_node)
+        
+        # Parse SUBPROC body
+        for i in range(start_index + 1, len(proc_lines)):
+            line = proc_lines[i].strip()
+            
+            if not line or line.startswith('!'):
+                lines_consumed += 1
+                continue
+            
+            upper_line = line.upper()
+            
+            # Count BEGIN and END to handle nested structures
+            if 'BEGIN' in upper_line:
+                begin_count += upper_line.count('BEGIN')
+                if not found_begin:
+                    found_begin = True
+                lines_consumed += 1
+                continue
+            
+            if 'END' in upper_line:
+                end_count += upper_line.count('END')
+                lines_consumed += 1
+                
+                # If we've matched all BEGINs with ENDs, SUBPROC is complete
+                if found_begin and begin_count == end_count:
+                    break
+                continue
+            
+            # Parse body content
+            body_location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, 1)
+            
+            try:
+                # Determine if we're in declarations or statements section
+                in_statements = found_begin
+                node = self._parse_body_line_comprehensive(line, body_location, in_statements)
+                if node:
+                    if in_statements or self._is_statement_node(node):
+                        statements_node.add_child(node)
+                    else:
+                        local_decls_node.add_child(node)
+            except Exception as e:
+                self.errors.append(tal_proc_parser.ParseError(
+                    f"Error parsing SUBPROC body line: {e}",
+                    body_location,
+                    tal_proc_parser.ErrorSeverity.WARNING,
+                    error_code="E100"
+                ))
+            
+            lines_consumed += 1
+            
+            # Safety check
+            if lines_consumed > 200:
+                if self.debug_mode:
+                    print(f"WARNING: SUBPROC parsing consumed {lines_consumed} lines, stopping")
+                break
+        
+        return subproc_node, lines_consumed
+
+    def _parse_subproc_header(self, decl_line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse the SUBPROC declaration header line.
+        
+        Args:
+            decl_line: SUBPROC declaration line
+            location: Source location
+            
+        Returns:
+            AST node for the SUBPROC declaration
+        """
+        subproc_node = tal_proc_parser.TALNode('subproc', location=location, value=decl_line)
+        
+        # Parse SUBPROC header: [return_type] SUBPROC name(parameters);
+        parts = decl_line.split()
+        
+        # Determine return type and name
+        if parts[0].upper() == 'SUBPROC':
+            # No return type specified
+            subproc_node.attributes['return_type'] = 'void'
+            if len(parts) > 1:
+                name_part = parts[1]
+            else:
+                name_part = ""
+        else:
+            # Has return type
+            subproc_node.attributes['return_type'] = parts[0].upper()
+            if len(parts) > 2:
+                name_part = parts[2]
+            else:
+                name_part = ""
+        
+        # Extract SUBPROC name (remove parameters if present)
+        if '(' in name_part:
+            subproc_name = name_part[:name_part.find('(')]
+        else:
+            subproc_name = name_part.rstrip(';')
+        
+        subproc_node.name = subproc_name
+        subproc_node.attributes['subproc_name'] = subproc_name
+        
+        # Parse parameters if present
+        if '(' in decl_line and ')' in decl_line:
+            param_start = decl_line.find('(')
+            param_end = decl_line.find(')')
+            param_text = decl_line[param_start+1:param_end].strip()
+            
+            if param_text:
+                params_node = tal_proc_parser.TALNode('parameters', location=location)
+                # Simple parameter parsing - could be enhanced
+                param_list = [p.strip() for p in param_text.split(',') if p.strip()]
+                for param in param_list:
+                    param_node = tal_proc_parser.TALNode('parameter', name=param, location=location)
+                    params_node.add_child(param_node)
+                subproc_node.add_child(params_node)
+        
+        return subproc_node
 
     def _is_multiline_statement_start(self, line: str) -> bool:
         """
