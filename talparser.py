@@ -2740,6 +2740,251 @@ class EnhancedTALParser:
         
         return False
     
+    def _is_global_variable_declaration_start(self, line: str) -> bool:
+        """
+        Check if a line starts a global variable declaration that might span multiple lines.
+        
+        Args:
+            line: Source code line to check
+            
+        Returns:
+            True if line starts a global variable declaration
+        """
+        upper_line = line.upper().strip()
+        tal_types = ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT']
+        
+        # Check if line starts with a TAL data type (but not a procedure declaration)
+        for tal_type in tal_types:
+            if upper_line.startswith(tal_type + ' ') and 'PROC ' not in upper_line:
+                return True
+        
+        return False
+
+    def _parse_multiline_construct(self, lines: List[str], start_index: int, construct_type: str) -> Tuple[str, int]:
+        """
+        Parse multi-line constructs (LITERAL, DEFINE, variable declarations) by detecting continuation patterns.
+        
+        Args:
+            lines: All source lines
+            start_index: Index of the first line of the construct
+            construct_type: Type of construct ('LITERAL', 'DEFINE', or variable type like 'INT')
+            
+        Returns:
+            Tuple of (complete_construct_text, lines_consumed)
+        """
+        if start_index >= len(lines):
+            return "", 1
+        
+        current_line = lines[start_index].strip()
+        
+        # Validate that this line actually starts with the expected construct
+        if construct_type in ['LITERAL', 'DEFINE'] and not current_line.upper().startswith(construct_type.upper() + ' '):
+            return current_line, 1
+        elif construct_type in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT'] and not current_line.upper().startswith(construct_type.upper() + ' '):
+            return current_line, 1
+        
+        # Start building the complete construct
+        complete_construct = current_line
+        lines_consumed = 1
+        
+        # Look ahead for continuation lines
+        for lookahead_index in range(start_index + 1, len(lines)):
+            next_line = lines[lookahead_index].strip()
+            
+            # Skip empty lines and comments
+            if not next_line or next_line.startswith('!'):
+                continue
+            
+            # Stop if we hit a clear top-level construct
+            if self._is_top_level_construct_simple(next_line):
+                break
+            
+            # For LITERAL and DEFINE, check for completion patterns
+            if construct_type in ['LITERAL', 'DEFINE']:
+                # Stop if we hit another LITERAL, DEFINE, or other declaration
+                upper_next = next_line.upper()
+                if (upper_next.startswith('LITERAL ') or 
+                    upper_next.startswith('DEFINE ') or
+                    upper_next.startswith('CONST ') or
+                    upper_next.startswith('EQU ') or
+                    any(upper_next.startswith(t + ' ') for t in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT'])):
+                    break
+            
+            # For variable type declarations, check for new type declarations
+            elif construct_type in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT']:
+                upper_next = next_line.upper()
+                if (any(upper_next.startswith(t + ' ') for t in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT']) or
+                    upper_next.startswith('LITERAL ') or
+                    upper_next.startswith('DEFINE ') or
+                    upper_next.startswith('CONST ') or
+                    upper_next.startswith('EQU ')):
+                    break
+            
+            # Check if this looks like a continuation of the current construct
+            if self._should_continue_construct(complete_construct, next_line, construct_type):
+                # Remove continuation character if present
+                if complete_construct.rstrip().endswith('_'):
+                    complete_construct = complete_construct.rstrip()[:-1]
+                elif complete_construct.rstrip().endswith('\\'):
+                    complete_construct = complete_construct.rstrip()[:-1]
+                
+                # Add the continuation line
+                if complete_construct.endswith(' '):
+                    complete_construct += next_line
+                else:
+                    complete_construct += ' ' + next_line
+                
+                lines_consumed += 1
+            else:
+                break
+        
+        return complete_construct, lines_consumed
+
+    def _should_continue_construct(self, current_construct: str, next_line: str, construct_type: str) -> bool:
+        """
+        Determine if the next line should continue the current construct.
+        
+        Args:
+            current_construct: The construct text accumulated so far
+            next_line: The next line to consider
+            construct_type: Type of construct ('LITERAL', 'DEFINE', or variable type)
+            
+        Returns:
+            True if next_line should be appended to current_construct
+        """
+        # Explicit continuation characters
+        if (current_construct.rstrip().endswith('_') or 
+            current_construct.rstrip().endswith('\\')):
+            return True
+        
+        # Unclosed quotes
+        if self._has_unclosed_quotes(current_construct):
+            return True
+        
+        # Unclosed parentheses/brackets
+        if self._has_unclosed_parentheses(current_construct):
+            return True
+        
+        # For LITERAL and DEFINE declarations, check for incomplete assignments
+        if construct_type in ['LITERAL', 'DEFINE']:
+            # If current line ends with comma, it likely continues
+            if current_construct.rstrip().endswith(','):
+                return True
+            
+            # If next line starts with comma or looks like a continuation assignment
+            if (next_line.strip().startswith(',') or 
+                ('=' in next_line and not any(next_line.upper().startswith(kw) for kw in 
+                                            ['LITERAL ', 'DEFINE ', 'CONST ', 'EQU ']))):
+                return True
+        
+        # For variable type declarations (INT, STRING, etc.), check for continuation patterns
+        elif construct_type in ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT']:
+            # If current line ends with comma, it continues
+            if current_construct.rstrip().endswith(','):
+                return True
+            
+            # If next line starts with comma or looks like variable continuation
+            if (next_line.strip().startswith(',') or 
+                (':=' in next_line and not any(next_line.upper().startswith(kw + ' ') for kw in 
+                                            ['INT', 'STRING', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED', 'STRUCT']))):
+                return True
+            
+            # If next line looks like an identifier (continuation of variable list)
+            next_stripped = next_line.strip()
+            if (not any(next_line.upper().startswith(kw + ' ') for kw in 
+                    ['INT', 'STRING', 'REAL', 'FIXED', 'LITERAL', 'DEFINE', 'CONST', 'EQU']) and
+                re.match(r'^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?(\s*:=.*)?[,;]?$', next_stripped)):
+                return True
+        
+        # Significant indentation suggests continuation
+        if (len(next_line) - len(next_line.lstrip()) > 4 and
+            not self._looks_like_independent_statement(next_line)):
+            return True
+        
+        return False
+
+    def _is_top_level_construct_simple(self, line: str) -> bool:
+        """
+        Simple check for top-level constructs that should terminate construct continuation.
+        """
+        upper_line = line.upper().strip()
+        
+        # Procedure declarations - PROC can stand alone or have return types
+        if 'PROC ' in upper_line:
+            # Check if it's actually a procedure declaration
+            words = upper_line.split()
+            for i, word in enumerate(words):
+                if word == 'PROC':
+                    # Make sure PROC is at the start or after a return type
+                    if i == 0:  # PROC at start
+                        return True
+                    elif i == 1 and words[0] in ['INT', 'STRING', 'REAL', 'FIXED', 'UNSIGNED', 'BYTE', 'CHAR']:
+                        return True
+                    break
+        
+        # Common global declarations
+        global_starts = [
+            'STRUCT ', 'TEMPLATE ', 'SUBTYPE ', 'EXTERNAL ', 'FORWARD ',
+            'LITERAL ', 'DEFINE ', 'CONST ', 'EQU ', 'NAME ', 'USE ', 'INCLUDE ',
+            'SOURCE ', 'BLOCK '
+        ]
+        
+        if any(upper_line.startswith(start) for start in global_starts):
+            return True
+        
+        # Variable declarations (type at start) - only if not followed by PROC
+        type_starts = ['INT ', 'STRING ', 'REAL ', 'FIXED ', 'BYTE ', 'CHAR ', 'UNSIGNED ']
+        if any(upper_line.startswith(start) for start in type_starts):
+            # Make sure it's not a procedure declaration
+            if 'PROC ' not in upper_line:
+                return True
+        
+        return False
+
+    def _looks_like_independent_statement(self, line: str) -> bool:
+        """
+        Check if a line looks like it starts an independent statement
+        rather than a continuation.
+        """
+        stripped = line.strip()
+        upper_line = stripped.upper()
+        
+        # Assignment statements
+        if ':=' in stripped:
+            return True
+        
+        # Control flow statements
+        control_keywords = ['IF ', 'WHILE ', 'FOR ', 'CASE ', 'SCAN ', 'RSCAN ']
+        if any(upper_line.startswith(kw) for kw in control_keywords):
+            return True
+        
+        # Procedure calls
+        if upper_line.startswith('CALL ') or stripped.startswith('$'):
+            return True
+        
+        # Returns and jumps
+        flow_keywords = ['RETURN', 'GOTO ', 'STOP', 'ABORT']
+        if any(upper_line.startswith(kw) for kw in flow_keywords):
+            return True
+        
+        # Label definitions
+        if stripped.endswith(':') and not any(op in stripped for op in [':=', "':='"]):
+            return True
+        
+        return False
+
+    def _has_unclosed_quotes(self, text: str) -> bool:
+        """Check if text has unclosed quotes."""
+        single_quote_count = text.count("'") - text.count("\\'")
+        double_quote_count = text.count('"') - text.count('\\"')
+        return (single_quote_count % 2 != 0) or (double_quote_count % 2 != 0)
+
+    def _has_unclosed_parentheses(self, text: str) -> bool:
+        """Check if text has unclosed parentheses or brackets."""
+        paren_count = text.count('(') - text.count(')')
+        bracket_count = text.count('[') - text.count(']')
+        return paren_count != 0 or bracket_count != 0
+    
     def _parse_global_variable_declaration_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
         """
         Parse global variable declarations with full type analysis.
