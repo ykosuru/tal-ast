@@ -1812,7 +1812,7 @@ class EnhancedTALParser:
         
         This method processes all lines that are not part of procedure bodies,
         applying rich parsing to global declarations, directives, and other
-        top-level constructs.
+        top-level constructs. Now includes proper nested structure handling.
         
         Args:
             lines: All source code lines
@@ -1843,26 +1843,158 @@ class EnhancedTALParser:
         if self.debug_mode:
             print(f"DEBUG: Final proc_lines = {sorted(proc_lines)}")
         
-        # Process each line that's not part of a procedure
-        for i, line in enumerate(lines, 1):
-            if i in proc_lines:
+        # Process lines with multi-line support and nested structure handling
+        i = 0
+        while i < len(lines):
+            line_num = i + 1
+            
+            if line_num in proc_lines:
                 if self.debug_mode:
-                    print(f"DEBUG: Skipping line {i} (in proc_lines): '{line.strip()}'")
+                    print(f"DEBUG: Skipping line {line_num} (in proc_lines): '{lines[i].strip()}'")
+                i += 1
                 continue
-    
-            line_stripped = line.strip()
+
+            line_stripped = lines[i].strip()
             if not line_stripped:
+                i += 1
                 continue
             
-            location = tal_proc_parser.SourceLocation(self.filename, i, 1)
+            location = tal_proc_parser.SourceLocation(self.filename, line_num, 1)
             
             # Handle global comments
             if line_stripped.startswith('!'):
                 comment_node = tal_proc_parser.TALNode('comment', value=line_stripped[1:].strip(), location=location)
                 program.add_child(comment_node)
+                i += 1
                 continue
             
-            # Parse global lines with comprehensive analysis
+            # Check for nested structures (STRUCT with BEGIN...END blocks)
+            if line_stripped.upper().startswith('STRUCT ') and self._has_begin_block(lines, i):
+                complete_struct, lines_consumed = self._parse_nested_struct(lines, i)
+                
+                if self.debug_mode:
+                    print(f"DEBUG: Parsed nested STRUCT spanning {lines_consumed} lines")
+                
+                # Process the complete nested structure
+                if complete_struct:
+                    try:
+                        node = self._parse_nested_struct_comprehensive(complete_struct, location)
+                        if node:
+                            program.add_child(node)
+                    except Exception as e:
+                        self.errors.append(tal_proc_parser.ParseError(
+                            f"Error parsing nested STRUCT: {e}",
+                            location,
+                            tal_proc_parser.ErrorSeverity.WARNING,
+                            error_code="E200"
+                        ))
+                i += lines_consumed
+                continue
+            
+            # Check for multi-line directives (starting with ?)
+            elif line_stripped.upper().startswith('?'):
+                complete_directive, lines_consumed = self._parse_multiline_construct(lines, i, '?')
+                
+                if self.debug_mode:
+                    if lines_consumed > 1:
+                        print(f"DEBUG: Combined multi-line directive: {complete_directive}")
+                    else:
+                        print(f"DEBUG: Single-line directive: {complete_directive}")
+                
+                # Process the directive
+                if complete_directive:
+                    try:
+                        node = self._parse_global_line_comprehensive(complete_directive, location)
+                        if node:
+                            program.add_child(node)
+                    except Exception as e:
+                        self.errors.append(tal_proc_parser.ParseError(
+                            f"Error parsing directive: {e}",
+                            location,
+                            tal_proc_parser.ErrorSeverity.WARNING,
+                            error_code="E200"
+                        ))
+                i += lines_consumed
+                continue
+            
+            # Check for multi-line LITERAL declarations
+            elif line_stripped.upper().startswith('LITERAL '):
+                complete_literal, lines_consumed = self._parse_multiline_construct(lines, i, 'LITERAL')
+                
+                if self.debug_mode:
+                    if lines_consumed > 1:
+                        print(f"DEBUG: Combined multi-line LITERAL: {complete_literal}")
+                    else:
+                        print(f"DEBUG: Single-line LITERAL: {complete_literal}")
+                
+                # Process the literal declaration
+                if complete_literal:
+                    try:
+                        node = self._parse_global_line_comprehensive(complete_literal, location)
+                        if node:
+                            program.add_child(node)
+                    except Exception as e:
+                        self.errors.append(tal_proc_parser.ParseError(
+                            f"Error parsing LITERAL declaration: {e}",
+                            location,
+                            tal_proc_parser.ErrorSeverity.WARNING,
+                            error_code="E200"
+                        ))
+                i += lines_consumed
+                continue
+            
+            # Check for multi-line DEFINE declarations
+            elif line_stripped.upper().startswith('DEFINE '):
+                complete_define, lines_consumed = self._parse_multiline_construct(lines, i, 'DEFINE')
+                
+                if self.debug_mode:
+                    if lines_consumed > 1:
+                        print(f"DEBUG: Combined multi-line DEFINE: {complete_define}")
+                
+                # Process the define declaration
+                if complete_define:
+                    try:
+                        node = self._parse_global_line_comprehensive(complete_define, location)
+                        if node:
+                            program.add_child(node)
+                    except Exception as e:
+                        self.errors.append(tal_proc_parser.ParseError(
+                            f"Error parsing DEFINE declaration: {e}",
+                            location,
+                            tal_proc_parser.ErrorSeverity.WARNING,
+                            error_code="E200"
+                        ))
+                i += lines_consumed
+                continue
+            
+            # Check for multi-line global variable declarations (INT, STRING, REAL, etc.)
+            elif self._is_global_variable_declaration_start(line_stripped):
+                var_type = line_stripped.split()[0].upper()
+                complete_var_decl, lines_consumed = self._parse_multiline_construct(lines, i, var_type)
+                
+                if self.debug_mode:
+                    if lines_consumed > 1:
+                        print(f"DEBUG: Combined multi-line {var_type} declaration: {complete_var_decl}")
+                    else:
+                        print(f"DEBUG: Single-line {var_type} declaration: {complete_var_decl}")
+                
+                # Process the variable declaration
+                if complete_var_decl:
+                    try:
+                        node = self._parse_global_line_comprehensive(complete_var_decl, location)
+                        if node:
+                            program.add_child(node)
+                    except Exception as e:
+                        self.errors.append(tal_proc_parser.ParseError(
+                            f"Error parsing {var_type} declaration: {e}",
+                            location,
+                            tal_proc_parser.ErrorSeverity.WARNING,
+                            error_code="E200"
+                        ))
+                i += lines_consumed
+                continue
+            
+            # Parse single-line global constructs
             try:
                 node = self._parse_global_line_comprehensive(line_stripped, location)
                 if node:
@@ -1874,13 +2006,250 @@ class EnhancedTALParser:
                     tal_proc_parser.ErrorSeverity.WARNING,
                     error_code="E200"
                 ))
-    
+            
+            i += 1
+
+    def _has_begin_block(self, lines: List[str], start_index: int) -> bool:
+        """
+        Check if a STRUCT declaration has a BEGIN...END block (indicating nested structure).
+        
+        Args:
+            lines: All source lines
+            start_index: Index of the STRUCT line
+            
+        Returns:
+            True if this STRUCT has a BEGIN block
+        """
+        # Look ahead a few lines to see if there's a BEGIN
+        for i in range(start_index, min(start_index + 5, len(lines))):
+            line = lines[i].strip().upper()
+            if 'BEGIN' in line:
+                return True
+        return False
+
+    def _parse_nested_struct(self, lines: List[str], start_index: int) -> Tuple[str, int]:
+        """
+        Parse a nested STRUCT with BEGIN...END blocks, capturing the entire structure.
+        
+        Args:
+            lines: All source lines
+            start_index: Index of the STRUCT declaration line
+            
+        Returns:
+            Tuple of (complete_struct_text, lines_consumed)
+        """
+        if start_index >= len(lines):
+            return "", 1
+        
+        complete_struct = ""
+        lines_consumed = 0
+        begin_count = 0
+        end_count = 0
+        found_begin = False
+        
+        for i in range(start_index, len(lines)):
+            line = lines[i].strip()
+            
+            # Skip empty lines but count them
+            if not line:
+                lines_consumed += 1
+                complete_struct += "\n"
+                continue
+            
+            # Skip comments but include them
+            if line.startswith('!'):
+                lines_consumed += 1
+                complete_struct += line + "\n"
+                continue
+            
+            upper_line = line.upper()
+            
+            # Count BEGIN and END keywords
+            if 'BEGIN' in upper_line:
+                begin_count += upper_line.count('BEGIN')
+                found_begin = True
+            
+            if 'END' in upper_line:
+                end_count += upper_line.count('END')
+            
+            # Add line to the complete structure
+            if lines_consumed > 0:
+                complete_struct += " " + line
+            else:
+                complete_struct = line
+            
+            lines_consumed += 1
+            
+            # Stop when we've matched all BEGIN with END
+            if found_begin and begin_count > 0 and begin_count == end_count:
+                break
+            
+            # Safety check - don't consume too many lines
+            if lines_consumed > 100:
+                if self.debug_mode:
+                    print(f"WARNING: Struct parsing consumed {lines_consumed} lines, stopping")
+                break
+        
+        return complete_struct, lines_consumed
+
+    def _parse_nested_struct_comprehensive(self, struct_text: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse a complete nested STRUCT declaration into a comprehensive AST node.
+        
+        Args:
+            struct_text: Complete STRUCT declaration text including nested content
+            location: Source location
+            
+        Returns:
+            AST node representing the nested structure
+        """
+        struct_node = tal_proc_parser.TALNode('nested_struct_decl', location=location, value=struct_text)
+        
+        # Extract struct name from the declaration
+        lines = struct_text.split('\n')
+        first_line = lines[0].strip() if lines else struct_text
+        
+        # Parse the struct header (STRUCT name(*);)
+        parts = first_line.split()
+        if len(parts) >= 2:
+            struct_name = parts[1].rstrip('(*);')
+            struct_node.name = struct_name
+            struct_node.attributes['struct_name'] = struct_name
+        
+        # Check for template parameters
+        if '(' in first_line and ')' in first_line:
+            param_start = first_line.find('(')
+            param_end = first_line.find(')')
+            params = first_line[param_start+1:param_end]
+            if params.strip():
+                struct_node.attributes['template_params'] = params.strip()
+        
+        # Parse the body content between BEGIN and END
+        body_content = self._extract_struct_body(struct_text)
+        if body_content:
+            body_node = self._parse_struct_body(body_content, location)
+            if body_node:
+                struct_node.add_child(body_node)
+        
+        return struct_node
+
+    def _extract_struct_body(self, struct_text: str) -> str:
+        """
+        Extract the content between BEGIN and END from a struct declaration.
+        
+        Args:
+            struct_text: Complete struct declaration
+            
+        Returns:
+            Content between BEGIN and END keywords
+        """
+        upper_text = struct_text.upper()
+        begin_pos = upper_text.find('BEGIN')
+        end_pos = upper_text.rfind('END')
+        
+        if begin_pos != -1 and end_pos != -1 and end_pos > begin_pos:
+            # Find the actual positions in the original text
+            body_start = begin_pos + 5  # Skip "BEGIN"
+            body_end = end_pos
+            return struct_text[body_start:body_end].strip()
+        
+        return ""
+
+    def _parse_struct_body(self, body_content: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse the body content of a struct (between BEGIN and END).
+        
+        Args:
+            body_content: Content between BEGIN and END
+            location: Source location
+            
+        Returns:
+            AST node representing the struct body
+        """
+        body_node = tal_proc_parser.TALNode('struct_body', location=location, value=body_content)
+        
+        # Split body into lines and parse each declaration
+        lines = body_content.split('\n')
+        for line_text in lines:
+            line_stripped = line_text.strip()
+            if not line_stripped or line_stripped.startswith('!'):
+                continue
+            
+            # Parse field declarations within the struct
+            try:
+                field_node = self._parse_struct_field(line_stripped, location)
+                if field_node:
+                    body_node.add_child(field_node)
+            except Exception as e:
+                if self.debug_mode:
+                    print(f"DEBUG: Error parsing struct field '{line_stripped}': {e}")
+        
+        return body_node
+
+    def _parse_struct_field(self, field_line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
+        """
+        Parse individual field declarations within a struct body.
+        
+        Args:
+            field_line: Single field declaration line
+            location: Source location
+            
+        Returns:
+            AST node representing the struct field
+        """
+        field_line = field_line.rstrip(';')
+        upper_line = field_line.upper()
+        
+        # Handle nested struct declarations
+        if upper_line.startswith('STRUCT '):
+            field_node = tal_proc_parser.TALNode('nested_struct_field', location=location, value=field_line)
+            
+            parts = field_line.split()
+            if len(parts) >= 2:
+                field_name = parts[1].rstrip('(*);')
+                field_node.name = field_name
+                field_node.attributes['field_name'] = field_name
+                field_node.attributes['field_type'] = 'STRUCT'
+            
+            return field_node
+        
+        # Handle regular type declarations (STRING, INT, etc.)
+        elif any(upper_line.startswith(t + ' ') for t in ['STRING', 'INT', 'REAL', 'FIXED', 'BYTE', 'CHAR', 'UNSIGNED']):
+            field_node = tal_proc_parser.TALNode('struct_field', location=location, value=field_line)
+            
+            parts = field_line.split()
+            if len(parts) >= 2:
+                field_type = parts[0].upper()
+                field_name = parts[1].rstrip('[]:;')
+                
+                field_node.name = field_name
+                field_node.attributes['field_name'] = field_name
+                field_node.attributes['field_type'] = field_type
+                
+                # Check for array specification
+                if '[' in parts[1] and ']' in parts[1]:
+                    bracket_start = parts[1].find('[')
+                    bracket_end = parts[1].find(']')
+                    array_spec = parts[1][bracket_start+1:bracket_end]
+                    field_node.attributes['array_bounds'] = array_spec
+                    field_node.attributes['is_array'] = True
+            
+            return field_node
+        
+        # Fallback for other field types
+        else:
+            field_node = tal_proc_parser.TALNode('struct_field', location=location, value=field_line)
+            field_node.attributes['field_type'] = 'UNKNOWN'
+            return field_node
+        
     def _parse_global_line_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> Optional[tal_proc_parser.TALNode]:
         """
         Parse global-level constructs with comprehensive pattern matching.
         
         This method handles all top-level TAL constructs including compiler
         directives, module declarations, data structures, and global variables.
+        Note: STRUCT declarations with BEGIN...END blocks are handled separately
+        by the nested structure parser.
         
         Args:
             line: Global source line to parse
@@ -1953,10 +2322,6 @@ class EnhancedTALParser:
             node.attributes['module_name'] = name
             return node
             
-        # Structure definitions
-        elif upper_line.startswith('STRUCT '):
-            return self._parse_struct_declaration_comprehensive(line, location)
-            
         # Template definitions
         elif upper_line.startswith('TEMPLATE '):
             return self._parse_template_declaration_comprehensive(line, location)
@@ -2016,7 +2381,7 @@ class EnhancedTALParser:
                     global_node.add_child(func_node)
             
             return global_node
-    
+        
     # Comprehensive parsers for specific global constructs
     
     def _parse_page_directive_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation) -> tal_proc_parser.TALNode:
