@@ -619,81 +619,99 @@ class EnhancedTALParser:
                     error_code="E100"
                 ))
 
-   def _parse_procedure_body_rich(self, proc_lines: List[str], local_decls_node: tal_proc_parser.TALNode, statements_node: tal_proc_parser.TALNode, start_line_num: int):
-    """
-    Parse procedure body lines with comprehensive AST generation.
-    Now handles multi-line statements like IF conditions.
-    """
-    in_statements = False
-    found_begin = False
-    
-    i = 0
-    while i < len(proc_lines):
-        line_text = proc_lines[i]
-        line_stripped = line_text.strip()
+    def _parse_procedure_body_rich(self, proc_lines: List[str], local_decls_node: tal_proc_parser.TALNode, statements_node: tal_proc_parser.TALNode, start_line_num: int):
+        """
+        Parse procedure body lines with comprehensive AST generation.
+        Now handles multi-line statements like IF conditions.
+        """
+        in_statements = False
+        found_begin = False
         
-        # Skip empty lines
-        if not line_stripped:
-            i += 1
-            continue
-        
-        # Handle comment lines (starting with !)
-        if line_stripped.startswith('!'):
-            location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, 1)
-            comment_node = tal_proc_parser.TALNode('comment', value=line_stripped[1:].strip(), location=location)
-            if in_statements:
-                statements_node.add_child(comment_node)
-            else:
-                local_decls_node.add_child(comment_node)
-            i += 1
-            continue
-        
-        # Extract and handle inline comments
-        comment_pos = line_stripped.find('!')
-        if comment_pos >= 0:
-            code_part = line_stripped[:comment_pos].strip()
-            # Create separate node for inline comment
-            inline_comment = line_stripped[comment_pos+1:].strip()
-            if inline_comment:
-                location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, comment_pos + 1)
-                comment_node = tal_proc_parser.TALNode('comment', value=inline_comment, location=location)
+        i = 0
+        while i < len(proc_lines):
+            line_text = proc_lines[i]
+            line_stripped = line_text.strip()
+            
+            # Skip empty lines
+            if not line_stripped:
+                i += 1
+                continue
+            
+            # Handle comment lines (starting with !)
+            if line_stripped.startswith('!'):
+                location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, 1)
+                comment_node = tal_proc_parser.TALNode('comment', value=line_stripped[1:].strip(), location=location)
                 if in_statements:
                     statements_node.add_child(comment_node)
                 else:
                     local_decls_node.add_child(comment_node)
-        else:
-            code_part = line_stripped
-        
-        # Skip lines with no executable content
-        if not code_part:
-            i += 1
-            continue
-        
-        location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, 1)
-        
-        # Skip the PROC declaration line (should already be handled)
-        if re.search(r'\bPROC\b', code_part, re.IGNORECASE):
-            i += 1
-            continue
-        
-        # Detect BEGIN - switches from declarations to statements
-        if re.search(r'\bBEGIN\b', code_part, re.IGNORECASE):
-            found_begin = True
-            in_statements = True
-            i += 1
-            continue
-        
-        # Detect END - stops parsing procedure body
-        if re.search(r'\bEND\b', code_part, re.IGNORECASE) and found_begin:
-            break
-        
-        # Check for multi-line statements
-        if self._is_multiline_statement_start(code_part):
-            complete_statement, lines_consumed = self._parse_multiline_statement(proc_lines, i)
+                i += 1
+                continue
+            
+            # Extract and handle inline comments
+            comment_pos = line_stripped.find('!')
+            if comment_pos >= 0:
+                code_part = line_stripped[:comment_pos].strip()
+                # Create separate node for inline comment
+                inline_comment = line_stripped[comment_pos+1:].strip()
+                if inline_comment:
+                    location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, comment_pos + 1)
+                    comment_node = tal_proc_parser.TALNode('comment', value=inline_comment, location=location)
+                    if in_statements:
+                        statements_node.add_child(comment_node)
+                    else:
+                        local_decls_node.add_child(comment_node)
+            else:
+                code_part = line_stripped
+            
+            # Skip lines with no executable content
+            if not code_part:
+                i += 1
+                continue
+            
             location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, 1)
             
+            # Skip the PROC declaration line (should already be handled)
+            if re.search(r'\bPROC\b', code_part, re.IGNORECASE):
+                i += 1
+                continue
+            
+            # Detect BEGIN - switches from declarations to statements
+            if re.search(r'\bBEGIN\b', code_part, re.IGNORECASE):
+                found_begin = True
+                in_statements = True
+                i += 1
+                continue
+            
+            # Detect END - stops parsing procedure body
+            if re.search(r'\bEND\b', code_part, re.IGNORECASE) and found_begin:
+                break
+            
+            # Check for multi-line statements
+            if self._is_multiline_statement_start(code_part):
+                complete_statement, lines_consumed = self._parse_multiline_statement(proc_lines, i)
+                location = tal_proc_parser.SourceLocation(self.filename, start_line_num + i, 1)
+                
+                try:
+                    node = self._parse_body_line_comprehensive(complete_statement, location, in_statements)
+                    if node:
+                        if in_statements or self._is_statement_node(node):
+                            statements_node.add_child(node)
+                        else:
+                            local_decls_node.add_child(node)
+                except Exception as e:
+                    self.errors.append(tal_proc_parser.ParseError(
+                        f"Error parsing multi-line statement: {e}",
+                        location,
+                        tal_proc_parser.ErrorSeverity.WARNING,
+                        error_code="E100"
+                    ))
+                i += lines_consumed
+                continue
+            
+            # Parse single-line constructs
             try:
-                node = self._parse_body_line_comprehensive(complete_statement, location, in_statements)
+                node = self._parse_body_line_comprehensive(code_part, location, in_statements)
                 if node:
                     if in_statements or self._is_statement_node(node):
                         statements_node.add_child(node)
@@ -701,183 +719,165 @@ class EnhancedTALParser:
                         local_decls_node.add_child(node)
             except Exception as e:
                 self.errors.append(tal_proc_parser.ParseError(
-                    f"Error parsing multi-line statement: {e}",
+                    f"Error parsing line: {e}",
                     location,
                     tal_proc_parser.ErrorSeverity.WARNING,
                     error_code="E100"
                 ))
-            i += lines_consumed
-            continue
-        
-        # Parse single-line constructs
-        try:
-            node = self._parse_body_line_comprehensive(code_part, location, in_statements)
-            if node:
-                if in_statements or self._is_statement_node(node):
-                    statements_node.add_child(node)
-                else:
-                    local_decls_node.add_child(node)
-        except Exception as e:
-            self.errors.append(tal_proc_parser.ParseError(
-                f"Error parsing line: {e}",
-                location,
-                tal_proc_parser.ErrorSeverity.WARNING,
-                error_code="E100"
-            ))
-        
-        i += 1
+            
+            i += 1
 
-def _is_multiline_statement_start(self, line: str) -> bool:
-    """
-    Check if a line starts a statement that might span multiple lines.
-    """
-    upper_line = line.upper().strip()
-    
-    # Statements that commonly span multiple lines
-    multiline_starters = ['IF ', 'WHILE ', 'FOR ', 'CASE ', 'SCAN ', 'RSCAN ']
-    
-    if any(upper_line.startswith(starter) for starter in multiline_starters):
-        return True
-    
-    # Check for unbalanced parentheses indicating continuation
-    if self._has_unbalanced_parentheses(line):
-        return True
-    
-    return False
-
-def _parse_multiline_statement(self, proc_lines: List[str], start_index: int) -> Tuple[str, int]:
-    """
-    Parse statements that span multiple lines by checking for balanced parentheses
-    and statement completion.
-    """
-    if start_index >= len(proc_lines):
-        return "", 1
-    
-    current_statement = proc_lines[start_index].strip()
-    lines_consumed = 1
-    
-    # Remove any inline comments for parsing logic
-    if '!' in current_statement:
-        current_statement = current_statement[:current_statement.find('!')].strip()
-    
-    # Continue until we have balanced parentheses and logical completion
-    while start_index + lines_consumed < len(proc_lines):
-        next_line = proc_lines[start_index + lines_consumed].strip()
+    def _is_multiline_statement_start(self, line: str) -> bool:
+        """
+        Check if a line starts a statement that might span multiple lines.
+        """
+        upper_line = line.upper().strip()
         
-        # Skip empty lines
-        if not next_line:
+        # Statements that commonly span multiple lines
+        multiline_starters = ['IF ', 'WHILE ', 'FOR ', 'CASE ', 'SCAN ', 'RSCAN ']
+        
+        if any(upper_line.startswith(starter) for starter in multiline_starters):
+            return True
+        
+        # Check for unbalanced parentheses indicating continuation
+        if self._has_unbalanced_parentheses(line):
+            return True
+        
+        return False
+
+    def _parse_multiline_statement(self, proc_lines: List[str], start_index: int) -> Tuple[str, int]:
+        """
+        Parse statements that span multiple lines by checking for balanced parentheses
+        and statement completion.
+        """
+        if start_index >= len(proc_lines):
+            return "", 1
+        
+        current_statement = proc_lines[start_index].strip()
+        lines_consumed = 1
+        
+        # Remove any inline comments for parsing logic
+        if '!' in current_statement:
+            current_statement = current_statement[:current_statement.find('!')].strip()
+        
+        # Continue until we have balanced parentheses and logical completion
+        while start_index + lines_consumed < len(proc_lines):
+            next_line = proc_lines[start_index + lines_consumed].strip()
+            
+            # Skip empty lines
+            if not next_line:
+                lines_consumed += 1
+                continue
+            
+            # Remove inline comments
+            if '!' in next_line:
+                next_line = next_line[:next_line.find('!')].strip()
+            
+            if not next_line:
+                lines_consumed += 1
+                continue
+            
+            # Stop if we hit a clear new statement
+            if self._is_new_statement_start(next_line):
+                break
+            
+            # Add the continuation line
+            current_statement += ' ' + next_line
             lines_consumed += 1
-            continue
+            
+            # Check if statement is now complete
+            if self._is_statement_complete(current_statement):
+                break
         
-        # Remove inline comments
-        if '!' in next_line:
-            next_line = next_line[:next_line.find('!')].strip()
-        
-        if not next_line:
-            lines_consumed += 1
-            continue
-        
-        # Stop if we hit a clear new statement
-        if self._is_new_statement_start(next_line):
-            break
-        
-        # Add the continuation line
-        current_statement += ' ' + next_line
-        lines_consumed += 1
-        
-        # Check if statement is now complete
-        if self._is_statement_complete(current_statement):
-            break
-    
-    return current_statement, lines_consumed
+        return current_statement, lines_consumed
 
-def _has_unbalanced_parentheses(self, text: str) -> bool:
-    """
-    Check if text has unbalanced parentheses, indicating it continues on next line.
-    Properly handles nested parentheses and quoted strings.
-    """
-    paren_count = 0
-    in_quotes = False
-    quote_char = None
-    
-    for i, char in enumerate(text):
-        # Handle quotes
-        if char in '"\'':
-            if not in_quotes:
-                in_quotes = True
-                quote_char = char
-            elif char == quote_char and (i == 0 or text[i-1] != '\\'):
-                in_quotes = False
-                quote_char = None
+    def _has_unbalanced_parentheses(self, text: str) -> bool:
+        """
+        Check if text has unbalanced parentheses, indicating it continues on next line.
+        Properly handles nested parentheses and quoted strings.
+        """
+        paren_count = 0
+        in_quotes = False
+        quote_char = None
         
-        # Count parentheses only when not in quotes
-        elif not in_quotes:
-            if char == '(':
-                paren_count += 1
-            elif char == ')':
-                paren_count -= 1
-    
-    return paren_count != 0
+        for i, char in enumerate(text):
+            # Handle quotes
+            if char in '"\'':
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = char
+                elif char == quote_char and (i == 0 or text[i-1] != '\\'):
+                    in_quotes = False
+                    quote_char = None
+            
+            # Count parentheses only when not in quotes
+            elif not in_quotes:
+                if char == '(':
+                    paren_count += 1
+                elif char == ')':
+                    paren_count -= 1
+        
+        return paren_count != 0
 
-def _is_statement_complete(self, statement: str) -> bool:
-    """
-    Check if a statement appears to be complete based on TAL syntax.
-    """
-    upper_stmt = statement.upper().strip()
-    
-    # IF statements need THEN
-    if upper_stmt.startswith('IF '):
-        return ' THEN' in upper_stmt and self._has_balanced_parentheses(statement)
-    
-    # WHILE statements need DO
-    elif upper_stmt.startswith('WHILE '):
-        return ' DO' in upper_stmt and self._has_balanced_parentheses(statement)
-    
-    # FOR statements need DO
-    elif upper_stmt.startswith('FOR '):
-        return ' DO' in upper_stmt and self._has_balanced_parentheses(statement)
-    
-    # CASE statements need OF
-    elif upper_stmt.startswith('CASE '):
-        return ' OF' in upper_stmt and self._has_balanced_parentheses(statement)
-    
-    # General check for balanced parentheses
-    else:
-        return self._has_balanced_parentheses(statement)
+    def _is_statement_complete(self, statement: str) -> bool:
+        """
+        Check if a statement appears to be complete based on TAL syntax.
+        """
+        upper_stmt = statement.upper().strip()
+        
+        # IF statements need THEN
+        if upper_stmt.startswith('IF '):
+            return ' THEN' in upper_stmt and self._has_balanced_parentheses(statement)
+        
+        # WHILE statements need DO
+        elif upper_stmt.startswith('WHILE '):
+            return ' DO' in upper_stmt and self._has_balanced_parentheses(statement)
+        
+        # FOR statements need DO
+        elif upper_stmt.startswith('FOR '):
+            return ' DO' in upper_stmt and self._has_balanced_parentheses(statement)
+        
+        # CASE statements need OF
+        elif upper_stmt.startswith('CASE '):
+            return ' OF' in upper_stmt and self._has_balanced_parentheses(statement)
+        
+        # General check for balanced parentheses
+        else:
+            return self._has_balanced_parentheses(statement)
 
-def _has_balanced_parentheses(self, text: str) -> bool:
-    """Check if all parentheses are balanced."""
-    return not self._has_unbalanced_parentheses(text)
+    def _has_balanced_parentheses(self, text: str) -> bool:
+        """Check if all parentheses are balanced."""
+        return not self._has_unbalanced_parentheses(text)
 
-def _is_new_statement_start(self, line: str) -> bool:
-    """
-    Check if a line starts a new statement rather than continuing the previous one.
-    """
-    upper_line = line.upper().strip()
-    
-    # Clear statement starters
-    statement_starters = [
-        'IF ', 'WHILE ', 'FOR ', 'CASE ', 'SCAN ', 'RSCAN ', 'CALL ', 'RETURN',
-        'GOTO ', 'STOP', 'ABORT', 'ASSERT '
-    ]
-    
-    if any(upper_line.startswith(starter) for starter in statement_starters):
-        return True
-    
-    # Assignment statements
-    if ':=' in line:
-        return True
-    
-    # Label definitions
-    if line.strip().endswith(':') and ':=' not in line:
-        return True
-    
-    # Variable declarations
-    type_keywords = ['INT ', 'STRING ', 'REAL ', 'FIXED ', 'BYTE ', 'CHAR ', 'UNSIGNED ']
-    if any(upper_line.startswith(kw) for kw in type_keywords):
-        return True
-    
-    return False
+    def _is_new_statement_start(self, line: str) -> bool:
+        """
+        Check if a line starts a new statement rather than continuing the previous one.
+        """
+        upper_line = line.upper().strip()
+        
+        # Clear statement starters
+        statement_starters = [
+            'IF ', 'WHILE ', 'FOR ', 'CASE ', 'SCAN ', 'RSCAN ', 'CALL ', 'RETURN',
+            'GOTO ', 'STOP', 'ABORT', 'ASSERT '
+        ]
+        
+        if any(upper_line.startswith(starter) for starter in statement_starters):
+            return True
+        
+        # Assignment statements
+        if ':=' in line:
+            return True
+        
+        # Label definitions
+        if line.strip().endswith(':') and ':=' not in line:
+            return True
+        
+        # Variable declarations
+        type_keywords = ['INT ', 'STRING ', 'REAL ', 'FIXED ', 'BYTE ', 'CHAR ', 'UNSIGNED ']
+        if any(upper_line.startswith(kw) for kw in type_keywords):
+            return True
+        
+        return False
     
     def _parse_body_line_comprehensive(self, line: str, location: tal_proc_parser.SourceLocation, in_statements: bool) -> Optional[tal_proc_parser.TALNode]:
         """
