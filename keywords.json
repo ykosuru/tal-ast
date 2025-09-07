@@ -1,9 +1,9 @@
 [
   {
-    "keywords": "wire transfer,electronic transfer,funds transfer",
+    "keywords": "wire transfer,electronic transfer,funds transfer,domestic wire transfer,international wire transfer,telegraphic transfer,TT",
     "metadata": "payment-systems",
     "description": "Electronic transfer of funds between financial institutions via systems like Fedwire, SWIFT, or CHIPS",
-    "related_keywords": "domestic wire,international wire,high-value payment,same-day settlement,real-time payment,electronic funds transfer,EFT,wire payment,urgent payment,priority payment",
+    "related_keywords": "domestic wire,international wire,high-value payment,same-day settlement,real-time payment,electronic funds transfer,EFT,wire payment,urgent payment,priority payment,telegraphic transfer,TT,irrevocable transfer",
     "business_capability": [
       "Payment Initiation",
       "Payment Routing",
@@ -15,30 +15,395 @@
       "Inbound SWIFT",
       "Outbound SWIFT",
       "Inbound Fed",
-      "Outbound Fed"
+      "Outbound Fed",
+      "Domestic Wire Transfer",
+      "International Wire Transfer",
+      "Telegraphic Transfer"
     ]
   },
   {
-    "keywords": "debit party,debtor,payer,originator",
+    "keywords": "remittance transfer,consumer remittance,money transfer",
+    "metadata": "payment-systems",
+    "description": "Consumer-focused international wires, messaged via SWIFT and settled through networks like CHIPS",
+    "related_keywords": "remittance service,international remittance,consumer transfer,money service business,MSB,remittance provider",
+    "business_capability": [
+      "Remittance Transfer",
+      "Cross-Border Payment",
+      "Consumer Protection",
+      "CFPB Compliance"
+    ]
+  },
+  {
+    "keywords": "ACH transfer,batch processing,automated clearing house",
+    "metadata": "payment-systems",
+    "description": "Batch alternative to wires; contrasts with Fedwire/CHIPS real-time processing but can integrate for hybrid settlements",
+    "related_keywords": "ACH payment,batch settlement,automated transfer,clearing house,NACHA",
+    "business_capability": [
+      "ACH Processing",
+      "Batch Processing",
+      "Payment Processing"
+    ]
+  },
+  {
+    "keywords": "real-time gross settlement,RTGS,immediate settlement",
+    "metadata": "settlement-methods",
+    "description": "Fedwire's core method for immediate, individual settlements",
+    "related_keywords": "real-time settlement,gross settlement,immediate processing,individual settlement,RTGS system",
+    "business_capability": [
+      "RTGS Processing",
+      "Real-Time Settlement",
+      "Immediate Processing"
+    ]
+  },
+  {
+    "keywords": "net settlement,multilateral netting,bilateral netting",
+    "metadata": "settlement-methods", 
+    "description": "CHIPS' primary approach, batching and offsetting obligations before final Fedwire settlement",
+    "related_keywords": "netting process,settlement netting,obligation offset,batch settlement,clearing netting",
+    "business_capability": [
+      "Net Settlement",
+      "Multilateral Netting",
+      "Bilateral Netting",
+      "Settlement Optimization"
+    ]
+  },
+  {
+    "keywords": "cover payment,cover payments,MT202COV,pacs.009,two-part method",
+    "metadata": "payment-types",
+    "description": "Two-part method: detailed customer info via serial MT-103 to beneficiary, plus cover MT-202 for bank-to-bank settlement",
+    "related_keywords": "covered wire,cover arrangement,correspondent cover,covering payment,indirect payment,two-step payment,nostro cover,cover instruction,covering bank payment,correspondent funding",
+    "business_capability": [
+      "Cover Payments",
+      "Cross-Border Payment",
+      "Two-Part Settlement"
+    ]
+  },
+  {
+    "keywords": "serial payment,serial payment method,end-to-end transfer",
+    "metadata": "payment-types",
+    "description": "Full transaction details passed end-to-end via SWIFT (e.g., MT-103 chain), contrasting cover payments",
+    "related_keywords": "serial transfer,direct payment,end-to-end processing,transparent transfer,full detail transfer",
+    "business_capability": [
+      "Serial Payment",
+      "End-to-End Processing",
+      "Transparent Transfer"
+    ]
+  },
+  {
+    "keywords": "correspondent relationship,correspondent banking,nostro account,vostro account",
+    "metadata": "banking-network",
+    "description": "Bank-to-bank arrangements enabling SWIFT messaging and CHIPS/Fedwire settlements",
+    "related_keywords": "correspondent banking,correspondent relationship,agent bank,intermediary financial institution,transit bank,routing bank,covering bank,clearing bank,correspondent agreement,banking network,nostro vostro,correspondent account",
+    "business_capability": [
+      "Correspondent Banking",
+      "Nostro Account Management",
+      "Vostro Account Management",
+      "Banking Relationships",
+      "Intermediary Banks",
+      "Correspondent Banks",
+      "Payment Routing",
+      "Cover Payments"
+    ]
+  },
+  {
+    "keywords": "debit party,debtor,payer,originator,sender,ultimate debtor",
     "metadata": "payment-parties",
     "description": "Entity or individual whose account is debited to initiate a wire transfer",
-    "related_keywords": "sender,remitter,ordering customer,ordering party,account holder,wire originator,payment initiator,source account,sending party,debit authorization",
+    "related_keywords": "sender,remitter,ordering customer,ordering party,account holder,wire originator,payment initiator,source account,sending party,debit authorization,underlying customer,actual originator,true originator",
     "business_capability": [
       "Debit Party Validation",
       "Debtor",
-      "Payment Initiation"
+      "Payment Initiation",
+      "Ultimate Debtor",
+      "Originator Validation"
     ]
   },
   {
-    "keywords": "credit party,creditor,payee,beneficiary",
+    "keywords": "credit party,creditor,payee,beneficiary,recipient,ultimate creditor",
     "metadata": "payment-parties",
     "description": "Entity or individual whose account receives funds in a wire transfer",
-    "related_keywords": "receiver,recipient,beneficiary customer,receiving party,destination account,credit beneficiary,final beneficiary,end recipient,payee account,credit authorization",
+    "related_keywords": "receiver,recipient,beneficiary customer,receiving party,destination account,credit beneficiary,final beneficiary,end recipient,payee account,credit authorization,underlying customer,actual beneficiary,true beneficiary,end customer,final customer",
     "business_capability": [
       "Credit Party Validation",
       "Creditor",
       "Beneficiary",
-      "Payment Processing"
+      "Payment Processing",
+      "Ultimate Creditor",
+      "Beneficiary Validation"
+    ]
+  },
+  {
+    "keywords": "fedwire,fedwire funds service,federal reserve wire",
+    "metadata": "payment-networks",
+    "description": "U.S. Federal Reserve's RTGS system for domestic high-value wires; settles via Reserve Bank accounts",
+    "related_keywords": "fed wire,federal reserve,RTGS system,reserve bank,domestic settlement,high-value transfer,fed system",
+    "business_capability": [
+      "Fedwire Processing",
+      "Federal Reserve Integration",
+      "RTGS Settlement",
+      "Domestic Wire Processing",
+      "Reserve Bank Settlement"
+    ]
+  },
+  {
+    "keywords": "SWIFT,society for worldwide interbank financial telecommunication,swift network",
+    "metadata": "payment-networks",
+    "description": "Global messaging network for secure instructions in wires; connects 8,100+ institutions in 200+ countries",
+    "related_keywords": "swift messaging,international messaging,secure messaging,global network,financial messaging,swift code,BIC code",
+    "business_capability": [
+      "SWIFT Messaging",
+      "International Messaging",
+      "Secure Messaging",
+      "Global Network Integration",
+      "Cross-Border Communication"
+    ]
+  },
+  {
+    "keywords": "CHIPS,clearing house interbank payments system,clearing house",
+    "metadata": "payment-networks",
+    "description": "Private U.S. system for large-value USD wires using multilateral netting with final settlement via Fedwire",
+    "related_keywords": "chips system,clearing house payments,high-value USD,multilateral netting,private network,large-value transfer",
+    "business_capability": [
+      "CHIPS Processing",
+      "High-Value USD Processing",
+      "Multilateral Netting",
+      "Private Network Settlement",
+      "Large-Value Transfer"
+    ]
+  },
+  {
+    "keywords": "SEPA,single euro payments area,euro payments",
+    "metadata": "payment-networks",
+    "description": "EU euro equivalent to CHIPS/Fedwire for cross-border euro payments",
+    "related_keywords": "european payments,euro area,sepa transfers,european union payments,single currency area",
+    "business_capability": [
+      "SEPA Processing",
+      "Euro Payment Processing",
+      "European Integration",
+      "Single Currency Processing"
+    ]
+  },
+  {
+    "keywords": "IBAN,international bank account number,structured account",
+    "metadata": "account-identification",
+    "description": "International account standard for routing in SWIFT networks; required for SEPA but optional in U.S.",
+    "related_keywords": "international account,structured account number,account identification,routing standard,bank account format",
+    "business_capability": [
+      "IBAN Processing",
+      "International Account Validation",
+      "Account Format Validation",
+      "Structured Account Processing"
+    ]
+  },
+  {
+    "keywords": "BIC,SWIFT code,bank identifier code,SWIFT BIC",
+    "metadata": "bank-identification",
+    "description": "8-11 character bank identifier essential for SWIFT routing, also used in CHIPS international wires",
+    "related_keywords": "bank identifier,swift identifier,financial institution code,routing code,bank code",
+    "business_capability": [
+      "BIC Processing",
+      "Bank Identification",
+      "SWIFT Routing",
+      "Financial Institution Validation"
+    ]
+  },
+  {
+    "keywords": "ABA routing number,routing number,transit number",
+    "metadata": "bank-identification",
+    "description": "U.S.-specific 9-digit identifier for Fedwire/CHIPS domestic transfers identifying Fed member banks",
+    "related_keywords": "ABA number,routing code,bank routing,transit code,federal routing,domestic routing",
+    "business_capability": [
+      "ABA Routing Processing",
+      "Domestic Bank Identification",
+      "Federal Member Validation",
+      "U.S. Bank Routing"
+    ]
+  },
+  {
+    "keywords": "CLS,continuous linked settlement,FX settlement",
+    "metadata": "fx-settlement",
+    "description": "Global FX settlement system integrating with CHIPS/Fedwire for risk reduction in currency wires",
+    "related_keywords": "foreign exchange settlement,currency settlement,fx risk reduction,settlement risk,PvP settlement",
+    "business_capability": [
+      "CLS Processing",
+      "FX Settlement",
+      "Currency Risk Management",
+      "Payment versus Payment",
+      "Settlement Risk Reduction"
+    ]
+  },
+  {
+    "keywords": "authorization,pre-settlement verification,funds verification",
+    "metadata": "payment-processing",
+    "description": "Pre-settlement verification; Fedwire/CHIPS confirm funds in real-time",
+    "related_keywords": "payment authorization,funds check,pre-settlement check,authorization process,payment approval",
+    "business_capability": [
+      "Payment Authorization",
+      "Pre-Settlement Verification",
+      "Funds Verification",
+      "Real-Time Authorization"
+    ]
+  },
+  {
+    "keywords": "settlement,final settlement,payment settlement,clearing",
+    "metadata": "payment-processing",
+    "description": "Final debiting/crediting; Fedwire provides immediate RTGS, CHIPS nets then settles via Fedwire",
+    "related_keywords": "final settlement,payment finality,settlement process,clearing process,transaction settlement",
+    "business_capability": [
+      "Payment Settlement",
+      "Final Settlement",
+      "Settlement Processing",
+      "Payment Finality",
+      "Clearing Processing"
+    ]
+  },
+  {
+    "keywords": "wire fees,outgoing fees,transfer fees,FX markup",
+    "metadata": "pricing-billing",
+    "description": "Fees for wire transfers including outgoing fees and FX markups for international transfers",
+    "related_keywords": "transfer costs,wire costs,international fees,FX fees,exchange rate markup,transaction fees",
+    "business_capability": [
+      "Wire Fee Processing",
+      "FX Fee Calculation",
+      "International Fee Management",
+      "Transfer Cost Calculation",
+      "Pricing",
+      "Fee Calculation"
+    ]
+  },
+  {
+    "keywords": "cut-off time,processing deadline,same-day cutoff",
+    "metadata": "operational-processes",
+    "description": "Fedwire/CHIPS cut-off times for same-day processing; SWIFT messages can be sent 24/7",
+    "related_keywords": "processing deadline,cutoff time,same-day processing,business hours,processing window",
+    "business_capability": [
+      "Cut-Off Management",
+      "Same-Day Processing",
+      "Processing Window Management",
+      "Business Hours Processing"
+    ]
+  },
+  {
+    "keywords": "OFAC,sanctions screening,prohibited transfer screening",
+    "metadata": "compliance-fraud",
+    "description": "Office of Foreign Assets Control screening for all Fedwire/CHIPS/SWIFT wires for sanctions compliance",
+    "related_keywords": "sanctions check,OFAC screening,prohibited parties,sanctions compliance,blocked persons,sanctions validate,ofac check,list screening,sanctions conformity",
+    "business_capability": [
+      "OFAC Screening",
+      "Sanctions Compliance",
+      "Prohibited Party Screening",
+      "Sanctions Screening"
+    ]
+  },
+  {
+    "keywords": "travel rule,BSA compliance,originator beneficiary data",
+    "metadata": "compliance-fraud",
+    "description": "Bank Secrecy Act mandate requiring originator/beneficiary details in SWIFT MT-103 or Fedwire messages",
+    "related_keywords": "BSA requirement,originator information,beneficiary information,AML compliance,customer data,travel rule compliance",
+    "business_capability": [
+      "Travel Rule Compliance",
+      "BSA Compliance",
+      "Originator Data Management",
+      "Beneficiary Data Management",
+      "AML Data Requirements"
+    ]
+  },
+  {
+    "keywords": "irrevocable transfer,payment finality,irreversible payment",
+    "metadata": "payment-processing",
+    "description": "Core characteristic of Fedwire/CHIPS finality; payments cannot be reversed once processed",
+    "related_keywords": "final payment,irreversible transfer,payment certainty,finality assurance,no reversal",
+    "business_capability": [
+      "Payment Finality",
+      "Irrevocable Processing",
+      "Final Transfer Processing"
+    ]
+  },
+  {
+    "keywords": "MT-103,single customer credit transfer,customer wire",
+    "metadata": "swift-mt-messages",
+    "description": "SWIFT MT-103 single customer credit transfer message carrying full originator/beneficiary details",
+    "related_keywords": "customer transfer,single transfer,credit transfer,customer payment,retail wire,commercial wire,customer-initiated wire,outbound payment,customer credit,wire instruction,pacs.008 equivalent,Fed 1000 equivalent",
+    "business_capability": [
+      "MT-103 Processing",
+      "Single Customer Transfer",
+      "Customer Credit Transfer",
+      "Inbound SWIFT",
+      "Outbound SWIFT"
+    ]
+  },
+  {
+    "keywords": "MT-202,general financial institution transfer,cover transfer",
+    "metadata": "swift-mt-messages", 
+    "description": "SWIFT MT-202 general financial institution transfer used for cover payments without customer info",
+    "related_keywords": "bank transfer,FI transfer,cover payment,institutional transfer,bank-to-bank transfer,correspondent transfer",
+    "business_capability": [
+      "MT-202 Processing",
+      "Financial Institution Transfer",
+      "Cover Payment Processing",
+      "Bank-to-Bank Transfer",
+      "Inbound SWIFT",
+      "Outbound SWIFT"
+    ]
+  },
+  {
+    "keywords": "value message,fedwire value message,funds movement",
+    "metadata": "fedwire-messages",
+    "description": "Fedwire messages that order funds movement (customer or bank transfers)",
+    "related_keywords": "funds transfer message,value transfer,payment instruction,money movement,settlement instruction",
+    "business_capability": [
+      "Value Message Processing",
+      "Funds Movement",
+      "Fedwire Value Processing",
+      "Payment Instruction Processing"
+    ]
+  },
+  {
+    "keywords": "nonvalue message,fedwire nonvalue,status message",
+    "metadata": "fedwire-messages",
+    "description": "Fedwire requests/actions like returns or status reports without funds movement",
+    "related_keywords": "status request,return message,inquiry message,non-monetary message,administrative message",
+    "business_capability": [
+      "Nonvalue Message Processing",
+      "Status Message Processing",
+      "Return Message Processing",
+      "Administrative Message Processing"
+    ]
+  },
+  {
+    "keywords": "non-bank wire,money service business,MSB,money transmitter",
+    "metadata": "payment-providers",
+    "description": "Services like Western Union using SWIFT messaging and CHIPS for backend settlement",
+    "related_keywords": "money transfer service,remittance service,non-bank provider,MSB service,money transmitter service",
+    "business_capability": [
+      "Non-Bank Wire Processing",
+      "MSB Integration",
+      "Money Transmitter Processing",
+      "Third-Party Provider Integration"
+    ]
+  },
+  {
+    "keywords": "P2P transfer,peer-to-peer,digital wallet",
+    "metadata": "payment-alternatives",
+    "description": "Domestic alternatives like Zelle via ACH; not RTGS like Fedwire, but may integrate SWIFT for international",
+    "related_keywords": "person-to-person,peer transfer,digital payment,wallet transfer,mobile payment",
+    "business_capability": [
+      "P2P Processing",
+      "Digital Wallet Integration",
+      "Peer-to-Peer Transfer",
+      "Mobile Payment Integration"
+    ]
+  },
+  {
+    "keywords": "tokenization,data security,message security",
+    "metadata": "security-compliance",
+    "description": "Secures data in ISO 20022 messages across systems",
+    "related_keywords": "data protection,secure messaging,token security,payment security,message encryption",
+    "business_capability": [
+      "Tokenization",
+      "Data Security",
+      "Message Security",
+      "Payment Data Protection"
     ]
   },
   {
@@ -54,18 +419,6 @@
     ]
   },
   {
-    "keywords": "ultimate debtor,ultimate creditor",
-    "metadata": "payment-parties",
-    "description": "Original party responsible for payment or final recipient of funds",
-    "related_keywords": "underlying customer,actual originator,actual beneficiary,end customer,final customer,true originator,true beneficiary,underlying party,actual party,client customer",
-    "business_capability": [
-      "Ultimate Debtor",
-      "Ultimate Creditor",
-      "Debit Party Validation",
-      "Credit Party Validation"
-    ]
-  },
-  {
     "keywords": "pre-advice,split advice,preliminary notification",
     "metadata": "payment-messaging",
     "description": "Preliminary notifications or split messages for upcoming wire transfers",
@@ -75,16 +428,6 @@
       "Split Advice",
       "Split Advising",
       "Confirmations"
-    ]
-  },
-  {
-    "keywords": "cover payments,MT202COV,pacs.009",
-    "metadata": "payment-types",
-    "description": "Payments using intermediary banks to cover transfers, common in cross-border transactions",
-    "related_keywords": "covered wire,cover arrangement,correspondent cover,covering payment,indirect payment,two-step payment,nostro cover,cover instruction,covering bank payment,correspondent funding",
-    "business_capability": [
-      "Cover Payments",
-      "Cross-Border Payment"
     ]
   },
   {
@@ -152,16 +495,6 @@
     "metadata": "swift-mt-messages",
     "description": "SWIFT MT102 for multiple customer transfers, equivalent to pain.001 in ISO 20022",
     "related_keywords": "bulk transfer,multiple payments,batch wire,MT102 message,multiple customer payments,pain.001 equivalent,bulk customer transfer",
-    "business_capability": [
-      "Inbound SWIFT",
-      "Outbound SWIFT"
-    ]
-  },
-  {
-    "keywords": "MT103,single customer transfer,customer credit transfer,pacs.008",
-    "metadata": "swift-mt-messages",
-    "description": "SWIFT MT103 single customer credit transfer, equivalent to pacs.008 in ISO 20022 and Fedwire Format 1000",
-    "related_keywords": "customer wire,outgoing wire,credit transfer,customer payment,retail wire,commercial wire,customer-initiated wire,outbound payment,customer credit,wire instruction,pacs.008 equivalent,Fed 1000 equivalent",
     "business_capability": [
       "Inbound SWIFT",
       "Outbound SWIFT"
@@ -930,5 +1263,180 @@
       "Party Identification",
       "Remittance Information Validation"
     ]
+  },
+  {
+    "keywords": "pacs.008,customer credit transfer,credit transfer initiation",
+    "metadata": "iso20022-pacs-messages",
+    "description": "ISO 20022 pacs.008 Customer Credit Transfer Initiation message, equivalent to MT-103 and Fedwire Format 1000",
+    "related_keywords": "customer transfer,payment initiation,credit transfer,customer wire,pacs008,customer payment,wire transfer,MT-103 equivalent,Fed 1000 equivalent,end-to-end ID,instruction ID,travel rule compliance",
+    "business_capability": [
+      "Customer Credit Transfer",
+      "Payment Initiation",
+      "Cross-Border Payment",
+      "Domestic Wire Transfer",
+      "Travel Rule Compliance",
+      "Customer Wire Processing",
+      "End-to-End Processing"
+    ]
+  },
+  {
+    "keywords": "pacs.009,financial institution credit transfer,bank-to-bank transfer,FI credit transfer",
+    "metadata": "iso20022-pacs-messages", 
+    "description": "ISO 20022 pacs.009 Financial Institution Credit Transfer for bank-to-bank wires without customer details",
+    "related_keywords": "FI transfer,bank transfer,cover payment,institutional transfer,privacy-focused transfer,MT-202 equivalent,Fed 2000 equivalent,correspondent banking,interbank transfer,bank-to-bank wire",
+    "business_capability": [
+      "Financial Institution Transfer",
+      "Bank-to-Bank Transfer", 
+      "Cover Payments",
+      "Interbank Transfer",
+      "Correspondent Banking",
+      "Privacy-Focused Transfer",
+      "Institutional Wire Processing"
+    ]
+  },
+  {
+    "keywords": "pacs.004,payment return,wire return,return processing",
+    "metadata": "iso20022-pacs-messages",
+    "description": "ISO 20022 pacs.004 Payment Return message for returning wires due to errors",
+    "related_keywords": "return wire,payment reversal,wire reversal,return reason,insufficient funds,invalid account,return ID,original message reference,return processing,wire reject,payment reject",
+    "business_capability": [
+      "Payment Return",
+      "Wire Return Processing",
+      "Exception Handling",
+      "Return Reason Processing",
+      "Original Message Reference",
+      "Payment Reversal"
+    ]
+  },
+  {
+    "keywords": "pacs.002,payment status report,status acknowledgment,payment status",
+    "metadata": "iso20022-pacs-messages",
+    "description": "ISO 20022 pacs.002 Payment Status Report for acknowledgments, accepts, and rejects",
+    "related_keywords": "status report,payment acknowledgment,wire acknowledgment,payment accept,payment reject,status pending,status processing,message status,transaction status,settlement status,processing status",
+    "business_capability": [
+      "Payment Status Reporting",
+      "Status Acknowledgment",
+      "Payment Tracking",
+      "Message Status Processing",
+      "Settlement Status",
+      "Transaction Status Management"
+    ]
+  },
+  {
+    "keywords": "IMAD,input message accountability data,message accountability",
+    "metadata": "fedwire-identifiers",
+    "description": "Unique message identifier format used in Fedwire (e.g., AA12345607142025XXXXXXX)",
+    "related_keywords": "message ID,fedwire ID,input accountability,message tracking,unique identifier,fedwire reference,message reference,accountability data,wire tracking ID",
+    "business_capability": [
+      "Message ID Generation",
+      "Message Tracking",
+      "Fedwire Processing",
+      "Message Accountability",
+      "Wire Tracking"
+    ]
+  },
+  {
+    "keywords": "OMAD,output message accountability data,clearing system reference",
+    "metadata": "fedwire-identifiers", 
+    "description": "Output message accountability data used for clearing system references and returns",
+    "related_keywords": "output accountability,clearing reference,return reference,fedwire output,message output,clearing system ID,settlement reference,output tracking",
+    "business_capability": [
+      "Clearing System Reference",
+      "Output Message Processing",
+      "Return Processing",
+      "Settlement Reference",
+      "Message Output Tracking"
+    ]
+  },
+  {
+    "keywords": "FRN,federal routing number,fedwire routing number",
+    "metadata": "bank-identification",
+    "description": "8 or 9-digit Federal Reserve routing number for Fedwire participants",
+    "related_keywords": "federal routing,fedwire routing,ABA routing,fed routing,reserve routing,banking routing,clearing member ID,fedwire member,federal reserve member",
+    "business_capability": [
+      "Federal Routing Processing",
+      "Fedwire Member Identification",
+      "Clearing Member Validation",
+      "Federal Reserve Integration",
+      "Bank Routing Validation"
+    ]
+  },
+  {
+    "keywords": "service level code,URGP,SDVA,priority code,urgency code",
+    "metadata": "payment-processing",
+    "description": "ISO 20022 service level codes for payment priority (URGP for urgent, SDVA for same-day)",
+    "related_keywords": "payment priority,urgent payment,same-day payment,priority processing,service level,cut-off time,processing priority,payment urgency,priority wire",
+    "business_capability": [
+      "Payment Prioritization",
+      "Service Level Management",
+      "Cut-Off Management",
+      "Priority Processing",
+      "Urgent Payment Processing"
+    ]
+  },
+  {
+    "keywords": "local instrument code,CTRC,core customer transfer,domestic scheme",
+    "metadata": "payment-processing", 
+    "description": "Fedwire-specific local instrument code (CTRC for Core Customer Transfer)",
+    "related_keywords": "domestic scheme,local instrument,fedwire scheme,customer transfer code,wire type code,payment instrument,domestic wire code,fedwire instrument",
+    "business_capability": [
+      "Local Instrument Processing",
+      "Domestic Scheme Management",
+      "Fedwire Instrument Processing",
+      "Wire Type Classification"
+    ]
+  },
+  {
+    "keywords": "charge bearer,DEBT,CRED,SHAR,SLEV,fee bearer",
+    "metadata": "pricing-billing",
+    "description": "Indicates who bears transaction fees (DEBT: debtor, CRED: creditor, SHAR: shared, SLEV: service level)",
+    "related_keywords": "fee responsibility,charge responsibility,fee allocation,cost bearer,transaction fees,wire fees,fee sharing,cost allocation,payment charges",
+    "business_capability": [
+      "Fee Allocation",
+      "Charge Bearer Management",
+      "Fee Responsibility",
+      "Cost Allocation",
+      "Wire Fee Processing"
+    ]
+  },
+  {
+    "keywords": "purpose code,SALA,payment purpose,transaction purpose,ISO purpose",
+    "metadata": "payment-processing",
+    "description": "ISO 20022 purpose codes indicating reason for payment (e.g., SALA for salary)",
+    "related_keywords": "payment reason,transaction purpose,salary payment,invoice payment,purpose classification,payment category,transaction reason,ISO purpose code",
+    "business_capability": [
+      "Purpose Code Processing",
+      "Payment Classification",
+      "Transaction Categorization",
+      "Payment Analytics",
+      "Compliance Reporting"
+    ]
+  },
+  {
+    "keywords": "remittance information,structured remittance,unstructured remittance,tax remittance",
+    "metadata": "remittance-processing",
+    "description": "Payment details including structured tax remittance and unstructured invoice information",
+    "related_keywords": "payment details,invoice reference,tax information,TIN reference,tax period,creditor reference,payment reference,remittance data,invoice data",
+    "business_capability": [
+      "Remittance Processing",
+      "Tax Remittance Processing", 
+      "Invoice Reference Processing",
+      "Payment Detail Management",
+      "Structured Data Processing"
+    ]
+  },
+  {
+    "keywords": "status codes,PDNG,ACCP,RJCT,AGNT,FF01,payment status codes",
+    "metadata": "status-processing",
+    "description": "ISO 20022 status and reason codes (PDNG: pending, ACCP: accepted, RJCT: rejected, AGNT: invalid agent, FF01: invalid account)",
+    "related_keywords": "pending status,accepted status,rejected status,invalid agent,invalid account,status reason,rejection reason,processing status,settlement status,error codes",
+    "business_capability": [
+      "Status Code Processing",
+      "Payment Status Management",
+      "Rejection Reason Processing", 
+      "Error Code Management",
+      "Status Reporting"
+    ]
   }
 ]
+
