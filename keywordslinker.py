@@ -444,7 +444,7 @@ class EnhancedBatchASTCapabilityMapper:
         return analysis
     
     def write_structured_output(self, output_data: Dict, output_path: str):
-        """Write structured output to multiple files in directory"""
+        """Write structured output to multiple files in directory with improved error handling and deduplication"""
         # Create output directory
         output_dir = Path(output_path)
         output_dir.mkdir(exist_ok=True)
@@ -457,91 +457,566 @@ class EnhancedBatchASTCapabilityMapper:
         if missing_keys:
             raise KeyError(f"Missing required keys in output_data: {missing_keys}")
         
-        # 1. Main summary file
-        main_file = output_dir / "capability_mapping_summary.json"
-        summary_data = {
-            "metadata": output_data["metadata"],
-            "summary_statistics": output_data["summary_statistics"],
-            "processing_errors": output_data.get("processing_errors", {})
-        }
-        with open(main_file, 'w', encoding='utf-8') as f:
-            json.dump(summary_data, f, indent=2, ensure_ascii=False)
+        # Helper function to make data JSON serializable
+        def make_serializable(obj):
+            """Convert sets and other non-serializable objects to lists/dicts"""
+            if isinstance(obj, set):
+                return list(obj)
+            elif isinstance(obj, dict):
+                return {k: make_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [make_serializable(item) for item in obj]
+            elif hasattr(obj, '__dict__'):
+                # Handle custom objects like ProcedureCapabilityMatch
+                return make_serializable(obj.__dict__)
+            else:
+                return obj
         
-        # 2. File processing details
-        files_file = output_dir / "file_processing_details.json"
-        file_details = output_data.get("file_details", {})
-        with open(files_file, 'w', encoding='utf-8') as f:
-            json.dump(file_details, f, indent=2, ensure_ascii=False)
+        # Helper function to deduplicate procedures in keyword mappings
+        def deduplicate_keyword_procedures(keyword_to_procedures):
+            """Remove duplicate procedures per keyword, keeping best match"""
+            deduplicated = {}
+            
+            for keyword, procedures in keyword_to_procedures.items():
+                unique_procedures = {}
+                
+                for proc in procedures:
+                    proc_name = proc.get("procedure", "")
+                    if proc_name not in unique_procedures:
+                        unique_procedures[proc_name] = proc
+                    else:
+                        # Keep the entry with highest confidence, or if tied, prefer exact matches
+                        existing = unique_procedures[proc_name]
+                        current_conf = proc.get("confidence", 0)
+                        existing_conf = existing.get("confidence", 0)
+                        current_type = proc.get("match_type", "")
+                        existing_type = existing.get("match_type", "")
+                        
+                        is_better = (
+                            current_conf > existing_conf or
+                            (current_conf == existing_conf and current_type == 'exact' and existing_type != 'exact')
+                        )
+                        
+                        if is_better:
+                            unique_procedures[proc_name] = proc
+                
+                deduplicated[keyword] = list(unique_procedures.values())
+            
+            return deduplicated
         
-        # 3. Business capabilities with procedures
-        capabilities_file = output_dir / "business_capabilities.json"
-        with open(capabilities_file, 'w', encoding='utf-8') as f:
-            json.dump(output_data["business_capabilities"], f, indent=2, ensure_ascii=False)
+        try:
+            # 1. Main summary file
+            main_file = output_dir / "capability_mapping_summary.json"
+            summary_data = {
+                "metadata": make_serializable(output_data["metadata"]),
+                "summary_statistics": make_serializable(output_data["summary_statistics"]),
+                "processing_errors": make_serializable(output_data.get("processing_errors", {}))
+            }
+            
+            print(f"Writing summary data: {len(str(summary_data))} chars")
+            with open(main_file, 'w', encoding='utf-8') as f:
+                json.dump(summary_data, f, indent=2, ensure_ascii=False)
+            print(f"✓ Created {main_file.name}")
+            
+        except Exception as e:
+            print(f"❌ Error writing summary file: {e}")
+            debug_file = output_dir / "debug_summary.txt"
+            with open(debug_file, 'w') as f:
+                f.write(f"Error: {e}\n")
+                f.write(f"Metadata keys: {list(output_data['metadata'].keys())}\n")
+                f.write(f"Summary keys: {list(output_data['summary_statistics'].keys())}\n")
         
-        # 4. Graph data for capability -> keywords -> procedures
-        graph_file = output_dir / "capability_keyword_procedure_graph.json"
-        graph_data = {
-            "capabilities_to_keywords": output_data["graph_data"]["capability_keywords"],
-            "keywords_to_procedures": output_data["graph_data"]["keyword_to_procedures"],
-            "procedures_to_capabilities": output_data["graph_data"]["procedure_to_capabilities"],
+        try:
+            # 2. File processing details
+            files_file = output_dir / "file_processing_details.json"
+            file_details = make_serializable(output_data.get("file_details", {}))
+            
+            print(f"Writing file details: {len(file_details)} files")
+            with open(files_file, 'w', encoding='utf-8') as f:
+                json.dump(file_details, f, indent=2, ensure_ascii=False)
+            print(f"✓ Created {files_file.name}")
+            
+        except Exception as e:
+            print(f"❌ Error writing file details: {e}")
+        
+        try:
+            # 3. Business capabilities with procedures
+            capabilities_file = output_dir / "business_capabilities.json"
+            capabilities_data = make_serializable(output_data["business_capabilities"])
+            
+            print(f"Writing capabilities: {len(capabilities_data)} capabilities")
+            with open(capabilities_file, 'w', encoding='utf-8') as f:
+                json.dump(capabilities_data, f, indent=2, ensure_ascii=False)
+            print(f"✓ Created {capabilities_file.name}")
+            
+        except Exception as e:
+            print(f"❌ Error writing capabilities: {e}")
+            debug_file = output_dir / "debug_capabilities.txt" 
+            with open(debug_file, 'w') as f:
+                f.write(f"Error: {e}\n")
+                f.write(f"Capabilities count: {len(output_data['business_capabilities'])}\n")
+                for cap_name, cap_data in list(output_data["business_capabilities"].items())[:3]:
+                    f.write(f"Sample capability {cap_name}: {type(cap_data)}\n")
+                    if isinstance(cap_data, dict):
+                        for key, value in cap_data.items():
+                            f.write(f"  {key}: {type(value)}\n")
+        
+        try:
+            # 4. Graph data for capability -> keywords -> procedures (ENHANCED WITH DEDUPLICATION)
+            graph_file = output_dir / "capability_keyword_procedure_graph.json"
+            
+            # Deduplicate keyword-to-procedures mappings
+            original_keyword_to_procedures = output_data["graph_data"]["keyword_to_procedures"]
+            deduplicated_keyword_to_procedures = deduplicate_keyword_procedures(original_keyword_to_procedures)
+            
+            # Calculate deduplication stats
+            original_total = sum(len(procs) for procs in original_keyword_to_procedures.values())
+            deduplicated_total = sum(len(procs) for procs in deduplicated_keyword_to_procedures.values())
+            
+            print(f"📊 Deduplication: {original_total} → {deduplicated_total} procedure entries ({original_total - deduplicated_total} removed)")
+            
+            graph_data = {
+                "capabilities_to_keywords": make_serializable(output_data["graph_data"]["capability_keywords"]),
+                "keywords_to_procedures": make_serializable(deduplicated_keyword_to_procedures),
+                "procedures_to_capabilities": make_serializable(output_data["graph_data"]["procedure_to_capabilities"]),
+                "metadata": {
+                    "description": "Graph structure for capability -> keyword -> procedure relationships",
+                    "confidence_threshold": output_data["metadata"]["confidence_threshold"],
+                    "deduplication_applied": True,
+                    "original_procedure_entries": original_total,
+                    "deduplicated_procedure_entries": deduplicated_total,
+                    "total_nodes": {
+                        "capabilities": len(output_data["graph_data"]["capability_keywords"]),
+                        "keywords": len(deduplicated_keyword_to_procedures),
+                        "procedures": len(output_data["graph_data"]["procedure_to_capabilities"])
+                    }
+                }
+            }
+            
+            print(f"Writing graph data: {graph_data['metadata']['total_nodes']}")
+            with open(graph_file, 'w', encoding='utf-8') as f:
+                json.dump(graph_data, f, indent=2, ensure_ascii=False)
+            print(f"✓ Created {graph_file.name}")
+            
+        except Exception as e:
+            print(f"❌ Error writing graph data: {e}")
+        
+        try:
+            # 5. Procedures by file
+            procedures_by_file = {}
+            file_details = output_data.get("file_details", {})
+            
+            for file_name, file_info in file_details.items():
+                procedures_by_file[file_name] = {
+                    "file_info": {
+                        "full_path": file_info.get("full_path", ""),
+                        "file_type": file_info.get("file_type", "unknown"),
+                        "total_lines": file_info.get("total_lines", 0),
+                        "processing_status": file_info.get("processing_status", "unknown")
+                    },
+                    "main_procedures": make_serializable(file_info.get("procedures", [])),
+                    "subprocedures": make_serializable(file_info.get("subprocedures", [])),
+                    "summary": {
+                        "total_procedures": len(file_info.get("procedures", [])) + len(file_info.get("subprocedures", [])),
+                        "main_procedure_count": len(file_info.get("procedures", [])),
+                        "subprocedure_count": len(file_info.get("subprocedures", []))
+                    }
+                }
+            
+            procedures_file = output_dir / "procedures_by_file.json"
+            print(f"Writing procedures by file: {len(procedures_by_file)} files")
+            with open(procedures_file, 'w', encoding='utf-8') as f:
+                json.dump(procedures_by_file, f, indent=2, ensure_ascii=False)
+            print(f"✓ Created {procedures_file.name}")
+            
+        except Exception as e:
+            print(f"❌ Error writing procedures by file: {e}")
+        
+        try:
+            # 6. Graph edge list (for easy graph library import) - ENHANCED WITH DEDUPLICATION
+            edges_file = output_dir / "graph_edges.csv"
+            edges_written = 0
+            
+            with open(edges_file, 'w', encoding='utf-8') as f:
+                f.write("source,target,edge_type,confidence,match_type\n")
+                
+                # Capability -> Keyword edges
+                for capability, keywords in output_data["graph_data"]["capability_keywords"].items():
+                    for keyword in keywords:
+                        # Clean and escape data for CSV
+                        clean_cap = str(capability).replace('"', '""').replace('\n', ' ').replace('\r', ' ')
+                        clean_kw = str(keyword).replace('"', '""').replace('\n', ' ').replace('\r', ' ')
+                        f.write(f'"{clean_cap}","{clean_kw}",capability_to_keyword,1.0,definition\n')
+                        edges_written += 1
+                
+                # Keyword -> Procedure edges (using deduplicated data)
+                for keyword, procedures in deduplicated_keyword_to_procedures.items():
+                    for proc_info in procedures:
+                        clean_kw = str(keyword).replace('"', '""').replace('\n', ' ').replace('\r', ' ')
+                        clean_proc = str(proc_info.get("procedure", "")).replace('"', '""').replace('\n', ' ').replace('\r', ' ')
+                        confidence = proc_info.get("confidence", 0.0)
+                        match_type = proc_info.get("match_type", "unknown")
+                        f.write(f'"{clean_kw}","{clean_proc}",keyword_to_procedure,{confidence},{match_type}\n')
+                        edges_written += 1
+            
+            print(f"✓ Created {edges_file.name} with {edges_written} edges")
+            
+        except Exception as e:
+            print(f"❌ Error writing graph edges: {e}")
+            import traceback
+            print(f"Full error: {traceback.format_exc()}")
+        
+        print(f"\n📊 File Writing Summary:")
+        print(f"   Output directory: {output_dir}")
+        
+        # Check file sizes
+        for file_path in output_dir.glob("*.json"):
+            try:
+                size = file_path.stat().st_size
+                print(f"   {file_path.name}: {size} bytes")
+                if size == 0:
+                    print(f"   ⚠️  {file_path.name} is empty!")
+            except:
+                print(f"   ❌ Could not check {file_path.name}")
+        
+        # Check CSV file
+        csv_file = output_dir / "graph_edges.csv"
+        if csv_file.exists():
+            size = csv_file.stat().st_size
+            print(f"   {csv_file.name}: {size} bytes")
+        
+        print(f"✅ All files written successfully with deduplication applied")
+    
+    async def process_directory(self, directory_path: str, confidence_threshold: float = 0.1) -> Dict:
+        """Process directory with comprehensive error handling and deduplication"""
+        print(f"🔍 Processing AST files in: {directory_path}")
+        
+        try:
+            # Find all AST files with validation
+            ast_files = self.find_ast_files(directory_path)
+            if not ast_files:
+                return {
+                    "error": "No valid .ast/.tal files found in directory",
+                    "metadata": {
+                        "source_directory": directory_path,
+                        "total_ast_files": 0,
+                        "total_procedures_found": 0,
+                        "error_details": "Directory contained no readable .ast/.tal files"
+                    }
+                }
+        except Exception as e:
+            return {
+                "error": f"Failed to access directory: {e}",
+                "metadata": {
+                    "source_directory": directory_path,
+                    "error_details": str(e)
+                }
+            }
+        
+        # Process each file with error tracking
+        all_procedures = []
+        file_stats = {}
+        failed_files = []
+        
+        print(f"🔄 Processing {len(ast_files)} files...")
+        
+        for i, ast_file in enumerate(ast_files):
+            file_name = Path(ast_file).name
+            print(f"   📄 [{i+1}/{len(ast_files)}] Processing {file_name}")
+            
+            try:
+                procedures = self.extract_procedures_from_ast(ast_file)
+                all_procedures.extend(procedures)
+                
+                file_stats[ast_file] = {
+                    "procedure_count": len(procedures),
+                    "procedures": [p.get('name', 'unknown') for p in procedures],
+                    "status": "success"
+                }
+                
+                if len(procedures) == 0:
+                    print(f"      ⚠️  No procedures found in {file_name}")
+                else:
+                    print(f"      ✅ Found {len(procedures)} procedures")
+                
+            except Exception as e:
+                error_msg = f"Failed to process {file_name}: {e}"
+                print(f"      ❌ {error_msg}")
+                
+                failed_files.append({
+                    "file": ast_file,
+                    "error": str(e)
+                })
+                
+                file_stats[ast_file] = {
+                    "procedure_count": 0,
+                    "procedures": [],
+                    "status": "failed",
+                    "error": str(e)
+                }
+        
+        if not all_procedures and not failed_files:
+            return {
+                "error": "No procedures found in any files",
+                "metadata": {
+                    "source_directory": directory_path,
+                    "total_ast_files": len(ast_files),
+                    "total_procedures_found": 0,
+                    "file_statistics": file_stats
+                }
+            }
+        
+        print(f"✅ Extracted {len(all_procedures)} total procedures from {len(ast_files)} files")
+        if failed_files:
+            print(f"⚠️  Failed to process {len(failed_files)} files")
+        
+        # Map all procedures to capabilities with batch processing
+        print(f"🔗 Mapping procedures to capabilities...")
+        
+        # Initialize all capabilities
+        capability_results = {}
+        for capability in sorted(self.all_capabilities):
+            capability_results[capability] = {
+                "total_procedures": 0,
+                "high_confidence_procedures": 0,
+                "medium_confidence_procedures": 0,
+                "low_confidence_procedures": 0,
+                "procedures": []
+            }
+        
+        # Process procedures in batches
+        batch_size = 20
+        total_batches = (len(all_procedures) + batch_size - 1) // batch_size
+        successful_mappings = 0
+        failed_mappings = 0
+        
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(all_procedures))
+            batch = all_procedures[start_idx:end_idx]
+            
+            print(f"   Progress: Batch {batch_idx + 1}/{total_batches} ({len(batch)} procedures)")
+            
+            for procedure in batch:
+                try:
+                    capability_matches = await self.map_procedure_to_capabilities(procedure)
+                    
+                    for capability, match in capability_matches.items():
+                        if match.confidence >= confidence_threshold:
+                            capability_results[capability]["total_procedures"] += 1
+                            
+                            # Categorize by confidence
+                            if match.confidence >= 0.7:
+                                capability_results[capability]["high_confidence_procedures"] += 1
+                            elif match.confidence >= 0.4:
+                                capability_results[capability]["medium_confidence_procedures"] += 1
+                            else:
+                                capability_results[capability]["low_confidence_procedures"] += 1
+                            
+                            # Add procedure details
+                            try:
+                                proc_detail = {
+                                    "procedure_name": match.procedure_name,
+                                    "file_path": os.path.basename(match.file_path) if match.file_path else "unknown",
+                                    "full_file_path": match.file_path,
+                                    "procedure_path": match.procedure_path,
+                                    "procedure_type": match.procedure_type,
+                                    "confidence": round(match.confidence, 3),
+                                    "match_type": match.match_type,
+                                    "matched_keywords": match.matched_keywords,
+                                    "comments": (match.procedure_comments[:100] + "...") if len(match.procedure_comments) > 100 else match.procedure_comments
+                                }
+                                
+                                # Add TAL naming info if available
+                                if hasattr(match, 'tal_naming_info') and match.tal_naming_info:
+                                    proc_detail["tal_naming_pattern"] = match.tal_naming_info.get('pattern_type', 'unknown')
+                                    proc_detail["semantic_parts"] = match.tal_naming_info.get('semantic_parts', [])
+                                
+                                capability_results[capability]["procedures"].append(proc_detail)
+                            except Exception as detail_error:
+                                print(f"Warning: Error adding procedure detail: {detail_error}")
+                    
+                    successful_mappings += 1
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to map procedure {procedure.get('name', 'unknown')}: {e}")
+                    failed_mappings += 1
+                    continue
+        
+        # Sort procedures by confidence within each capability
+        for capability_data in capability_results.values():
+            try:
+                capability_data["procedures"].sort(key=lambda x: x.get("confidence", 0), reverse=True)
+            except Exception as e:
+                print(f"Warning: Error sorting procedures: {e}")
+        
+        # Generate graph data structures with proper deduplication
+        print("📊 Building graph data structures...")
+        
+        # Build capability -> keywords mapping
+        capability_keywords = {}
+        for capability, keywords in self.capability_to_keywords.items():
+            capability_keywords[capability] = list(keywords)
+        
+        # Build keyword -> procedures mapping with deduplication at source
+        keyword_to_procedures = defaultdict(dict)  # keyword -> {proc_name -> best_proc_info}
+        procedure_to_capabilities = defaultdict(dict)  # proc_name -> {capability -> best_cap_info}
+        
+        for capability, cap_data in capability_results.items():
+            for proc in cap_data["procedures"]:
+                proc_name = proc["procedure_name"]
+                confidence = proc["confidence"]
+                match_type = proc["match_type"]
+                file_path = proc["file_path"]
+                
+                # Add to procedure -> capabilities mapping (keep best per capability)
+                if capability not in procedure_to_capabilities[proc_name] or \
+                   confidence > procedure_to_capabilities[proc_name][capability]["confidence"]:
+                    procedure_to_capabilities[proc_name][capability] = {
+                        "capability": capability,
+                        "confidence": confidence,
+                        "match_type": match_type
+                    }
+                
+                # Process each matched keyword with deduplication
+                for keyword in proc.get("matched_keywords", []):
+                    # Clean up keyword prefixes (tal:, llm:, pattern:, partial:)
+                    clean_keyword = keyword.split(":")[-1] if ":" in keyword else keyword
+                    
+                    # Check if we already have this procedure for this keyword
+                    if proc_name in keyword_to_procedures[clean_keyword]:
+                        existing = keyword_to_procedures[clean_keyword][proc_name]
+                        existing_conf = existing["confidence"]
+                        existing_type = existing["match_type"]
+                        
+                        # Determine if new entry is better
+                        is_better = (
+                            confidence > existing_conf or
+                            (confidence == existing_conf and match_type == 'exact' and existing_type != 'exact') or
+                            (confidence == existing_conf and match_type == existing_type and match_type in ['llm_semantic', 'semantic'])
+                        )
+                        
+                        if not is_better:
+                            continue  # Skip this entry, keep the existing better one
+                    
+                    # Add or update the procedure for this keyword
+                    keyword_to_procedures[clean_keyword][proc_name] = {
+                        "procedure": proc_name,
+                        "confidence": confidence,
+                        "match_type": match_type,
+                        "file_path": file_path
+                    }
+        
+        # Convert nested dicts to lists for JSON serialization
+        final_keyword_to_procedures = {}
+        for keyword, proc_dict in keyword_to_procedures.items():
+            final_keyword_to_procedures[keyword] = list(proc_dict.values())
+        
+        final_procedure_to_capabilities = {}
+        for proc_name, cap_dict in procedure_to_capabilities.items():
+            final_procedure_to_capabilities[proc_name] = list(cap_dict.values())
+        
+        # Debug output for deduplication verification
+        total_mappings = sum(len(procs) for procs in final_keyword_to_procedures.values())
+        print(f"📊 Graph structure built:")
+        print(f"   • {len(final_keyword_to_procedures)} unique keywords")
+        print(f"   • {total_mappings} total keyword→procedure mappings (deduplicated)")
+        print(f"   • {len(final_procedure_to_capabilities)} unique procedures")
+        
+        # Verify deduplication worked
+        sample_keywords = list(final_keyword_to_procedures.keys())[:3]
+        for kw in sample_keywords:
+            proc_count = len(final_keyword_to_procedures[kw])
+            proc_names = [p["procedure"] for p in final_keyword_to_procedures[kw]]
+            unique_names = set(proc_names)
+            print(f"   • Keyword '{kw}': {proc_count} procedures, {len(unique_names)} unique names")
+            if len(proc_names) != len(unique_names):
+                print(f"     ⚠️  Still has duplicates in '{kw}': {[name for name in proc_names if proc_names.count(name) > 1]}")
+        
+        # Build file details structure
+        file_details = {}
+        for file_path, file_stat in file_stats.items():
+            file_name = os.path.basename(file_path)
+            
+            # Count lines in file for metadata
+            total_lines = 0
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    total_lines = sum(1 for _ in f)
+            except:
+                total_lines = 0
+            
+            file_details[file_name] = {
+                "full_path": file_path,
+                "file_type": "tal" if file_path.endswith('.tal') else "ast",
+                "total_lines": total_lines,
+                "processing_status": file_stat["status"],
+                "procedures": [p for p in all_procedures if p["file_path"] == file_path],
+                "subprocedures": []
+            }
+            if file_stat["status"] == "failed":
+                file_details[file_name]["error"] = file_stat.get("error", "Unknown error")
+        
+
+        #problem_keyword = "messaged via swift and settled through networks like chips"
+        #if problem_keyword in final_keyword_to_procedures:
+        #    procs = final_keyword_to_procedures[problem_keyword]
+        #    print(f"DEBUG: Keyword '{problem_keyword}' has {len(procs)} entries:")
+        #    for i, proc in enumerate(procs):
+        #        print(f"  {i+1}. {proc['procedure']} - {proc['confidence']} - {proc['match_type']}")
+
+        # Build final output
+        output = {
             "metadata": {
-                "description": "Graph structure for capability -> keyword -> procedure relationships",
-                "confidence_threshold": output_data["metadata"]["confidence_threshold"],
-                "total_nodes": {
-                    "capabilities": len(output_data["graph_data"]["capability_keywords"]),
-                    "keywords": len(output_data["graph_data"]["keyword_to_procedures"]),
-                    "procedures": len(output_data["graph_data"]["procedure_to_capabilities"])
-                }
-            }
+                "source_directory": directory_path,
+                "total_ast_files": len(ast_files),
+                "successful_files": len(ast_files) - len(failed_files),
+                "failed_files": len(failed_files),
+                "total_procedures_found": len(all_procedures),
+                "successful_mappings": successful_mappings,
+                "failed_mappings": failed_mappings,
+                "confidence_threshold": confidence_threshold,
+                "processing_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "llm_enhanced": self.llm_provider is not None,
+                "tal_naming_enhanced": True,
+                "semantic_similarity_enabled": hasattr(self.llm_provider, 'model') and self.llm_provider.model is not None if self.llm_provider else False,
+                "similarity_model": self.llm_provider.model_name if self.llm_provider and hasattr(self.llm_provider, 'model_name') else "none",
+                "deduplication_applied": True
+            },
+            "file_statistics": file_stats,
+            "business_capabilities": capability_results,
+            "summary_statistics": {
+                "capabilities_with_procedures": sum(1 for cap_data in capability_results.values() if cap_data["total_procedures"] > 0),
+                "total_capability_mappings": sum(cap_data["total_procedures"] for cap_data in capability_results.values()),
+                "high_confidence_mappings": sum(cap_data["high_confidence_procedures"] for cap_data in capability_results.values()),
+                "medium_confidence_mappings": sum(cap_data["medium_confidence_procedures"] for cap_data in capability_results.values()),
+                "low_confidence_mappings": sum(cap_data["low_confidence_procedures"] for cap_data in capability_results.values())
+            },
+            "graph_data": {
+                "capability_keywords": capability_keywords,
+                "keyword_to_procedures": final_keyword_to_procedures,
+                "procedure_to_capabilities": final_procedure_to_capabilities
+            },
+            "file_details": file_details
         }
-        with open(graph_file, 'w', encoding='utf-8') as f:
-            json.dump(graph_data, f, indent=2, ensure_ascii=False)
         
-        # 5. Procedures by file
-        procedures_by_file = {}
-        for file_name, file_info in file_details.items():
-            procedures_by_file[file_name] = {
-                "file_info": {
-                    "full_path": file_info.get("full_path", ""),
-                    "file_type": file_info.get("file_type", "unknown"),
-                    "total_lines": file_info.get("total_lines", 0),
-                    "processing_status": file_info.get("processing_status", "unknown")
-                },
-                "main_procedures": file_info.get("procedures", []),
-                "subprocedures": file_info.get("subprocedures", []),
-                "summary": {
-                    "total_procedures": len(file_info.get("procedures", [])) + len(file_info.get("subprocedures", [])),
-                    "main_procedure_count": len(file_info.get("procedures", [])),
-                    "subprocedure_count": len(file_info.get("subprocedures", []))
-                }
+        # Add error information if there were failures
+        if failed_files:
+            output["processing_errors"] = {
+                "failed_files": failed_files,
+                "failed_mapping_count": failed_mappings
             }
         
-        procedures_file = output_dir / "procedures_by_file.json"
-        with open(procedures_file, 'w', encoding='utf-8') as f:
-            json.dump(procedures_by_file, f, indent=2, ensure_ascii=False)
+        print(f"✅ Processing complete!")
+        print(f"   📊 {output['summary_statistics']['total_capability_mappings']} total mappings")
+        print(f"   🎯 {output['summary_statistics']['capabilities_with_procedures']} capabilities have procedures")
+        print(f"   🔗 {total_mappings} deduplicated keyword→procedure edges")
+        if failed_files:
+            print(f"   ⚠️  {len(failed_files)} files failed to process")
+        if failed_mappings:
+            print(f"   ⚠️  {failed_mappings} procedures failed to map")
         
-        # 6. Graph edge list (for easy graph library import)
-        edges_file = output_dir / "graph_edges.csv"
-        with open(edges_file, 'w', encoding='utf-8') as f:
-            f.write("source,target,edge_type,confidence,match_type\n")
-            
-            # Capability -> Keyword edges
-            for capability, keywords in output_data["graph_data"]["capability_keywords"].items():
-                for keyword in keywords:
-                    f.write(f'"{capability}","{keyword}",capability_to_keyword,1.0,definition\n')
-            
-            # Keyword -> Procedure edges
-            for keyword, procedures in output_data["graph_data"]["keyword_to_procedures"].items():
-                for proc_info in procedures:
-                    f.write(f'"{keyword}","{proc_info["procedure"]}",keyword_to_procedure,{proc_info["confidence"]},{proc_info["match_type"]}\n')
-        
-        print(f"✅ Created 6 output files:")
-        print(f"   • {main_file.name} - Main summary and metadata")
-        print(f"   • {files_file.name} - Detailed file processing info")
-        print(f"   • {capabilities_file.name} - Business capabilities with procedures")
-        print(f"   • {graph_file.name} - Graph data structure")
-        print(f"   • {procedures_file.name} - Procedures organized by file")
-        print(f"   • {edges_file.name} - Graph edges in CSV format")
+        return output
     
     async def map_procedure_to_capabilities(self, procedure: Dict) -> Dict[str, ProcedureCapabilityMatch]:
         """ENHANCED: Map procedure with TAL naming support while preserving original logic"""
@@ -670,295 +1145,6 @@ class EnhancedBatchASTCapabilityMapper:
         
         return matches
     
-    async def process_directory(self, directory_path: str, confidence_threshold: float = 0.1) -> Dict:
-        """PRESERVED: Original process_directory method with all error handling intact"""
-        print(f"🔍 Processing AST files in: {directory_path}")
-        
-        try:
-            # Find all AST files with validation
-            ast_files = self.find_ast_files(directory_path)
-            if not ast_files:
-                return {
-                    "error": "No valid .ast/.tal files found in directory",
-                    "metadata": {
-                        "source_directory": directory_path,
-                        "total_ast_files": 0,
-                        "total_procedures_found": 0,
-                        "error_details": "Directory contained no readable .ast/.tal files"
-                    }
-                }
-        except Exception as e:
-            return {
-                "error": f"Failed to access directory: {e}",
-                "metadata": {
-                    "source_directory": directory_path,
-                    "error_details": str(e)
-                }
-            }
-        
-        # Process each file with error tracking - PRESERVED
-        all_procedures = []
-        file_stats = {}
-        failed_files = []
-        
-        print(f"🔄 Processing {len(ast_files)} files...")
-        
-        for i, ast_file in enumerate(ast_files):
-            file_name = Path(ast_file).name
-            print(f"   📄 [{i+1}/{len(ast_files)}] Processing {file_name}")
-            
-            try:
-                procedures = self.extract_procedures_from_ast(ast_file)
-                all_procedures.extend(procedures)
-                
-                file_stats[ast_file] = {
-                    "procedure_count": len(procedures),
-                    "procedures": [p.get('name', 'unknown') for p in procedures],
-                    "status": "success"
-                }
-                
-                if len(procedures) == 0:
-                    print(f"      ⚠️  No procedures found in {file_name}")
-                else:
-                    print(f"      ✅ Found {len(procedures)} procedures")
-                
-            except Exception as e:
-                error_msg = f"Failed to process {file_name}: {e}"
-                print(f"      ❌ {error_msg}")
-                
-                failed_files.append({
-                    "file": ast_file,
-                    "error": str(e)
-                })
-                
-                file_stats[ast_file] = {
-                    "procedure_count": 0,
-                    "procedures": [],
-                    "status": "failed",
-                    "error": str(e)
-                }
-        
-        if not all_procedures and not failed_files:
-            return {
-                "error": "No procedures found in any files",
-                "metadata": {
-                    "source_directory": directory_path,
-                    "total_ast_files": len(ast_files),
-                    "total_procedures_found": 0,
-                    "file_statistics": file_stats
-                }
-            }
-        
-        print(f"✅ Extracted {len(all_procedures)} total procedures from {len(ast_files)} files")
-        if failed_files:
-            print(f"⚠️  Failed to process {len(failed_files)} files")
-        
-        # Map all procedures to capabilities with batch processing - PRESERVED
-        print(f"🔗 Mapping procedures to capabilities...")
-        
-        # Organize results by capability - PRESERVED
-        capability_results = {}
-        
-        # Initialize all capabilities - PRESERVED
-        for capability in sorted(self.all_capabilities):
-            capability_results[capability] = {
-                "total_procedures": 0,
-                "high_confidence_procedures": 0,
-                "medium_confidence_procedures": 0,
-                "low_confidence_procedures": 0,
-                "procedures": []
-            }
-        
-        # Process procedures in batches for better performance and error handling - PRESERVED
-        batch_size = 20  # Smaller batches for better error isolation
-        total_batches = (len(all_procedures) + batch_size - 1) // batch_size
-        successful_mappings = 0
-        failed_mappings = 0
-        
-        for batch_idx in range(total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(all_procedures))
-            batch = all_procedures[start_idx:end_idx]
-            
-            print(f"   Progress: Batch {batch_idx + 1}/{total_batches} ({len(batch)} procedures)")
-            
-            # Process batch with individual error handling - PRESERVED
-            for procedure in batch:
-                try:
-                    capability_matches = await self.map_procedure_to_capabilities(procedure)
-                    
-                    # Add to capability results - PRESERVED
-                    for capability, match in capability_matches.items():
-                        if match.confidence >= confidence_threshold:
-                            capability_results[capability]["total_procedures"] += 1
-                            
-                            # Categorize by confidence - PRESERVED
-                            if match.confidence >= 0.7:
-                                capability_results[capability]["high_confidence_procedures"] += 1
-                            elif match.confidence >= 0.4:
-                                capability_results[capability]["medium_confidence_procedures"] += 1
-                            else:
-                                capability_results[capability]["low_confidence_procedures"] += 1
-                            
-                            # Add procedure details - PRESERVED + ENHANCED
-                            try:
-                                proc_detail = {
-                                    "procedure_name": match.procedure_name,
-                                    "file_path": os.path.basename(match.file_path) if match.file_path else "unknown",
-                                    "full_file_path": match.file_path,
-                                    "procedure_path": match.procedure_path,
-                                    "procedure_type": match.procedure_type,
-                                    "confidence": round(match.confidence, 3),
-                                    "match_type": match.match_type,
-                                    "matched_keywords": match.matched_keywords,
-                                    "comments": (match.procedure_comments[:100] + "...") if len(match.procedure_comments) > 100 else match.procedure_comments
-                                }
-                                
-                                # NEW: Add TAL naming info if available
-                                if hasattr(match, 'tal_naming_info') and match.tal_naming_info:
-                                    proc_detail["tal_naming_pattern"] = match.tal_naming_info.get('pattern_type', 'unknown')
-                                    proc_detail["semantic_parts"] = match.tal_naming_info.get('semantic_parts', [])
-                                
-                                capability_results[capability]["procedures"].append(proc_detail)
-                            except Exception as detail_error:
-                                print(f"Warning: Error adding procedure detail: {detail_error}")
-                    
-                    successful_mappings += 1
-                    
-                except Exception as e:
-                    print(f"Warning: Failed to map procedure {procedure.get('name', 'unknown')}: {e}")
-                    failed_mappings += 1
-                    continue
-        
-        # Sort procedures by confidence within each capability - PRESERVED
-        for capability_data in capability_results.values():
-            try:
-                capability_data["procedures"].sort(key=lambda x: x.get("confidence", 0), reverse=True)
-            except Exception as e:
-                print(f"Warning: Error sorting procedures: {e}")
-        
-        # Generate graph data structures required by write_structured_output - NEW
-        print("📊 Building graph data structures...")
-        
-        # Build capability -> keywords mapping
-        capability_keywords = {}
-        for capability, keywords in self.capability_to_keywords.items():
-            capability_keywords[capability] = list(keywords)
-        
-        # Build keyword -> procedures mapping  
-        keyword_to_procedures = defaultdict(list)
-        procedure_to_capabilities = defaultdict(list)
-        
-        for capability, cap_data in capability_results.items():
-            for proc in cap_data["procedures"]:
-                proc_name = proc["procedure_name"]
-                confidence = proc["confidence"]
-                match_type = proc["match_type"]
-                
-                # Add to procedure -> capabilities mapping
-                procedure_to_capabilities[proc_name].append({
-                    "capability": capability,
-                    "confidence": confidence,
-                    "match_type": match_type
-                })
-                
-                # Add to keyword -> procedures mapping based on matched keywords
-                for keyword in proc.get("matched_keywords", []):
-                    # Clean up keyword prefixes (tal:, llm:, pattern:, partial:)
-                    clean_keyword = keyword.split(":")[-1] if ":" in keyword else keyword
-                    keyword_to_procedures[clean_keyword].append({
-                        "procedure": proc_name,
-                        "confidence": confidence,
-                        "match_type": match_type,
-                        "file_path": proc["file_path"]
-                    })
-        
-        # Convert defaultdicts to regular dicts for JSON serialization
-        keyword_to_procedures = dict(keyword_to_procedures)
-        procedure_to_capabilities = dict(procedure_to_capabilities)
-        
-        # Add file_details structure (this was missing) - NEW
-        file_details = {}
-        for file_path, file_stat in file_stats.items():
-            file_name = os.path.basename(file_path)
-            
-            # Count lines in file for metadata
-            total_lines = 0
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    total_lines = sum(1 for _ in f)
-            except:
-                total_lines = 0
-            
-            file_details[file_name] = {
-                "full_path": file_path,
-                "file_type": "tal" if file_path.endswith('.tal') else "ast",
-                "total_lines": total_lines,
-                "processing_status": file_stat["status"],
-                "procedures": [p for p in all_procedures if p["file_path"] == file_path],
-                "subprocedures": []  # Could be enhanced to separate main/sub procedures if needed
-            }
-            if file_stat["status"] == "failed":
-                file_details[file_name]["error"] = file_stat.get("error", "Unknown error")
-        
-        # Build final output with comprehensive error tracking - PRESERVED + ENHANCED
-        output = {
-            "metadata": {
-                "source_directory": directory_path,
-                "total_ast_files": len(ast_files),
-                "successful_files": len(ast_files) - len(failed_files),
-                "failed_files": len(failed_files),
-                "total_procedures_found": len(all_procedures),
-                "successful_mappings": successful_mappings,
-                "failed_mappings": failed_mappings,
-                "confidence_threshold": confidence_threshold,
-                "processing_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "llm_enhanced": self.llm_provider is not None,
-                "tal_naming_enhanced": True,  # NEW
-                "semantic_similarity_enabled": hasattr(self.llm_provider, 'model') and self.llm_provider.model is not None if self.llm_provider else False,  # NEW
-                "similarity_model": self.llm_provider.model_name if self.llm_provider and hasattr(self.llm_provider, 'model_name') else "none"  # NEW
-            },
-            "file_statistics": file_stats,
-            "business_capabilities": capability_results,
-            "summary_statistics": {
-                "capabilities_with_procedures": sum(1 for cap_data in capability_results.values() if cap_data["total_procedures"] > 0),
-                "total_capability_mappings": sum(cap_data["total_procedures"] for cap_data in capability_results.values()),
-                "high_confidence_mappings": sum(cap_data["high_confidence_procedures"] for cap_data in capability_results.values()),
-                "medium_confidence_mappings": sum(cap_data["medium_confidence_procedures"] for cap_data in capability_results.values()),
-                "low_confidence_mappings": sum(cap_data["low_confidence_procedures"] for cap_data in capability_results.values())
-            },
-            # NEW: Add the missing graph_data and file_details required by write_structured_output
-            "graph_data": {
-                "capability_keywords": capability_keywords,
-                "keyword_to_procedures": keyword_to_procedures,
-                "procedure_to_capabilities": procedure_to_capabilities
-            },
-            "file_details": file_details
-        }
-        
-        # Add error information if there were failures
-        if failed_files:
-            output["processing_errors"] = {
-                "failed_files": failed_files,
-                "failed_mapping_count": failed_mappings
-            }
-        
-        # DEBUG: Verify the output structure before returning
-        print(f"DEBUG: Final output keys: {list(output.keys())}")
-        if "graph_data" in output:
-            print(f"DEBUG: graph_data keys: {list(output['graph_data'].keys())}")
-        else:
-            print("DEBUG: graph_data is missing from output!")
-        
-        print(f"✅ Processing complete!")
-        print(f"   📊 {output['summary_statistics']['total_capability_mappings']} total mappings")
-        print(f"   🎯 {output['summary_statistics']['capabilities_with_procedures']} capabilities have procedures")
-        if failed_files:
-            print(f"   ⚠️  {len(failed_files)} files failed to process")
-        if failed_mappings:
-            print(f"   ⚠️  {failed_mappings} procedures failed to map")
-        
-        return output
 
 async def main():
     """Main CLI function with configurable confidence parameters"""
@@ -1139,3 +1325,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
