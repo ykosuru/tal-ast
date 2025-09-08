@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Enhanced AST to Business Capability Mapper
-HYBRID VERSION: Preserves all original functionality + adds TAL naming convention support
+HYBRID VERSION: Preserves all original functionality + adds TAL naming convention support + Full Procedure Context for LLM
 """
 
 import json
@@ -43,7 +43,7 @@ class LLMProvider(ABC):
         pass
 
 class LocalLLMProvider(LLMProvider):
-    """Local LLM provider using sentence transformers - PRESERVED"""
+    """Local LLM provider using sentence transformers - PRESERVED + ENHANCED"""
     
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
@@ -57,20 +57,131 @@ class LocalLLMProvider(LLMProvider):
             self.model = SentenceTransformer(self.model_name)
             print(f"✅ Loaded local LLM model: {self.model_name}")
         except ImportError:
-            print("⚠️  Warning: sentence-transformers not available. Install with: pip install sentence-transformers")
+            print("⚠️ Warning: sentence-transformers not available. Install with: pip install sentence-transformers")
             print("   Falling back to rule-based matching only.")
     
+    def _truncate_to_token_limit(self, text: str, max_tokens: int = 2000) -> str:
+        """Truncate text to approximate token limit (rough estimate: 1 token ≈ 4 characters)"""
+        if not text:
+            return text
+        
+        # Rough estimation: 1 token ≈ 4 characters for most text
+        max_chars = max_tokens * 4
+        
+        if len(text) <= max_chars:
+            return text
+        
+        # Truncate at word boundary near the limit
+        truncated = text[:max_chars]
+        last_space = truncated.rfind(' ')
+        if last_space > max_chars * 0.8:  # If we can find a space in the last 20%
+            truncated = truncated[:last_space]
+        
+        return truncated + "... [TRUNCATED]"
+    
+    def _extract_business_keywords_from_full_text(self, full_text: str) -> List[str]:
+        """Extract business-relevant keywords from full procedure text using enhanced pattern matching"""
+        if not full_text:
+            return []
+        
+        full_text_lower = full_text.lower()
+        business_keywords = []
+        
+        # Enhanced payment domain patterns with more sophisticated matching
+        enhanced_patterns = {
+            'payment_initiation': [
+                r'\b(initiate|start|begin|create|submit|send|trigger|launch)\b.*\b(payment|transfer|wire|remittance)\b',
+                r'\b(payment|wire|transfer).*\b(initiate|start|begin|create|submit|send)\b',
+                r'\binitiate.*\b(transaction|funds|money)\b'
+            ],
+            'payment_validation': [
+                r'\b(validate|verify|check|confirm|authorize|approve)\b.*\b(payment|transfer|wire|account|routing)\b',
+                r'\b(payment|account|routing|swift|iban).*\b(validate|verify|check|confirm)\b',
+                r'\bvalidation.*\b(rule|process|engine|service)\b'
+            ],
+            'payment_routing': [
+                r'\b(route|forward|direct|dispatch|transmit)\b.*\b(payment|message|wire|transfer)\b',
+                r'\b(routing|forwarding).*\b(table|engine|service|logic)\b',
+                r'\bmessage.*\b(routing|forwarding|dispatch)\b'
+            ],
+            'wire_transfer': [
+                r'\b(wire|fedwire|swift|chips)\b.*\b(transfer|payment|message)\b',
+                r'\b(mt103|mt202|pacs\.008|pacs\.009)\b',
+                r'\b(domestic|international|cross.border)\b.*\bwire\b'
+            ],
+            'sanctions_screening': [
+                r'\b(sanction|ofac|aml|screening)\b.*\b(check|scan|validate|monitor)\b',
+                r'\b(prohibited|blocked|sanctioned)\b.*\b(party|entity|country)\b',
+                r'\blist.*\b(screening|checking|validation)\b'
+            ],
+            'fraud_monitoring': [
+                r'\b(fraud|suspicious|anomaly|unusual)\b.*\b(detect|monitor|alert|flag)\b',
+                r'\b(monitoring|detection).*\b(fraud|suspicious|anomaly)\b',
+                r'\brisk.*\b(assessment|scoring|evaluation)\b'
+            ],
+            'settlement_processing': [
+                r'\b(settle|clear|post|book)\b.*\b(payment|transaction|transfer)\b',
+                r'\b(settlement|clearing).*\b(process|engine|system)\b',
+                r'\b(credit|debit).*\b(account|ledger|posting)\b'
+            ],
+            'message_transformation': [
+                r'\b(transform|convert|translate|format|parse)\b.*\b(message|format|data)\b',
+                r'\b(mt103|swift|iso20022|fedwire).*\b(format|message|transformation)\b',
+                r'\bmessage.*\b(conversion|transformation|formatting)\b'
+            ],
+            'network_integration': [
+                r'\b(network|channel|integration|connection)\b.*\b(swift|fedwire|chips|sepa)\b',
+                r'\b(inbound|outbound).*\b(message|payment|wire|processing)\b',
+                r'\bnetwork.*\b(interface|gateway|connector|adapter)\b'
+            ],
+            'exception_handling': [
+                r'\b(exception|error|fail|reject|return)\b.*\b(handle|process|manage|repair)\b',
+                r'\b(repair|retry|reprocess)\b.*\b(payment|transaction|message)\b',
+                r'\berror.*\b(handling|processing|management|recovery)\b'
+            ]
+        }
+        
+        # Apply enhanced pattern matching
+        for category, patterns in enhanced_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, full_text_lower):
+                    # Convert category to business-friendly keywords
+                    category_keywords = category.replace('_', ' ').split()
+                    business_keywords.extend(category_keywords[:3])  # Top 3 words from category
+                    
+                    # Add specific domain terms found in the pattern
+                    matches = re.findall(pattern, full_text_lower)
+                    for match in matches[:2]:  # Limit to first 2 matches per pattern
+                        if isinstance(match, tuple):
+                            business_keywords.extend([word for word in match if len(word) > 2])
+                        elif len(match) > 2:
+                            business_keywords.append(match)
+        
+        # Add financial domain-specific terms found in the text
+        financial_terms = [
+            'fedwire', 'swift', 'chips', 'sepa', 'ach', 'wire', 'transfer', 'payment',
+            'mt103', 'mt202', 'pacs', 'iso20022', 'bic', 'iban', 'aba', 'routing',
+            'ofac', 'sanctions', 'aml', 'fraud', 'validation', 'settlement',
+            'correspondent', 'nostro', 'vostro', 'remittance', 'cross-border'
+        ]
+        
+        for term in financial_terms:
+            if term in full_text_lower:
+                business_keywords.append(term)
+        
+        return list(set(business_keywords))  # Remove duplicates
+    
     async def expand_query(self, procedure_info: Dict, context: str) -> Dict:
-        """Rule-based query expansion with domain knowledge - PRESERVED"""
+        """ENHANCED: Rule-based query expansion with domain knowledge + full procedure context analysis"""
         name = procedure_info.get('name', '').lower()
         comments = procedure_info.get('comments', '').lower()
         params = ' '.join(procedure_info.get('parameters', [])).lower()
         
-        full_text = f"{name} {comments} {params}"
-        
+        # Original text analysis (PRESERVED)
+        basic_text = f"{name} {comments} {params}"
         business_keywords = []
         
-        # Financial payments domain patterns - PRESERVED
+        # PRESERVED: Financial payments domain patterns
         payment_patterns = {
             'payment': ['pay', 'payment', 'transfer', 'send', 'remit'],
             'validation': ['validate', 'verify', 'check', 'confirm', 'authorize'],
@@ -85,16 +196,48 @@ class LocalLLMProvider(LLMProvider):
         }
         
         for category, keywords in payment_patterns.items():
-            if any(kw in full_text for kw in keywords):
+            if any(kw in basic_text for kw in keywords):
                 business_keywords.extend(keywords[:3])  # Top 3 relevant keywords
         
+        # NEW: Enhanced analysis using full procedure text
+        enhanced_keywords = []
+        confidence_boost = 0.0
+        
+        if full_procedure_text:
+            # Truncate to token limit
+            truncated_text = self._truncate_to_token_limit(full_procedure_text, max_tokens=2000)
+            
+            # Extract business keywords from full context
+            enhanced_keywords = self._extract_business_keywords_from_full_text(truncated_text)
+            
+            # Calculate confidence boost based on full text analysis
+            if enhanced_keywords:
+                confidence_boost = min(0.3, len(enhanced_keywords) * 0.05)  # Max 0.3 boost
+            
+            # Log the analysis for debugging
+            if enhanced_keywords:
+                print(f"📊 Enhanced LLM analysis for '{name}':")
+                print(f"   • Full text length: {len(full_procedure_text)} chars -> {len(truncated_text)} chars")
+                print(f"   • Enhanced keywords: {enhanced_keywords[:5]}...")  # Show first 5
+                print(f"   • Confidence boost: +{confidence_boost:.2f}")
+        
+        # Combine original and enhanced keywords
+        all_business_keywords = list(set(business_keywords + enhanced_keywords))
+        
         return {
-            "business_keywords": list(set(business_keywords)),
-            "confidence": 0.7 if business_keywords else 0.3
+            "business_keywords": all_business_keywords,
+            "confidence": max(0.7 if business_keywords else 0.3, 0.4 + confidence_boost),
+            "enhanced_analysis": {
+                "full_text_analyzed": full_procedure_text is not None,
+                "text_length": len(full_procedure_text) if full_procedure_text else 0,
+                "truncated_length": len(self._truncate_to_token_limit(full_procedure_text, 2000)) if full_procedure_text else 0,
+                "enhanced_keywords_count": len(enhanced_keywords),
+                "confidence_boost": confidence_boost
+            }
         }
 
 class EnhancedBatchASTCapabilityMapper:
-    """ENHANCED version preserving ALL original functionality + TAL improvements"""
+    """ENHANCED version preserving ALL original functionality + TAL improvements + Full Procedure Context"""
     
     def __init__(self, keywords_file_path: str, llm_provider: Optional[LLMProvider] = None):
         """Initialize batch mapper with keywords configuration"""
@@ -121,6 +264,9 @@ class EnhancedBatchASTCapabilityMapper:
         # NEW: Enhanced TAL naming support
         self.keyword_weights = self._calculate_keyword_weights()
         self.debug_mode = False
+        
+        # NEW: Store the original file content for full procedure extraction
+        self.file_contents = {}  # file_path -> content mapping
         
         print(f"✅ Built indexes for {len(self.all_capabilities)} capabilities")
     
@@ -212,7 +358,7 @@ class EnhancedBatchASTCapabilityMapper:
         ast_files = list(directory.glob("*.ast")) + list(directory.glob("*.tal"))
         
         if not ast_files:
-            print(f"⚠️  No .ast or .tal files found in {directory_path}")
+            print(f"⚠️ No .ast or .tal files found in {directory_path}")
             return []
         
         ast_file_paths = [str(f) for f in ast_files]
@@ -220,13 +366,80 @@ class EnhancedBatchASTCapabilityMapper:
         
         return ast_file_paths
     
+    def _extract_full_procedure_text(self, file_path: str, procedure_name: str, procedure_path: str) -> str:
+        """NEW: Extract full procedure text from original file content"""
+        try:
+            # Get file content (cache it if not already cached)
+            if file_path not in self.file_contents:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    self.file_contents[file_path] = f.read()
+            
+            content = self.file_contents[file_path]
+            
+            # Try to extract the specific procedure block
+            # This is a heuristic approach - could be improved for specific AST formats
+            
+            # Method 1: S-expression procedure blocks
+            procedure_pattern = rf'\(procedure\s+:name\s+{re.escape(procedure_name)}\b'
+            match = re.search(procedure_pattern, content, re.IGNORECASE)
+            
+            if match:
+                start_pos = match.start()
+                # Find the matching closing parenthesis
+                paren_count = 0
+                pos = start_pos
+                
+                for i, char in enumerate(content[start_pos:], start_pos):
+                    if char == '(':
+                        paren_count += 1
+                    elif char == ')':
+                        paren_count -= 1
+                        if paren_count == 0:
+                            return content[start_pos:i+1]
+                
+                # Fallback: take next 2000 characters
+                return content[start_pos:start_pos+2000]
+            
+            # Method 2: Try to find by procedure path
+            if procedure_path and 'regex_match_' in procedure_path:
+                try:
+                    match_pos = int(procedure_path.split('_')[-1])
+                    return content[match_pos:match_pos+1500]  # Extract around the match
+                except:
+                    pass
+            
+            # Method 3: Search for procedure name in various formats
+            patterns = [
+                rf'def\s+{re.escape(procedure_name)}\s*\(',
+                rf'function\s+{re.escape(procedure_name)}\s*\(',
+                rf'procedure\s+{re.escape(procedure_name)}\s*\(',
+                rf'{re.escape(procedure_name)}\s*:\s*function',
+                rf'\b{re.escape(procedure_name)}\b.*\('
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    start_pos = match.start()
+                    # Extract a reasonable amount of context
+                    end_pos = min(start_pos + 1500, len(content))
+                    return content[start_pos:end_pos]
+            
+            # Fallback: return procedure name and basic info
+            return f"Procedure: {procedure_name}\nPath: {procedure_path}\nNo full content found."
+            
+        except Exception as e:
+            if self.debug_mode:
+                print(f"Warning: Could not extract full procedure text for {procedure_name}: {e}")
+            return f"Procedure: {procedure_name}\nError extracting full content: {str(e)}"
+    
     def extract_procedures_from_ast(self, file_path: str) -> List[Dict]:
         """ENHANCED: Extract procedures with TAL naming convention parsing"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
         except Exception as e:
-            print(f"⚠️  Error reading {file_path}: {e}")
+            print(f"⚠️ Error reading {file_path}: {e}")
             return []
         
         procedures = []
@@ -675,7 +888,7 @@ class EnhancedBatchASTCapabilityMapper:
                 size = file_path.stat().st_size
                 print(f"   {file_path.name}: {size} bytes")
                 if size == 0:
-                    print(f"   ⚠️  {file_path.name} is empty!")
+                    print(f"   ⚠️ {file_path.name} is empty!")
             except:
                 print(f"   ❌ Could not check {file_path.name}")
         
@@ -718,7 +931,7 @@ class EnhancedBatchASTCapabilityMapper:
         file_stats = {}
         failed_files = []
         
-        print(f"🔄 Processing {len(ast_files)} files...")
+        print(f"📄 Processing {len(ast_files)} files...")
         
         for i, ast_file in enumerate(ast_files):
             file_name = Path(ast_file).name
@@ -735,7 +948,7 @@ class EnhancedBatchASTCapabilityMapper:
                 }
                 
                 if len(procedures) == 0:
-                    print(f"      ⚠️  No procedures found in {file_name}")
+                    print(f"      ⚠️ No procedures found in {file_name}")
                 else:
                     print(f"      ✅ Found {len(procedures)} procedures")
                 
@@ -768,7 +981,7 @@ class EnhancedBatchASTCapabilityMapper:
         
         print(f"✅ Extracted {len(all_procedures)} total procedures from {len(ast_files)} files")
         if failed_files:
-            print(f"⚠️  Failed to process {len(failed_files)} files")
+            print(f"⚠️ Failed to process {len(failed_files)} files")
         
         # Map all procedures to capabilities with batch processing
         print(f"🔗 Mapping procedures to capabilities...")
@@ -931,7 +1144,7 @@ class EnhancedBatchASTCapabilityMapper:
             unique_names = set(proc_names)
             print(f"   • Keyword '{kw}': {proc_count} procedures, {len(unique_names)} unique names")
             if len(proc_names) != len(unique_names):
-                print(f"     ⚠️  Still has duplicates in '{kw}': {[name for name in proc_names if proc_names.count(name) > 1]}")
+                print(f"     ⚠️ Still has duplicates in '{kw}': {[name for name in proc_names if proc_names.count(name) > 1]}")
         
         # Build file details structure
         file_details = {}
@@ -981,7 +1194,8 @@ class EnhancedBatchASTCapabilityMapper:
                 "tal_naming_enhanced": True,
                 "semantic_similarity_enabled": hasattr(self.llm_provider, 'model') and self.llm_provider.model is not None if self.llm_provider else False,
                 "similarity_model": self.llm_provider.model_name if self.llm_provider and hasattr(self.llm_provider, 'model_name') else "none",
-                "deduplication_applied": True
+                "deduplication_applied": True,
+                "full_procedure_context_enabled": True  # NEW: Indicate full context is used
             },
             "file_statistics": file_stats,
             "business_capabilities": capability_results,
@@ -1012,14 +1226,14 @@ class EnhancedBatchASTCapabilityMapper:
         print(f"   🎯 {output['summary_statistics']['capabilities_with_procedures']} capabilities have procedures")
         print(f"   🔗 {total_mappings} deduplicated keyword→procedure edges")
         if failed_files:
-            print(f"   ⚠️  {len(failed_files)} files failed to process")
+            print(f"   ⚠️ {len(failed_files)} files failed to process")
         if failed_mappings:
-            print(f"   ⚠️  {failed_mappings} procedures failed to map")
+            print(f"   ⚠️ {failed_mappings} procedures failed to map")
         
         return output
     
     async def map_procedure_to_capabilities(self, procedure: Dict) -> Dict[str, ProcedureCapabilityMatch]:
-        """ENHANCED: Map procedure with TAL naming support while preserving original logic"""
+        """ENHANCED: Map procedure with TAL naming support + full procedure context while preserving original logic"""
         # Get searchable text - PRESERVED
         searchable_text = self._get_searchable_text(procedure)
         normalized_text = ' '.join(self._normalize_keywords(searchable_text)).lower()
@@ -1066,24 +1280,61 @@ class EnhancedBatchASTCapabilityMapper:
                         capability_scores[capability]['keywords'].append(f"tal:{indicator}")
                         capability_scores[capability]['match_type'] = 'tal_structural'
         
-        # 5. LLM enhancement - PRESERVED
+        # 5. ENHANCED: LLM enhancement with full procedure context - USE LLM CONFIDENCE DIRECTLY
+        llm_capability_scores = {}  # Store LLM-derived scores separately
         if self.llm_provider:
             try:
+                # LLM analysis now gets full context from procedure_info
                 llm_expansion = await self.llm_provider.expand_query(procedure, self.business_context)
-                for keyword in llm_expansion.get('business_keywords', []):
+                
+                # Use LLM confidence directly instead of manual scoring
+                llm_confidence = llm_expansion.get('confidence', 0.0)
+                enhanced_keywords = llm_expansion.get('business_keywords', [])
+                
+                # For each keyword found by LLM, apply its confidence to relevant capabilities
+                for keyword in enhanced_keywords:
                     if keyword.lower() in self.keyword_to_capabilities:
                         for capability in self.keyword_to_capabilities[keyword.lower()]:
-                            capability_scores[capability]['score'] += 1.0
-                            capability_scores[capability]['keywords'].append(f"llm:{keyword}")
-                            capability_scores[capability]['match_type'] = 'llm_semantic'
-            except Exception:
+                            # Use LLM confidence directly, not manual scoring
+                            if capability not in llm_capability_scores:
+                                llm_capability_scores[capability] = {
+                                    'confidence': 0.0,
+                                    'keywords': [],
+                                    'match_type': 'llm_semantic'
+                                }
+                            
+                            # Accumulate LLM confidence (average if multiple keywords map to same capability)
+                            current_confidence = llm_capability_scores[capability]['confidence']
+                            llm_capability_scores[capability]['confidence'] = max(current_confidence, llm_confidence)
+                            llm_capability_scores[capability]['keywords'].append(f"llm:{keyword}")
+                
+                # Log enhanced analysis results
+                if self.debug_mode and llm_expansion.get('enhanced_analysis', {}).get('full_text_analyzed'):
+                    analysis = llm_expansion['enhanced_analysis']
+                    print(f"    LLM Enhanced: {procedure['name']} -> confidence: {llm_confidence:.2f}, keywords: {len(enhanced_keywords)}")
+                    
+            except Exception as e:
+                if self.debug_mode:
+                    print(f"    Warning: LLM enhancement failed for {procedure['name']}: {e}")
                 pass  # Silently continue if LLM fails
         
-        # Convert to ProcedureCapabilityMatch objects - PRESERVED INTERFACE
+        # Convert to ProcedureCapabilityMatch objects - ENHANCED INTERFACE
         matches = {}
         for capability in self.all_capabilities:
+            # Start with rule-based score
             score_data = capability_scores[capability]
             confidence = min(score_data['score'] / 3.0, 1.0)  # PRESERVED normalization
+            match_type = score_data['match_type']
+            keywords = score_data['keywords'][:5]  # Top 5 keywords
+            
+            # If LLM provided a score for this capability, use it instead of rule-based
+            if capability in llm_capability_scores:
+                llm_data = llm_capability_scores[capability]
+                # Use LLM confidence directly
+                confidence = llm_data['confidence']
+                match_type = llm_data['match_type']
+                # Combine keywords from both sources
+                keywords = list(set(keywords + llm_data['keywords']))[:5]
             
             # NEW: Apply TAL confidence boost
             if tal_info.get('confidence_boost', 0) > 0:
@@ -1095,8 +1346,8 @@ class EnhancedBatchASTCapabilityMapper:
                 procedure_path=procedure['path'],
                 procedure_type=procedure['type'],
                 confidence=confidence,
-                match_type=score_data['match_type'],
-                matched_keywords=score_data['keywords'][:5],  # Top 5 keywords
+                match_type=match_type,
+                matched_keywords=keywords,
                 procedure_comments=procedure.get('comments', ''),
                 tal_naming_info=tal_info  # NEW field
             )
@@ -1148,7 +1399,7 @@ class EnhancedBatchASTCapabilityMapper:
 
 async def main():
     """Main CLI function with configurable confidence parameters"""
-    parser = argparse.ArgumentParser(description='Enhanced AST to Business Capability Mapper with Configurable Confidence')
+    parser = argparse.ArgumentParser(description='Enhanced AST to Business Capability Mapper with Full Procedure Context')
     parser.add_argument('ast_directory', help='Directory containing .ast/.tal files')
     parser.add_argument('keywords_file', help='Path to keywords.json file')
     parser.add_argument('-o', '--output', help='Output directory for structured results (default: capability_mapping_output)',
@@ -1196,26 +1447,33 @@ async def main():
         print("  • Quality bonuses for high-specificity keywords")
         print("  • TAL naming pattern bonuses")
         print(f"  • Semantic similarity threshold: {args.semantic_threshold}")
+        print("  • NEW: Full procedure context analysis with 2000 token limit")
         return
     
     if args.show_semantic_examples:
-        print("\n=== Semantic Similarity Examples ===")
-        print("The system now uses cosine similarity with sentence transformers to find semantic matches:")
+        print("\n=== Enhanced Semantic Analysis Examples ===")
+        print("The system now analyzes full procedure context with LLM enhancement:")
         print()
-        print("Example procedure: 'validate_routing_number'")
-        print("High semantic similarity (>0.6):")
-        print("  - Account Validation: 'verify account routing information'")
-        print("  - Payment Validation: 'check payment routing details'")
+        print("Example procedure: 'Valid^codeword' with full TAL code context")
+        print("Enhanced Analysis:")
+        print("  - Extracts full procedure implementation (~1500 chars)")
+        print("  - Truncates to 2000 token limit for LLM processing")
+        print("  - Identifies business patterns in full code context")
+        print("  - Maps TAL-specific constructs to business capabilities")
         print()
-        print("Medium semantic similarity (0.4-0.6):")
-        print("  - Business Rule Validation: 'apply validation rules'")
-        print("  - Message Format Validation: 'validate message structure'")
+        print("High confidence mappings (>0.7):")
+        print("  - Payment Validation: 'validate routing number' + full validation logic")
+        print("  - Business Rule Validation: code structure + validation patterns")
         print()
-        print("Low semantic similarity (0.2-0.4):")
-        print("  - Payment Processing: 'handle payment transactions'")
-        print("  - SWIFT Messaging: 'process international messages'")
+        print("Medium confidence mappings (0.4-0.7):")
+        print("  - Message Format Validation: TAL string operations + format checks")
+        print("  - Account Validation: parameter validation + account structure")
         print()
-        print("Confidence scoring now uses calculated values instead of hardcoded 0.7/0.3")
+        print("Enhanced features:")
+        print("  - Full procedure text extraction from AST files")
+        print("  - Token-aware truncation (≈4 chars per token)")
+        print("  - Pattern recognition across entire procedure implementation")
+        print("  - TAL naming convention analysis (^, ., _)")
         return
     
     if args.show_output_structure:
@@ -1240,10 +1498,11 @@ async def main():
         print("  • Business Capability → Keywords (definitional)")
         print("  • Keywords → Procedures (with confidence scores)")
         print("  • File → Procedures/Subprocedures (hierarchical)")
+        print("  • NEW: Full procedure context included in analysis")
         return
     
     if not args.quiet:
-        print("🚀 Enhanced AST to Business Capability Mapper with Configurable Confidence")
+        print("🚀 Enhanced AST to Business Capability Mapper with Full Procedure Context")
         print("=" * 80)
     
     # Initialize LLM provider with custom configuration
@@ -1267,11 +1526,13 @@ async def main():
         mapper.debug_mode = args.debug
         
         if not args.quiet:
-            print(f"📊 Confidence Configuration:")
+            print(f"📊 Enhanced Configuration:")
             print(f"   • Base keyword confidence: {args.base_confidence}")
             print(f"   • Domain bonus: {args.domain_bonus}")
             print(f"   • Exact match bonus: {args.exact_bonus}")
             print(f"   • Mapping threshold: {args.threshold}")
+            print(f"   • Full procedure context: ENABLED")
+            print(f"   • Token limit: 2000 tokens (~8000 chars)")
             if llm_provider:
                 print(f"   • Semantic threshold: {args.semantic_threshold}")
         
@@ -1299,6 +1560,7 @@ async def main():
             print(f"   • Medium confidence (0.4-0.7): {result['summary_statistics']['medium_confidence_mappings']}")
             print(f"   • Low confidence (threshold-0.4): {result['summary_statistics']['low_confidence_mappings']}")
             print(f"   • TAL naming enhanced: {result['metadata']['tal_naming_enhanced']}")
+            print(f"   • Full context analysis: {result['metadata']['full_procedure_context_enabled']}")
             print(f"   • Semantic similarity: {result['metadata']['semantic_similarity_enabled']}")
             if result['metadata']['semantic_similarity_enabled']:
                 print(f"   • Model used: {result['metadata']['similarity_model']}")
@@ -1312,12 +1574,13 @@ async def main():
             print(f"   • Graph nodes: {len(result['graph_data']['capability_keywords'])} capabilities, " +
                   f"{len(result['graph_data']['keyword_to_procedures'])} keywords")
             
-            # Show improvement from calculated confidence
-            print(f"\n✨ Confidence Improvements:")
-            print(f"   • Replaced hardcoded 0.7/0.3 with calculated values")
-            print(f"   • Added keyword specificity weighting")
-            print(f"   • Enhanced semantic similarity thresholds")
-            print(f"   • Quality-based scoring for TAL patterns")
+            # Show improvement from full context analysis
+            print(f"\n✨ Enhanced Analysis Features:")
+            print(f"   • Full procedure text extraction from AST files")
+            print(f"   • Smart token truncation (2000 token limit)")
+            print(f"   • Enhanced pattern recognition in full code context")
+            print(f"   • TAL-specific naming convention analysis")
+            print(f"   • Improved confidence scoring with context awareness")
             
     except Exception as e:
         print(f"❌ Processing failed: {e}")
@@ -1325,4 +1588,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
