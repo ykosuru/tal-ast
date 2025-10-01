@@ -28,105 +28,142 @@ Usage:
     
     # Step 3: Apply repairs to new payments
     python repair_system.py repair --input payment.json --output repaired.json --model models/
+
+Usage:
+    Learn Phase:
+        python ace_repair_model.py learn --input repairs.json
+    
+    Train Phase:
+        python ace_repair_model.py train --input repairs.json --epochs 50
+    
+    Repair Phase:
+        python ace_repair_model.py repair --input payment.json --output result.json
+
+Author: Enhanced Three-Phase Implementation
+Date: 2025
 """
 
-import json
 import torch
 import torch.nn as nn
-import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+import json
 import argparse
 import os
-import re
 from typing import Dict, List, Optional, Tuple, Set, Any
-from collections import defaultdict, Counter
+import numpy as np
+from dataclasses import dataclass, asdict
 from pathlib import Path
+import pickle
+import re
+from collections import defaultdict, Counter
 import logging
-from copy import deepcopy
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# RULE LEARNING ENGINE
+# CONFIGURATION
 # ============================================================================
 
-class RuleLearner:
-    """
-    Learns what each ACE rule does by analyzing training examples.
+@dataclass
+class Config:
+    """Model configuration"""
+    embedding_dim: int = 128
+    hidden_dim: int = 256
+    num_lstm_layers: int = 2
+    dropout: float = 0.3
+    num_attention_heads: int = 8
+    repair_attention_heads: int = 4
     
-    This is the "knowledge extraction" phase that builds:
-    1. Rule definitions: What each ACE ID means (from ace[] section)
-    2. Lookup tables: BIC → bank details, routing → bank info (from before→after)
-    3. Rule types: Which rules need lookups vs extraction vs formatting
+    batch_size: int = 16
+    learning_rate: float = 0.001
+    num_epochs: int = 100
+    weight_decay: float = 1e-4
+    grad_clip: float = 1.0
     
-    Example:
-        Rule 6035 learns from training data:
-        - Description: "NCH Code derived from BIC"
-        - Lookup: BOFAUS3N → {"name": "BANK OF AMERICA, N.A., NY", ...}
-        - Type: LOOKUP_ENRICHMENT (needs BIC directory lookup)
-    """
+    max_text_length: int = 128
+    max_fields: int = 100
+    max_repairs: int = 20
+    train_split: float = 0.8
+    val_split: float = 0.1
+    
+    char_loss_weight: float = 1.0
+    change_detection_weight: float = 0.1
+    repair_prediction_weight: float = 0.2
+    
+    model_save_path: str = "./models/ace_model.pt"
+    vocab_save_path: str = "./models/ace_vocab.pkl"
+    field_vocab_save_path: str = "./models/ace_field_vocab.pkl"
+    repair_taxonomy_path: str = "./models/ace_repair_taxonomy.json"
+    lookup_tables_path: str = "./models/lookup_tables.pkl"
+    
+    def save(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(asdict(self), f, indent=2)
+    
+    @classmethod
+    def load(cls, path: str):
+        with open(path, 'r') as f:
+            return cls(**json.load(f))
+
+
+# ============================================================================
+# PHASE 1: LEARN - LOOKUP TABLE BUILDER
+# ============================================================================
+
+class LookupTableBuilder:
+    """Builds lookup tables by analyzing repair patterns and diffs"""
     
     def __init__(self):
-        # Store discovered rules: ace_id -> {id, code, field, text, count, type}
-        self.rules = {}
+        self.bic_to_bank_info = {}  # BIC -> {name, country, city, etc}
+        self.iban_to_info = {}  # IBAN -> {country, bank_code, etc}
+        self.country_code_mappings = {}  # Various country code formats
+        self.field_standardizations = defaultdict(dict)  # field -> {old: new}
+        self.repair_to_lookup_type = {}  # repair_id -> lookup category
         
-        # Lookup tables for value substitution: table_name -> key -> value
-        # e.g., lookup_tables['bic']['BOFAUS3N'] = {'name': 'BANK OF AMERICA...', ...}
-        self.lookup_tables = defaultdict(dict)
+        # Track patterns for each repair type
+        self.repair_patterns = defaultdict(list)
         
-        # Rule type classification (determines execution strategy)
-        self.rule_types = {}
+        # Statistics
+        self.stats = {
+            'total_transactions': 0,
+            'total_diffs': 0,
+            'lookup_operations': defaultdict(int),
+            'field_additions': Counter(),
+            'field_edits': Counter(),
+            'field_drops': Counter()
+        }
+    
+    def learn_from_transactions(self, transactions_file: str):
+        """Main learning phase - extract patterns from all transactions"""
+        logger.info("="*70)
+        logger.info("PHASE 1: LEARNING FROM REPAIR PATTERNS")
+        logger.info("="*70)
         
-    def learn_from_file(self, json_file: str):
-        """
-        Analyze training file to discover all rules and build lookup tables.
-        
-        Process:
-        1. First pass: Collect ACE rule metadata (ID, description, field)
-        2. Second pass: Build lookup tables and classify rule types
-        
-        Args:
-            json_file: Path to training JSON with transactions containing:
-                      - ace[]: Rules that were applied
-                      - before/after: Payment state before and after repair
-                      - diffs[]: Exact changes made
-        
-        Returns:
-            self: For method chaining
-        """
-        logger.info(f"Learning rules from {json_file}")
-        
-        with open(json_file, 'r', encoding='utf-8') as f:
+        with open(transactions_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # ===== FIRST PASS: Collect rule metadata from ace[] sections =====
-        for txn_id, txn_data in data.items():
-            for repair in txn_data.get('ace', []):
-                ace_id = repair.get('id')
-                if ace_id and ace_id not in self.rules:
-                    # Store rule metadata
-                    self.rules[ace_id] = {
-                        'id': ace_id,
-                        'code': repair.get('code', 'I'),  # I/W/E/R category
-                        'field': repair.get('field', ''),  # Primary field affected
-                        'text': repair.get('text', ''),    # Human-readable description
-                        'count': 0,                        # Number of times seen
-                    }
+        self.stats['total_transactions'] = len(data)
         
-        # ===== SECOND PASS: Build lookups and classify rule types =====
+        processed_count = 0
         for txn_id, txn_data in data.items():
-            # Get list of ACE rules applied to this transaction
-            ace_ids = [r['id'] for r in txn_data.get('ace', [])]
+            processed_count += 1
+            if processed_count % 100 == 0:
+                logger.info(f"Processing transaction {processed_count}/{len(data)}...")
             
-            # Increment usage count for each rule
-            for ace_id in ace_ids:
-                if ace_id in self.rules:
-                    self.rules[ace_id]['count'] += 1
+            # Extract ACE repairs
+            ace_repairs = txn_data.get('ace', [])
+            repair_ids = [r['id'] for r in ace_repairs]
             
-            # Analyze transformations for each entity (cdtrAgt, dbtrAgt, etc.)
-            for entity_key in ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'cdtr', 'dbtr',
+            # Process each entity (cdtrAgt, dbtrAgt, etc.)
+            for entity_key in ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'cdtr', 'dbtr', 
                               'cdtrAcct', 'dbtrAcct', 'intrmyAgt1', 'intrmyAgt2']:
                 if entity_key not in txn_data:
                     continue
@@ -134,1216 +171,1199 @@ class RuleLearner:
                 entity_data = txn_data[entity_key]
                 before = entity_data.get('before', {})
                 after = entity_data.get('after', {})
+                diffs = entity_data.get('diffs', [])
                 
-                # Build lookup tables by comparing before → after
-                self._extract_lookups(before, after, entity_key)
+                # Learn from diffs
+                for diff in diffs:
+                    self.analyze_diff(diff, before, after, repair_ids, entity_key)
         
-        # ===== CLASSIFY RULE TYPES =====
-        self._classify_rule_types()
-        
-        logger.info(f"Learned {len(self.rules)} ACE rules")
-        logger.info(f"Built lookup tables: BIC={len(self.lookup_tables['bic'])}, "
-                   f"Routing={len(self.lookup_tables['routing'])}")
-        
-        return self
+        self.print_statistics()
+        return self.compile_lookup_tables()
     
-    def _extract_lookups(self, before: Dict, after: Dict, entity_key: str):
-        """
-        Extract lookup patterns from before → after transformations.
+    def analyze_diff(self, diff: Dict, before: Dict, after: Dict, 
+                     repair_ids: List[str], entity_key: str):
+        """Analyze a single diff entry to extract lookup patterns"""
+        self.stats['total_diffs'] += 1
         
-        This builds dictionaries for value substitution:
-        - BIC code → bank name, address, country
-        - Routing number → bank details
-        - IBAN → validation status
+        # Handle both formats: 'msg' or 'action', 'key' or 'field', 'val' or 'value'
+        action = diff.get('action') or diff.get('msg', 'unknown')
+        field_path = diff.get('field') or diff.get('key', '')
+        value = diff.get('value') or diff.get('val')
+        source = diff.get('source', '')
         
-        Example:
-            before: {"FinInstnId": {"BICFI": "BOFAUS3N"}}
-            after:  {"finInstnId": {"bicFi": "BOFAUS3N", 
-                                   "nm": "BANK OF AMERICA, N.A., NY", ...}}
-            
-            Creates: lookup_tables['bic']['BOFAUS3N'] = {'name': 'BANK OF AMERICA...', ...}
+        # Track statistics
+        if action == 'added':
+            self.stats['field_additions'][field_path] += 1
+        elif action in ['edited', 'transformed']:
+            self.stats['field_edits'][field_path] += 1
+        elif action == 'dropped':
+            self.stats['field_drops'][field_path] += 1
         
-        Args:
-            before: Payment entity state before repair
-            after: Payment entity state after repair
-            entity_key: Entity type (cdtrAgt, dbtrAgt, etc.)
-        """
-        
-        # ===== Extract BIC Lookup =====
-        before_bic = self._extract_bic(before)
-        after_bic = self._extract_bic(after)
-        
-        if before_bic or after_bic:
-            # Normalize BIC to 8 characters (strip branch code if present)
-            bic_key = (before_bic or after_bic)[:8].upper()
-            
-            # Extract enriched information from after state
-            after_name = self._get_nested(after, ['finInstnId', 'nm']) or \
-                        self._get_nested(after, ['FinInstnId', 'Nm'])
-            after_addr = self._get_nested(after, ['finInstnId', 'pstlAdr']) or \
-                        self._get_nested(after, ['FinInstnId', 'PstlAdr'])
-            after_country = after.get('ctryOfRes') or after.get('CtryOfRes')
-            
-            # Store in lookup table if we got any useful information
-            if after_name or after_addr or after_country:
-                self.lookup_tables['bic'][bic_key] = {
-                    'name': after_name,
-                    'address': after_addr,
-                    'country': after_country,
-                    'entity_type': entity_key
-                }
-        
-        # ===== Extract Routing Number Lookup =====
-        routing = self._extract_routing(before) or self._extract_routing(after)
-        if routing:
-            after_name = self._get_nested(after, ['finInstnId', 'nm']) or \
-                        self._get_nested(after, ['FinInstnId', 'Nm'])
-            after_bic = self._extract_bic(after)
-            after_country = after.get('ctryOfRes') or after.get('CtryOfRes')
-            after_addr = self._get_nested(after, ['finInstnId', 'pstlAdr']) or \
-                        self._get_nested(after, ['FinInstnId', 'PstlAdr'])
-            
-            if after_name or after_bic or after_country:
-                self.lookup_tables['routing'][routing] = {
-                    'name': after_name,
-                    'bic': after_bic,
-                    'country': after_country,
-                    'address': after_addr
-                }
-        
-        # ===== Extract IBAN Validation Examples =====
-        after_iban = self._get_nested(after, ['id', 'iban']) or \
-                     self._get_nested(after, ['Id', 'IBAN'])
-        if after_iban:
-            country = after_iban[:2].upper()
-            self.lookup_tables['iban_valid'][after_iban] = True
-            self.lookup_tables['iban_country'][country] = True
+        # Detect lookup operations
+        if action in ['added', 'transformed']:
+            self._detect_lookup_operation(field_path, value, before, after, 
+                                         repair_ids, source, entity_key)
+        elif action in ['edited', 'transformed']:
+            old_value = diff.get('old_value')
+            self._detect_standardization(field_path, old_value, value, repair_ids)
     
-    def _classify_rule_types(self):
-        """
-        Classify rules by execution type to determine correct application strategy.
+    def _detect_lookup_operation(self, field_path: str, value: Any, 
+                                  before: Dict, after: Dict, 
+                                  repair_ids: List[str], source: str, entity_key: str):
+        """Detect if this is a lookup operation and extract the pattern"""
         
-        Types:
-        - EXTRACT: Extract value from existing field (e.g., country from BIC[4:6])
-        - LOOKUP: Look up value in dictionary (e.g., BIC → bank name)
-        - FORMAT: Reformat existing value (e.g., BIC11 → BIC8)
-        - RESTRUCTURE: Change field structure (e.g., Othr.Id → IBAN)
-        - NORMALIZE: Normalize text (e.g., lowercase → UPPERCASE)
-        """
-        # Rule text patterns indicate type
-        for ace_id, rule in self.rules.items():
-            text = rule['text'].lower()
-            
-            if 'extracted from' in text or 'derive' in text:
-                self.rule_types[ace_id] = 'EXTRACT'
-            elif 'nch code' in text or 'enrich' in text:
-                self.rule_types[ace_id] = 'LOOKUP'
-            elif 'bic4' in text or 'normalize' in text:
-                self.rule_types[ace_id] = 'FORMAT'
-            elif 'valid iban' in text or 'account number' in text:
-                self.rule_types[ace_id] = 'RESTRUCTURE'
+        # Check if this is a bank name addition (common BIC lookup)
+        if 'nm' in field_path.lower() and 'fininstnid' in field_path.lower():
+            # Look for BIC in the before data
+            bic_value = self._find_bic_in_data(before)
+            if bic_value:
+                self._learn_bic_lookup(bic_value, 'name', value, repair_ids)
+                self.stats['lookup_operations']['BIC_to_name'] += 1
+                return
+        
+        # Check if this is an address addition (common BIC lookup)
+        if 'adrline' in field_path.lower() or 'pstladr' in field_path.lower():
+            bic_value = self._find_bic_in_data(before)
+            if bic_value and 'fininstnid' in field_path.lower():
+                self._learn_bic_lookup(bic_value, 'address', value, repair_ids)
+                self.stats['lookup_operations']['BIC_to_address'] += 1
+                return
+        
+        # Country code extraction
+        if 'ctryofres' in field_path.lower() or 'ctry' in field_path.lower():
+            # Try to find source (BIC or IBAN)
+            bic = self._find_bic_in_data(before)
+            iban = self._find_iban_in_data(before)
+            if bic and len(bic) >= 6:
+                country_from_bic = bic[4:6].upper()
+                if country_from_bic == value or value.upper() == country_from_bic:
+                    self._learn_country_extraction(bic, value, 'BIC', repair_ids)
+                    self.stats['lookup_operations']['Country_from_BIC'] += 1
+                    return
+            elif iban and len(iban) >= 2:
+                country_from_iban = iban[:2].upper()
+                if country_from_iban == value.upper():
+                    self._learn_country_extraction(iban, value, 'IBAN', repair_ids)
+                    self.stats['lookup_operations']['Country_from_IBAN'] += 1
+                    return
+        
+        # IBAN recognition
+        if 'iban' in field_path.lower():
+            if value and len(str(value)) >= 15:  # Minimum IBAN length
+                self._learn_iban_lookup(value, field_path, value, repair_ids)
+                self.stats['lookup_operations']['IBAN_recognition'] += 1
+                return
+    
+    def _learn_bic_lookup(self, bic: str, field_type: str, value: Any, 
+                          repair_ids: List[str]):
+        """Learn BIC -> field value mapping"""
+        if bic not in self.bic_to_bank_info:
+            self.bic_to_bank_info[bic] = {}
+        
+        # Store the mapping
+        if field_type == 'name':
+            self.bic_to_bank_info[bic]['name'] = value
+        elif field_type == 'address':
+            if 'address' not in self.bic_to_bank_info[bic]:
+                self.bic_to_bank_info[bic]['address'] = []
+            if isinstance(value, list):
+                self.bic_to_bank_info[bic]['address'].extend(value)
             else:
-                self.rule_types[ace_id] = 'EXTRACT'  # Default
+                self.bic_to_bank_info[bic]['address'].append(value)
+        else:
+            self.bic_to_bank_info[bic][field_type] = value
+        
+        # Track which repairs use this lookup
+        for repair_id in repair_ids:
+            self.repair_patterns[repair_id].append({
+                'type': 'BIC_lookup',
+                'field_type': field_type,
+                'source_field': 'BIC'
+            })
     
-    def _extract_bic(self, data: Dict) -> Optional[str]:
-        """
-        Extract BIC code from nested structure (handles different case variations).
+    def _learn_country_extraction(self, source_value: str, country: str, 
+                                   source_type: str, repair_ids: List[str]):
+        """Learn country code extraction patterns"""
+        key = f"{source_type}:{source_value[:6]}"
+        self.country_code_mappings[key] = country
         
-        Tries multiple path variations:
-        - finInstnId.bicFi (camelCase)
-        - FinInstnId.BICFI (PascalCase + upper)
-        - etc.
-        """
-        return self._get_nested(data, ['finInstnId', 'bicFi']) or \
-               self._get_nested(data, ['FinInstnId', 'BICFI']) or \
-               self._get_nested(data, ['finInstnId', 'BICFI']) or \
-               self._get_nested(data, ['FinInstnId', 'bicFi'])
+        for repair_id in repair_ids:
+            self.repair_patterns[repair_id].append({
+                'type': 'Country_extraction',
+                'source': source_type
+            })
     
-    def _extract_routing(self, data: Dict) -> Optional[str]:
-        """
-        Extract routing number from clearing system structure.
+    def _learn_iban_lookup(self, iban: str, field_path: str, value: Any, 
+                           repair_ids: List[str]):
+        """Learn IBAN -> field value mapping"""
+        if iban not in self.iban_to_info:
+            self.iban_to_info[iban] = {}
         
-        Returns: "USABA:026009593" format (clearing_system:member_id)
-        """
-        clr_sys = self._get_nested(data, ['finInstnId', 'clrSysMmbId']) or \
-                  self._get_nested(data, ['FinInstnId', 'ClrSysMmbId'])
-        
-        if clr_sys:
-            clr_id = clr_sys.get('clrSysId') or clr_sys.get('ClrSysId') or \
-                     self._get_nested(clr_sys, ['ClrSysId', 'Cd']) or \
-                     self._get_nested(clr_sys, ['clrSysId'])
-            mmb_id = clr_sys.get('mmbId') or clr_sys.get('MmbId')
+        field_name = field_path.split('.')[-1].lower()
+        self.iban_to_info[iban][field_name] = value
+    
+    def _detect_standardization(self, field_path: str, old_value: Any, 
+                                new_value: Any, repair_ids: List[str]):
+        """Detect field value standardization patterns"""
+        if old_value != new_value:
+            self.field_standardizations[field_path][str(old_value)] = str(new_value)
             
-            if mmb_id:
-                return f"{clr_id}:{mmb_id}"
+            for repair_id in repair_ids:
+                self.repair_patterns[repair_id].append({
+                    'type': 'Standardization',
+                    'field': field_path
+                })
+    
+    def _find_bic_in_data(self, data: Dict) -> Optional[str]:
+        """Recursively search for BIC value in nested dict"""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                key_lower = key.lower() if isinstance(key, str) else str(key)
+                if 'bic' in key_lower and isinstance(value, str):
+                    return value.upper()
+                if isinstance(value, dict):
+                    result = self._find_bic_in_data(value)
+                    if result:
+                        return result
         return None
     
-    def _get_nested(self, data: Dict, path: List[str]) -> Any:
-        """
-        Navigate nested dictionary with case-insensitive key matching.
-        
-        Example:
-            data = {'FinInstnId': {'BICFI': 'BOFAUS3N'}}
-            _get_nested(data, ['fininstnid', 'bicfi']) → 'BOFAUS3N'
-        
-        Args:
-            data: Dictionary to navigate
-            path: List of keys to traverse
-            
-        Returns:
-            Value at the end of path, or None if path doesn't exist
-        """
-        current = data
-        for key in path:
-            if not isinstance(current, dict):
-                return None
-            
-            # Try exact match first (fastest)
-            if key in current:
-                current = current[key]
-            else:
-                # Try case-insensitive match
-                found = False
-                for k in current:
-                    if isinstance(k, str) and k.lower() == key.lower():
-                        current = current[k]
-                        found = True
-                        break
-                if not found:
-                    return None
-        return current
+    def _find_iban_in_data(self, data: Dict) -> Optional[str]:
+        """Recursively search for IBAN value in nested dict"""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                key_lower = key.lower() if isinstance(key, str) else str(key)
+                if 'iban' in key_lower and isinstance(value, str):
+                    return value.upper()
+                # Also check if value looks like IBAN (starts with 2 letters)
+                if isinstance(value, str) and len(value) >= 15 and value[:2].isalpha():
+                    return value.upper()
+                if isinstance(value, dict):
+                    result = self._find_iban_in_data(value)
+                    if result:
+                        return result
+        return None
     
-    def save(self, directory: str):
-        """
-        Save learned rules and lookup tables to disk.
+    def compile_lookup_tables(self) -> Dict:
+        """Compile all learned lookup tables"""
+        lookup_tables = {
+            'bic_to_bank_info': self.bic_to_bank_info,
+            'iban_to_info': self.iban_to_info,
+            'country_code_mappings': self.country_code_mappings,
+            'field_standardizations': dict(self.field_standardizations),
+            'repair_patterns': dict(self.repair_patterns),
+            'repair_to_lookup_type': self.repair_to_lookup_type,
+            'stats': self.stats
+        }
+        return lookup_tables
+    
+    def print_statistics(self):
+        """Print learning phase statistics"""
+        logger.info("\n" + "="*70)
+        logger.info("LEARNING PHASE STATISTICS")
+        logger.info("="*70)
+        logger.info(f"Total Transactions: {self.stats['total_transactions']}")
+        logger.info(f"Total Diffs Analyzed: {self.stats['total_diffs']}")
+        logger.info(f"\nLookup Operations Detected:")
+        for op_type, count in self.stats['lookup_operations'].items():
+            logger.info(f"  {op_type}: {count}")
         
-        Creates files:
-        - learned_rules.json: All discovered rules with metadata
-        - lookup_tables.json: All lookup tables (BIC, routing, IBAN, etc.)
+        logger.info(f"\nLookup Tables Built:")
+        logger.info(f"  BIC Entries: {len(self.bic_to_bank_info)}")
+        logger.info(f"  IBAN Entries: {len(self.iban_to_info)}")
+        logger.info(f"  Country Mappings: {len(self.country_code_mappings)}")
+        logger.info(f"  Field Standardizations: {len(self.field_standardizations)}")
         
-        Args:
-            directory: Directory to save files to (creates if doesn't exist)
-        """
-        os.makedirs(directory, exist_ok=True)
+        logger.info(f"\nTop 10 Most Added Fields:")
+        for field, count in self.stats['field_additions'].most_common(10):
+            logger.info(f"  {field}: {count}")
         
-        # Save rules with their classification
-        with open(f"{directory}/learned_rules.json", 'w') as f:
-            json.dump({
-                'rules': self.rules,
-                'rule_types': self.rule_types
-            }, f, indent=2)
-        
-        # Save lookup tables (convert defaultdict to regular dict for JSON)
-        with open(f"{directory}/lookup_tables.json", 'w') as f:
-            json.dump({k: dict(v) for k, v in self.lookup_tables.items()}, f, indent=2)
-        
-        logger.info(f"Saved learned rules and lookups to {directory}")
+        logger.info(f"\nTop 10 Most Edited Fields:")
+        for field, count in self.stats['field_edits'].most_common(10):
+            logger.info(f"  {field}: {count}")
+    
+    def save(self, path: str):
+        """Save lookup tables to file"""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        lookup_tables = self.compile_lookup_tables()
+        with open(path, 'wb') as f:
+            pickle.dump(lookup_tables, f)
+        logger.info(f"\nLookup tables saved to {path}")
     
     @classmethod
-    def load(cls, directory: str):
-        """
-        Load previously learned rules and lookup tables from disk.
-        
-        Args:
-            directory: Directory containing learned_rules.json and lookup_tables.json
-            
-        Returns:
-            RuleLearner instance with loaded knowledge
-        """
-        learner = cls()
-        
-        # Load rules
-        with open(f"{directory}/learned_rules.json", 'r') as f:
-            data = json.load(f)
-            learner.rules = data.get('rules', data)  # Handle old format
-            learner.rule_types = data.get('rule_types', {})
-        
-        # Load lookup tables (restore as defaultdict)
-        with open(f"{directory}/lookup_tables.json", 'r') as f:
-            data = json.load(f)
-            learner.lookup_tables = defaultdict(dict, {k: dict(v) for k, v in data.items()})
-        
-        return learner
+    def load(cls, path: str) -> Dict:
+        """Load lookup tables from file"""
+        with open(path, 'rb') as f:
+            return pickle.load(f)
 
 
 # ============================================================================
-# FEATURE EXTRACTION FOR ML
+# VOCABULARIES
 # ============================================================================
 
-class FeatureExtractor:
-    """
-    Extract numerical features from payment structure for ML model.
-    
-    Converts complex payment JSON into a fixed-size feature vector that
-    captures important structural properties like:
-    - Which entities are present (cdtrAgt, dbtrAgt, etc.)
-    - What fields are missing (no name? no country? no address?)
-    - BIC characteristics (length, format)
-    - IBAN presence and location
-    
-    The ML model learns to map these features to rule predictions.
-    
-    Example:
-        payment = {"cdtrAgt": {"FinInstnId": {"BICFI": "BOFAUS3N"}}}
-        features = extractor.extract(payment)
-        # Returns: [1.0, 1.0, 0.0, 0.0, ...] (70+ dimensional vector)
-        #          ^    ^    ^    ^
-        #          |    |    |    +-- no country
-        #          |    |    +------ no name  
-        #          |    +---------- has BIC
-        #          +--------------- has cdtrAgt
-    """
+class Vocabulary:
+    """Character-level vocabulary"""
     
     def __init__(self):
-        self.feature_dim = None  # Will be set after first extraction
+        self.char2idx = {
+            '<PAD>': 0, '<UNK>': 1, '<MISSING>': 2,
+            '<START>': 3, '<END>': 4, '<MASK>': 5
+        }
+        self.idx2char = {v: k for k, v in self.char2idx.items()}
+        self.next_idx = 6
+        
+        for char in '.-_/@#$%&*()[]{}|\\:;"\',<>?+=~`':
+            self.add_char(char)
     
-    def extract(self, payment: Dict) -> torch.Tensor:
-        """
-        Extract feature vector from payment structure.
+    def add_char(self, char: str):
+        if char not in self.char2idx:
+            self.char2idx[char] = self.next_idx
+            self.idx2char[self.next_idx] = char
+            self.next_idx += 1
+    
+    def build_from_texts(self, texts: List[str]):
+        for text in texts:
+            if text:
+                for char in str(text).upper():
+                    self.add_char(char)
+    
+    def encode(self, text: Optional[str], max_length: int, add_special: bool = True) -> List[int]:
+        if not text:
+            return [self.char2idx['<MISSING>']] * max_length
         
-        Args:
-            payment: Payment dictionary (typically the 'before' state)
-            
-        Returns:
-            torch.Tensor: Feature vector (~70 dimensions)
-        """
-        features = []
+        text = str(text).upper()[:max_length-2 if add_special else max_length]
+        encoded = []
         
-        # Normalize all keys to lowercase for consistent access
-        payment_norm = self._normalize_case(payment)
+        if add_special:
+            encoded.append(self.char2idx['<START>'])
         
-        # ===== ENTITY PRESENCE FEATURES (7 features) =====
-        # Binary indicators: 1.0 if entity exists, 0.0 otherwise
-        entities = ['cdtragt', 'dbtragt', 'instgagt', 'cdtr', 'dbtr', 
-                   'cdtracct', 'dbtracct']
-        for entity in entities:
-            features.append(1.0 if entity in payment_norm else 0.0)
+        encoded.extend([self.char2idx.get(char, self.char2idx['<UNK>']) for char in text])
         
-        # ===== AGENT ENTITY FEATURES (8 features × 3 entities = 24 features) =====
-        # For each agent (cdtrAgt, dbtrAgt, instgAgt), extract:
-        # - Has BIC?
-        # - Has bank name?
-        # - Has address?
-        # - Has country?
-        # - Has clearing system info?
-        # - BIC length (0 if no BIC)
-        # - Is BIC 11 characters?
-        # - Does BIC end with 'XXX'?
-        for entity in ['cdtragt', 'dbtragt', 'instgagt']:
-            entity_data = payment_norm.get(entity, {})
-            fin_instn = entity_data.get('fininstnid', {})
-            
-            bic = fin_instn.get('bicfi', '')
-            features.extend([
-                1.0 if bic else 0.0,
-                1.0 if fin_instn.get('nm') else 0.0,
-                1.0 if fin_instn.get('pstladr') else 0.0,
-                1.0 if entity_data.get('ctryofres') else 0.0,
-                1.0 if fin_instn.get('clrsysmmbid') else 0.0,
-                float(len(bic)) if bic else 0.0,
-                1.0 if len(bic) == 11 else 0.0,
-                1.0 if bic.endswith('XXX') else 0.0,
-            ])
+        if add_special and len(encoded) < max_length:
+            encoded.append(self.char2idx['<END>'])
         
-        # ===== ACCOUNT FEATURES (3 features × 2 accounts = 6 features) =====
-        # For each account (cdtrAcct, dbtrAcct), extract:
-        # - Has IBAN?
-        # - Has other ID?
-        # - Does other ID look like IBAN (misplaced)?
-        for entity in ['cdtracct', 'dbtracct']:
-            entity_data = payment_norm.get(entity, {})
-            id_data = entity_data.get('id', {})
-            
-            has_iban = bool(id_data.get('iban'))
-            other_id = self._get_nested(id_data, ['othr', 'id'])
-            
-            features.extend([
-                1.0 if has_iban else 0.0,
-                1.0 if other_id else 0.0,
-                1.0 if self._looks_like_iban(other_id) else 0.0,
-            ])
+        encoded += [self.char2idx['<PAD>']] * (max_length - len(encoded))
+        return encoded[:max_length]
+    
+    def decode(self, indices: List[int]) -> str:
+        chars = []
+        for idx in indices:
+            char = self.idx2char.get(idx, '<UNK>')
+            if char in ['<PAD>', '<MISSING>', '<START>', '<END>', '<MASK>']:
+                continue
+            if char != '<UNK>':
+                chars.append(char)
+        return ''.join(chars)
+    
+    def __len__(self):
+        return len(self.char2idx)
+    
+    def save(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump({'char2idx': self.char2idx, 'idx2char': self.idx2char}, f)
+    
+    @classmethod
+    def load(cls, path: str):
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        vocab = cls()
+        vocab.char2idx = data['char2idx']
+        vocab.idx2char = data['idx2char']
+        vocab.next_idx = max(vocab.idx2char.keys()) + 1
+        return vocab
+
+
+def _field_stats_factory():
+    return {'count': 0, 'changes': 0}
+
+
+class FieldVocabulary:
+    """Field name vocabulary with statistics"""
+    
+    def __init__(self):
+        self.field2idx = {'<PAD>': 0, '<UNK>': 1}
+        self.idx2field = {0: '<PAD>', 1: '<UNK>'}
+        self.next_idx = 2
+        self.field_stats = defaultdict(_field_stats_factory)
+    
+    def add_field(self, field: str, is_changed: bool = False):
+        if field not in self.field2idx:
+            self.field2idx[field] = self.next_idx
+            self.idx2field[self.next_idx] = field
+            self.next_idx += 1
         
-        # ===== PARTY FEATURES (4 features × 2 parties = 8 features) =====
-        # For each party (cdtr, dbtr), extract:
-        # - Has name?
-        # - Has address?
-        # - Is name lowercase (needs normalization)?
-        # - Is name mixed case (not all upper)?
-        for entity in ['cdtr', 'dbtr']:
-            entity_data = payment_norm.get(entity, {})
-            name = entity_data.get('nm', '')
-            addr = entity_data.get('pstladr', {})
-            
-            features.extend([
-                1.0 if name else 0.0,
-                1.0 if addr else 0.0,
-                1.0 if name and name.islower() else 0.0,
-                1.0 if name and not name.isupper() else 0.0,
-            ])
+        self.field_stats[field]['count'] += 1
+        if is_changed:
+            self.field_stats[field]['changes'] += 1
+    
+    def get_idx(self, field: str) -> int:
+        return self.field2idx.get(field, self.field2idx['<UNK>'])
+    
+    def __len__(self):
+        return len(self.field2idx)
+    
+    def save(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump({
+                'field2idx': self.field2idx,
+                'idx2field': self.idx2field,
+                'field_stats': dict(self.field_stats)
+            }, f)
+    
+    @classmethod
+    def load(cls, path: str):
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        vocab = cls()
+        vocab.field2idx = data['field2idx']
+        vocab.idx2field = data['idx2field']
+        vocab.field_stats = defaultdict(_field_stats_factory, data.get('field_stats', {}))
+        vocab.next_idx = max(vocab.idx2field.keys()) + 1
+        return vocab
+
+
+class ACERepairTaxonomy:
+    """ACE repair taxonomy manager"""
+    
+    def __init__(self):
+        self.repairs = {}
+        self.repair2idx = {'<NONE>': 0, '<UNK>': 1}
+        self.idx2repair = {0: '<NONE>', 1: '<UNK>'}
+        self.next_idx = 2
+        self.field_repair_map = defaultdict(set)
+        self.repair_field_map = defaultdict(set)
+    
+    def add_repair(self, repair_id: str, code: str, field: str, text: str):
+        if repair_id not in self.repair2idx:
+            self.repair2idx[repair_id] = self.next_idx
+            self.idx2repair[self.next_idx] = repair_id
+            self.next_idx += 1
         
-        # ===== GLOBAL AGGREGATION FEATURES (6 features) =====
-        # High-level indicators across the entire payment
-        all_bics = self._extract_all_bics(payment_norm)
-        features.extend([
-            float(len(all_bics)),                              # Number of BICs in payment
-            1.0 if any(len(b) == 11 for b in all_bics) else 0.0,  # Any 11-char BIC?
-            1.0 if any(b.endswith('XXX') for b in all_bics) else 0.0,  # Any XXX suffix?
-            float(self._count_missing_countries(payment_norm)),     # Missing country count
-            float(self._count_missing_names(payment_norm)),         # Missing name count
-            float(self._count_missing_addresses(payment_norm)),     # Missing address count
+        if repair_id not in self.repairs:
+            self.repairs[repair_id] = {
+                'code': code,
+                'field': field,
+                'text': text,
+                'count': 0,
+                'related_fields': set()
+            }
+        
+        self.repairs[repair_id]['count'] += 1
+        self.repairs[repair_id]['related_fields'].add(field)
+        
+        if field:
+            self.field_repair_map[field].add(repair_id)
+            self.repair_field_map[repair_id].add(field)
+    
+    def get_idx(self, repair_id: str) -> int:
+        return self.repair2idx.get(repair_id, 1)
+    
+    def get_repair_category(self, repair_id: str) -> str:
+        if repair_id in self.repairs:
+            return self.repairs[repair_id]['code']
+        return 'I'
+    
+    def __len__(self):
+        return len(self.repair2idx)
+    
+    def save(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump({
+                'repairs': {k: {**v, 'related_fields': list(v['related_fields'])} 
+                          for k, v in self.repairs.items()},
+                'repair2idx': self.repair2idx,
+                'idx2repair': {int(k): v for k, v in self.idx2repair.items()}
+            }, f, indent=2)
+    
+    @classmethod
+    def load(cls, path: str):
+        with open(path, 'r') as f:
+            data = json.load(f)
+        taxonomy = cls()
+        taxonomy.repairs = {k: {**v, 'related_fields': set(v.get('related_fields', []))} 
+                           for k, v in data['repairs'].items()}
+        taxonomy.repair2idx = data['repair2idx']
+        taxonomy.idx2repair = {int(k): v for k, v in data['idx2repair'].items()}
+        taxonomy.next_idx = max(taxonomy.idx2repair.keys()) + 1
+        return taxonomy
+
+
+# ============================================================================
+# DATA UTILITIES
+# ============================================================================
+
+def flatten_json(data: Dict, parent_key: str = '', sep: str = '.') -> Dict:
+    """Flatten nested JSON structure"""
+    items = []
+    for k, v in data.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_json(v, new_key, sep=sep).items())
+        elif isinstance(v, list):
+            for i, item in enumerate(v):
+                if isinstance(item, dict):
+                    items.extend(flatten_json(item, f"{new_key}[{i}]", sep=sep).items())
+                else:
+                    items.append((f"{new_key}[{i}]", str(item)))
+        else:
+            items.append((new_key, str(v) if v is not None else ''))
+    return dict(items)
+
+
+def normalize_keys(data):
+    """Normalize all keys to lowercase"""
+    if isinstance(data, dict):
+        return {k.lower() if isinstance(k, str) else k: normalize_keys(v) 
+                for k, v in data.items()}
+    elif isinstance(data, list):
+        return [normalize_keys(item) for item in data]
+    return data
+
+
+# ============================================================================
+# PHASE 2: TRAIN - DATA PARSER WITH DIFF SUPPORT
+# ============================================================================
+
+class ACEDataParser:
+    """Parse ACE repair data with diff support"""
+    
+    def __init__(self, config: Config, vocab: Vocabulary, 
+                 field_vocab: FieldVocabulary, taxonomy: ACERepairTaxonomy):
+        self.config = config
+        self.vocab = vocab
+        self.field_vocab = field_vocab
+        self.taxonomy = taxonomy
+    
+    def parse_file(self, json_file: str) -> List[Tuple]:
+        """Parse file with diff support"""
+        logger.info(f"Parsing file: {json_file}")
+        
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        transactions = []
+        
+        for txn_id, txn_data in data.items():
+            try:
+                # Extract ACE repairs
+                ace_repairs = []
+                if 'ace' in txn_data:
+                    for repair in txn_data['ace']:
+                        repair_id = repair.get('id', 'unknown')
+                        code = repair.get('code', 'I')
+                        field = repair.get('field', '')
+                        text = repair.get('text', '')
+                        self.taxonomy.add_repair(repair_id, code, field, text)
+                        ace_repairs.append(repair_id)
+                
+                # Extract before/after and diffs
+                before_data = {}
+                after_data = {}
+                all_diffs = []
+                
+                for entity_key in ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'cdtr', 'dbtr', 
+                                  'cdtrAcct', 'dbtrAcct', 'intrmyAgt1', 'intrmyAgt2']:
+                    if entity_key in txn_data:
+                        entity_data = txn_data[entity_key]
+                        
+                        if 'before' in entity_data:
+                            before_flat = flatten_json(
+                                normalize_keys(entity_data['before']), 
+                                parent_key=entity_key
+                            )
+                            before_data.update(before_flat)
+                        
+                        if 'after' in entity_data:
+                            after_flat = flatten_json(
+                                normalize_keys(entity_data['after']), 
+                                parent_key=entity_key
+                            )
+                            after_data.update(after_flat)
+                        
+                        # Collect diffs
+                        if 'diffs' in entity_data:
+                            all_diffs.extend(entity_data['diffs'])
+                
+                if before_data and after_data:
+                    transactions.append((
+                        txn_id, ace_repairs, before_data, after_data, all_diffs
+                    ))
+                
+            except Exception as e:
+                logger.error(f"Error processing transaction {txn_id}: {e}")
+                continue
+        
+        logger.info(f"Successfully parsed {len(transactions)} transactions")
+        return transactions
+    
+    def encode_fields(self, field_dict: Dict) -> Dict[str, torch.Tensor]:
+        """Encode fields to tensors"""
+        field_names = []
+        field_values = []
+        
+        sorted_fields = sorted(field_dict.items())[:self.config.max_fields]
+        
+        for field_name, field_value in sorted_fields:
+            field_names.append(self.field_vocab.get_idx(field_name))
+            field_values.append(self.vocab.encode(field_value, self.config.max_text_length))
+        
+        while len(field_names) < self.config.max_fields:
+            field_names.append(self.field_vocab.get_idx('<PAD>'))
+            field_values.append([self.vocab.char2idx['<PAD>']] * self.config.max_text_length)
+        
+        mask = [1.0] * len(sorted_fields) + [0.0] * (self.config.max_fields - len(sorted_fields))
+        
+        return {
+            'field_names': torch.tensor(field_names, dtype=torch.long),
+            'field_values': torch.tensor(field_values, dtype=torch.long),
+            'field_mask': torch.tensor(mask, dtype=torch.float32)
+        }
+    
+    def encode_repairs(self, repair_ids: List[str], max_repairs: int) -> torch.Tensor:
+        """Encode repair IDs"""
+        encoded = [self.taxonomy.get_idx(rid) for rid in repair_ids[:max_repairs]]
+        encoded += [0] * (max_repairs - len(encoded))
+        return torch.tensor(encoded, dtype=torch.long)
+
+
+# Continuing in next part due to length...
+
+# ============================================================================
+# NEURAL NETWORK MODEL (Same as before with minor enhancements)
+# ============================================================================
+
+class ACERepairModel(nn.Module):
+    """Main repair model with repair prediction"""
+    
+    def __init__(self, config: Config, vocab_size: int, field_vocab_size: int, 
+                 num_repairs: int):
+        super().__init__()
+        self.config = config
+        
+        self.repair_embedding = nn.Embedding(num_repairs, config.embedding_dim)
+        self.field_name_embedding = nn.Embedding(field_vocab_size, config.embedding_dim)
+        self.char_embedding = nn.Embedding(vocab_size, config.embedding_dim, padding_idx=0)
+        
+        self.value_lstm = nn.LSTM(
+            config.embedding_dim,
+            config.hidden_dim // 2,
+            num_layers=config.num_lstm_layers,
+            bidirectional=True,
+            batch_first=True,
+            dropout=config.dropout if config.num_lstm_layers > 1 else 0
+        )
+        
+        # Repair predictor - predicts which repairs to apply based on input
+        self.repair_predictor = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.hidden_dim // 2, num_repairs),
+            nn.Sigmoid()
+        )
+        
+        self.field_combiner = nn.Sequential(
+            nn.Linear(config.embedding_dim * 2 + config.hidden_dim, config.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
+            nn.LayerNorm(config.hidden_dim)
+        )
+        
+        self.transformer_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=config.hidden_dim,
+                nhead=config.num_attention_heads,
+                dim_feedforward=config.hidden_dim * 4,
+                dropout=config.dropout,
+                batch_first=True
+            )
+            for _ in range(4)
         ])
         
-        # Store feature dimension for model initialization
-        self.feature_dim = len(features)
+        self.change_detector = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.hidden_dim // 2, 1),
+            nn.Sigmoid()
+        )
         
-        return torch.tensor(features, dtype=torch.float32)
-    
-    def _normalize_case(self, data):
-        """Normalize all keys to lowercase"""
-        if isinstance(data, dict):
-            return {k.lower() if isinstance(k, str) else k: self._normalize_case(v) 
-                   for k, v in data.items()}
-        elif isinstance(data, list):
-            return [self._normalize_case(item) for item in data]
-        return data
-    
-    def _get_nested(self, data: Dict, path: List[str]) -> Any:
-        """Navigate nested dict"""
-        current = data
-        for key in path:
-            if not isinstance(current, dict) or key not in current:
-                return None
-            current = current[key]
-        return current
-    
-    def _looks_like_iban(self, value: str) -> bool:
-        """Check if value resembles IBAN"""
-        if not value or len(value) < 15:
-            return False
-        return value[:2].isalpha() and value[2:4].isdigit()
-    
-    def _extract_all_bics(self, payment: Dict) -> List[str]:
-        """Extract all BICs from payment"""
-        bics = []
-        for entity in ['cdtragt', 'dbtragt', 'instgagt']:
-            entity_data = payment.get(entity, {})
-            bic = self._get_nested(entity_data, ['fininstnid', 'bicfi'])
-            if bic:
-                bics.append(bic.upper())
-        return bics
-    
-    def _count_missing_countries(self, payment: Dict) -> int:
-        """Count agents without country"""
-        count = 0
-        for entity in ['cdtragt', 'dbtragt', 'instgagt']:
-            entity_data = payment.get(entity, {})
-            if entity_data and not entity_data.get('ctryofres'):
-                count += 1
-        return count
-    
-    def _count_missing_names(self, payment: Dict) -> int:
-        """Count agents without bank name"""
-        count = 0
-        for entity in ['cdtragt', 'dbtragt', 'instgagt']:
-            entity_data = payment.get(entity, {})
-            fin_instn = entity_data.get('fininstnid', {})
-            if entity_data and not fin_instn.get('nm'):
-                count += 1
-        return count
-    
-    def _count_missing_addresses(self, payment: Dict) -> int:
-        """Count agents without address"""
-        count = 0
-        for entity in ['cdtragt', 'dbtragt', 'instgagt']:
-            entity_data = payment.get(entity, {})
-            fin_instn = entity_data.get('fininstnid', {})
-            if entity_data and not fin_instn.get('pstladr'):
-                count += 1
-        return count
-
-
-# ============================================================================
-# ML MODEL
-# ============================================================================
-
-class RulePredictionModel(nn.Module):
-    """
-    Neural network to predict which ACE rules to apply.
-    
-    Architecture:
-    - Input: ~70 payment structure features
-    - 3 hidden layers with batch normalization and dropout
-    - Output: Probability for each ACE rule (multi-label classification)
-    
-    The model learns patterns like:
-    "If BIC present but name missing → rules 6021, 6035 likely apply"
-    """
-    
-    def __init__(self, num_features: int, num_rules: int):
-        super().__init__()
+        self.decoder_lstm = nn.LSTM(
+            config.hidden_dim,
+            config.hidden_dim,
+            batch_first=True
+        )
         
-        self.network = nn.Sequential(
-            # Layer 1: Expand feature space
-            nn.Linear(num_features, 256),
-            nn.BatchNorm1d(256),
+        self.output_projection = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            
-            # Layer 2: Deep representation
-            nn.Linear(256, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            
-            # Layer 3: Compress representation
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            # Output layer: One probability per rule
-            nn.Linear(128, num_rules),
-            nn.Sigmoid()  # Independent probabilities (not softmax - multiple rules can apply)
+            nn.Dropout(config.dropout),
+            nn.Linear(config.hidden_dim // 2, vocab_size)
         )
     
-    def forward(self, x):
-        return self.network(x)
+    def forward(self, input_dict, predict_repairs=False):
+        batch_size = input_dict['field_names'].size(0)
+        max_fields = input_dict['field_names'].size(1)
+        
+        field_name_emb = self.field_name_embedding(input_dict['field_names'])
+        
+        field_values = input_dict['field_values']
+        field_values_flat = field_values.view(batch_size * max_fields, -1)
+        char_emb = self.char_embedding(field_values_flat)
+        lstm_out, (hidden, _) = self.value_lstm(char_emb)
+        value_emb = torch.cat([hidden[-2], hidden[-1]], dim=-1)
+        value_emb = value_emb.view(batch_size, max_fields, -1)
+        
+        # If predicting repairs, don't use repair embeddings yet
+        if predict_repairs:
+            # Pool field representations for repair prediction
+            field_pooled = value_emb.mean(dim=1)  # (batch, hidden_dim)
+            repair_predictions = self.repair_predictor(field_pooled)
+            return {'repair_predictions': repair_predictions}
+        
+        # Normal forward pass with known repairs
+        repair_emb = self.repair_embedding(input_dict['repair_ids'])
+        repair_context = repair_emb.mean(dim=1, keepdim=True).expand(-1, max_fields, -1)
+        combined = torch.cat([repair_context, field_name_emb, value_emb], dim=-1)
+        field_embeddings = self.field_combiner(combined)
+        
+        field_mask = input_dict['field_mask']
+        attention_mask = (field_mask == 0)
+        
+        enriched = field_embeddings
+        for transformer_layer in self.transformer_layers:
+            enriched = transformer_layer(enriched, src_key_padding_mask=attention_mask)
+        
+        change_probabilities = self.change_detector(enriched).squeeze(-1)
+        
+        enriched_flat = enriched.view(batch_size * max_fields, self.config.hidden_dim)
+        decoded_flat = enriched_flat.unsqueeze(1).repeat(1, self.config.max_text_length, 1)
+        decoded_flat, _ = self.decoder_lstm(decoded_flat)
+        logits_flat = self.output_projection(decoded_flat)
+        logits = logits_flat.view(batch_size, max_fields, self.config.max_text_length, -1)
+        
+        return {
+            'field_logits': logits,
+            'change_probabilities': change_probabilities
+        }
 
 
 # ============================================================================
 # DATASET
 # ============================================================================
 
-class RepairDataset(Dataset):
-    """
-    PyTorch dataset for training rule prediction model.
+class ACERepairDataset(Dataset):
+    """Dataset with diff support"""
     
-    Each sample consists of:
-    - Input: Payment structure features (from 'before' state)
-    - Target: Binary vector indicating which rules were applied (from 'ace' array)
-    """
-    
-    def __init__(self, data_file: str, feature_extractor: FeatureExtractor, 
-                 ace_to_idx: Dict[str, int]):
-        """
-        Initialize dataset from training file.
-        
-        Args:
-            data_file: Path to JSON training file
-            feature_extractor: FeatureExtractor instance
-            ace_to_idx: Mapping from ACE rule ID to index
-        """
-        self.feature_extractor = feature_extractor
-        self.ace_to_idx = ace_to_idx
-        self.samples = []
-        
-        # Parse training file
-        with open(data_file, 'r') as f:
-            data = json.load(f)
-        
-        for txn_id, txn_data in data.items():
-            # Get list of rules that were applied
-            ace_ids = [r['id'] for r in txn_data.get('ace', [])]
-            
-            # Reconstruct payment from all 'before' sections
-            payment = {}
-            for entity_key in ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'cdtr', 'dbtr',
-                              'cdtrAcct', 'dbtrAcct']:
-                if entity_key in txn_data:
-                    before = txn_data[entity_key].get('before')
-                    if before:
-                        payment[entity_key] = before
-            
-            # Only add if we have both payment structure and rules
-            if payment and ace_ids:
-                self.samples.append((payment, ace_ids))
+    def __init__(self, transactions: List[Tuple], parser: ACEDataParser):
+        self.parser = parser
+        self.transactions = transactions
     
     def __len__(self):
-        return len(self.samples)
+        return len(self.transactions)
     
     def __getitem__(self, idx):
-        """
-        Get training sample.
+        txn_id, repair_ids, before_data, after_data, diffs = self.transactions[idx]
         
-        Returns:
-            features: Tensor of payment features
-            target: Binary vector of which rules apply
-        """
-        payment, ace_ids = self.samples[idx]
+        input_encoded = self.parser.encode_fields(before_data)
+        output_encoded = self.parser.encode_fields(after_data)
         
-        # Extract features from payment structure
-        features = self.feature_extractor.extract(payment)
+        repair_encoded = self.parser.encode_repairs(repair_ids, self.parser.config.max_repairs)
+        input_encoded['repair_ids'] = repair_encoded
         
-        # Create target vector (multi-hot encoding of rules)
-        target = torch.zeros(len(self.ace_to_idx), dtype=torch.float32)
-        for ace_id in ace_ids:
-            if ace_id in self.ace_to_idx:
-                target[self.ace_to_idx[ace_id]] = 1.0
+        # Create repair target vector for multi-label classification
+        repair_target = torch.zeros(len(self.parser.taxonomy), dtype=torch.float32)
+        for rid in repair_ids:
+            idx = self.parser.taxonomy.get_idx(rid)
+            if idx > 1:  # Skip PAD and UNK
+                repair_target[idx] = 1.0
+        output_encoded['repair_targets'] = repair_target
         
-        return features, target
+        change_mask = self.calculate_change_mask(before_data, after_data)
+        output_encoded['change_mask'] = change_mask
+        
+        return input_encoded, output_encoded
+    
+    def calculate_change_mask(self, before: Dict, after: Dict) -> torch.Tensor:
+        change_mask = []
+        sorted_fields = sorted(before.keys())[:self.parser.config.max_fields]
+        
+        for field_name in sorted_fields:
+            before_value = before.get(field_name, '')
+            after_value = after.get(field_name, '')
+            change_mask.append(1.0 if before_value != after_value else 0.0)
+        
+        change_mask += [0.0] * (self.parser.config.max_fields - len(change_mask))
+        return torch.tensor(change_mask, dtype=torch.float32)
 
 
 # ============================================================================
-# TRAINER
+# TRAINER (Same as before)
 # ============================================================================
 
-class Trainer:
-    """
-    Train ML model for rule prediction.
+class ACETrainer:
+    """Model trainer"""
     
-    Uses binary cross-entropy loss since this is multi-label classification
-    (multiple rules can apply to the same payment).
-    """
-    
-    def __init__(self, model, device='cpu'):
+    def __init__(self, model: ACERepairModel, config: Config, device: str = 'cpu'):
         self.model = model.to(device)
+        self.config = config
         self.device = device
-        self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-        self.criterion = nn.BCELoss()  # Binary cross-entropy for multi-label
+        
+        self.optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay
+        )
+        
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', patience=10, factor=0.5
+        )
+        
+        self.char_criterion = nn.CrossEntropyLoss(ignore_index=0, reduction='none')
+        self.change_criterion = nn.BCELoss(reduction='none')
         self.best_val_loss = float('inf')
     
-    def train_epoch(self, loader):
-        """Train for one epoch"""
-        self.model.train()
-        total_loss = 0
+    def compute_loss(self, outputs, targets):
+        batch_size = targets['field_values'].size(0)
+        max_fields = targets['field_values'].size(1)
+        max_length = targets['field_values'].size(2)
         
-        for features, targets in loader:
-            features = features.to(self.device)
-            targets = targets.to(self.device)
-            
-            # Forward pass
-            self.optimizer.zero_grad()
-            outputs = self.model(features)
-            loss = self.criterion(outputs, targets)
-            
-            # Backward pass
-            loss.backward()
-            self.optimizer.step()
-            
-            total_loss += loss.item()
+        logits = outputs['field_logits']
+        target_values = targets['field_values']
+        field_mask = targets['field_mask']
         
-        return total_loss / len(loader)
-    
-    def evaluate(self, loader):
-        """Evaluate on validation set"""
-        self.model.eval()
-        total_loss = 0
-        correct = 0
-        total = 0
+        logits_flat = logits.view(batch_size * max_fields * max_length, -1)
+        targets_flat = target_values.view(batch_size * max_fields * max_length)
         
-        with torch.no_grad():
-            for features, targets in loader:
-                features = features.to(self.device)
-                targets = targets.to(self.device)
-                
-                outputs = self.model(features)
-                loss = self.criterion(outputs, targets)
-                total_loss += loss.item()
-                
-                # Calculate accuracy (at 0.5 threshold)
-                pred = (outputs > 0.5).float()
-                correct += (pred == targets).float().sum().item()
-                total += targets.numel()
+        char_loss_per_token = self.char_criterion(logits_flat, targets_flat)
+        char_loss_per_token = char_loss_per_token.view(batch_size, max_fields, max_length)
         
-        return total_loss / len(loader), correct / total
-    
-    def train(self, train_loader, val_loader, epochs, save_path):
-        """
-        Full training loop.
+        field_mask_expanded = field_mask.unsqueeze(-1).expand(-1, -1, max_length)
+        masked_char_loss = char_loss_per_token * field_mask_expanded
+        char_loss = masked_char_loss.sum() / field_mask_expanded.sum().clamp(min=1)
         
-        Args:
-            train_loader: DataLoader for training data
-            val_loader: DataLoader for validation data
-            epochs: Number of training epochs
-            save_path: Where to save best model
-        """
-        logger.info("="*70)
-        logger.info("Training started")
-        logger.info("="*70)
+        change_predictions = outputs['change_probabilities']
+        change_targets = targets.get('change_mask', torch.zeros_like(change_predictions))
+        change_loss_per_field = self.change_criterion(change_predictions, change_targets)
+        masked_change_loss = change_loss_per_field * field_mask
+        change_loss = masked_change_loss.sum() / field_mask.sum().clamp(min=1)
         
-        for epoch in range(1, epochs + 1):
-            train_loss = self.train_epoch(train_loader)
-            val_loss, val_acc = self.evaluate(val_loader)
-            
-            logger.info(f"Epoch {epoch}/{epochs} - Train Loss: {train_loss:.4f}, "
-                       f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-            
-            # Save best model
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                torch.save(self.model.state_dict(), save_path)
-                logger.info("  ✓ Best model saved")
+        # Repair prediction loss (if available)
+        repair_loss = torch.tensor(0.0, device=char_loss.device)
+        if 'repair_predictions' in outputs and 'repair_targets' in targets:
+            repair_preds = outputs['repair_predictions']
+            repair_targets = targets['repair_targets']
+            repair_loss = F.binary_cross_entropy(repair_preds, repair_targets)
         
-        logger.info(f"\nTraining complete! Best val loss: {self.best_val_loss:.4f}")
-
-
-# ============================================================================
-# RULE EXECUTION ENGINE (FIXED - NOW USES LOOKUPS AND EXTRACTION)
-# ============================================================================
-
-class RuleExecutor:
-    """
-    Execute ACE rules using smart logic (not blind pattern replay).
-    
-    CRITICAL FIX: This now properly:
-    1. Extracts values from the CURRENT payment (e.g., country from BIC)
-    2. Looks up values in learned dictionaries (e.g., BIC → bank details)
-    3. Applies transformations dynamically (not replaying static training values)
-    
-    Each rule has a specific handler that knows how to apply that rule correctly.
-    """
-    
-    def __init__(self, rule_learner: RuleLearner):
-        self.learner = rule_learner
-        self.lookup_tables = rule_learner.lookup_tables
+        total_loss = (
+            self.config.char_loss_weight * char_loss +
+            self.config.change_detection_weight * change_loss +
+            self.config.repair_prediction_weight * repair_loss
+        )
         
-        # Map rule IDs to handler methods
-        self.handlers = {
-            '6004': self.rule_6004_valid_iban,
-            '6008': self.rule_6008_nch_from_iban,
-            '6015': self.rule_6015_country_from_iban,
-            '6021': self.rule_6021_country_from_bic,
-            '6032': self.rule_6032_domestic_account,
-            '6035': self.rule_6035_enrich_from_bic,
-            '6036': self.rule_6036_normalize_bic,
-            '6046': self.rule_6046_account_from_iban,
-            '8026': self.rule_8026_enrich_from_routing,
+        return total_loss, {
+            'char_loss': char_loss.item(),
+            'change_loss': change_loss.item(),
+            'repair_loss': repair_loss.item() if isinstance(repair_loss, torch.Tensor) else 0.0,
+            'total_loss': total_loss.item()
         }
     
-    def apply_rules(self, payment: Dict, ace_ids: List[str]) -> Dict:
-        """
-        Apply rules to payment using smart execution logic.
+    def train_epoch(self, train_loader, epoch):
+        self.model.train()
+        epoch_losses = defaultdict(float)
         
-        Args:
-            payment: Payment to repair
-            ace_ids: List of rule IDs to apply (from ML prediction)
+        for batch_idx, (inputs, targets) in enumerate(train_loader):
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            targets = {k: v.to(self.device) for k, v in targets.items()}
             
-        Returns:
-            Repaired payment
-        """
-        result = deepcopy(payment)
-        applied_count = 0
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs)
+            loss, loss_components = self.compute_loss(outputs, targets)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+            self.optimizer.step()
+            
+            for key, value in loss_components.items():
+                epoch_losses[key] += value
+            
+            if batch_idx % 10 == 0:
+                logger.info(f'  Epoch {epoch} Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}')
         
-        # Apply each rule using its specific handler
-        for ace_id in ace_ids:
-            if ace_id in self.handlers:
-                try:
-                    success = self.handlers[ace_id](result)
-                    if success:
-                        applied_count += 1
-                except Exception as e:
-                    logger.warning(f"Error applying rule {ace_id}: {e}")
+        for key in epoch_losses:
+            epoch_losses[key] /= len(train_loader)
         
-        logger.debug(f"Applied {applied_count}/{len(ace_ids)} rules successfully")
-        return result
+        return epoch_losses
     
-    # ===== RULE HANDLERS (Each rule knows how to apply itself) =====
-    
-    def rule_6004_valid_iban(self, payment: Dict) -> bool:
-        """
-        Rule 6004: Detect valid IBAN in wrong field and restructure.
+    def evaluate(self, val_loader):
+        self.model.eval()
+        epoch_losses = defaultdict(float)
         
-        Looks for IBAN in 'id.othr.id' and moves it to 'id.iban'
-        """
-        modified = False
-        
-        for entity_key in ['cdtrAcct', 'dbtrAcct']:
-            entity = payment.get(entity_key, {})
-            id_section = entity.get('id', entity.get('Id', {}))
-            
-            # Check if IBAN is misplaced in 'othr.id'
-            other_section = id_section.get('othr', id_section.get('Othr', {}))
-            other_id = other_section.get('id', other_section.get('Id', ''))
-            
-            if other_id and self._is_valid_iban(other_id):
-                # Restructure: move to proper IBAN field
-                if 'id' not in entity:
-                    entity['id'] = {}
-                entity['id']['iban'] = other_id.upper()
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                targets = {k: v.to(self.device) for k, v in targets.items()}
+                outputs = self.model(inputs)
+                loss, loss_components = self.compute_loss(outputs, targets)
                 
-                # Remove old structure
-                if 'othr' in entity.get('id', {}):
-                    del entity['id']['othr']
-                if 'Othr' in entity.get('Id', {}):
-                    del entity['Id']['Othr']
-                
-                modified = True
+                for key, value in loss_components.items():
+                    epoch_losses[key] += value
         
-        return modified
+        for key in epoch_losses:
+            epoch_losses[key] /= len(val_loader)
+        
+        return epoch_losses
     
-    def rule_6008_nch_from_iban(self, payment: Dict) -> bool:
-        """Rule 6008: Extract NCH code from IBAN (country-specific)"""
-        # Implementation depends on country-specific IBAN structure
-        return False
+    def train(self, train_loader, val_loader):
+        logger.info("="*70)
+        logger.info("PHASE 2: TRAINING ACE REPAIR MODEL")
+        logger.info("="*70)
+        
+        for epoch in range(1, self.config.num_epochs + 1):
+            logger.info(f"\nEpoch {epoch}/{self.config.num_epochs}")
+            
+            train_losses = self.train_epoch(train_loader, epoch)
+            val_losses = self.evaluate(val_loader)
+            self.scheduler.step(val_losses['total_loss'])
+            
+            logger.info(f"Train Loss: {train_losses['total_loss']:.4f}")
+            logger.info(f"Val Loss: {val_losses['total_loss']:.4f}")
+            
+            if val_losses['total_loss'] < self.best_val_loss:
+                self.best_val_loss = val_losses['total_loss']
+                self.save_model()
+                logger.info("✓ Best model saved!")
+        
+        logger.info(f"\nTraining complete! Best val loss: {self.best_val_loss:.4f}")
     
-    def rule_6015_country_from_iban(self, payment: Dict) -> bool:
-        """Rule 6015: Extract country code from IBAN (first 2 characters)"""
-        modified = False
-        
-        for entity_key in ['cdtrAcct', 'dbtrAcct']:
-            entity = payment.get(entity_key, {})
-            id_section = entity.get('id', entity.get('Id', {}))
-            iban = id_section.get('iban', id_section.get('IBAN', ''))
-            
-            if iban and len(iban) >= 2:
-                country = iban[:2].upper()
-                # Could add country to parent entity if needed
-                modified = True
-        
-        return modified
-    
-    def rule_6021_country_from_bic(self, payment: Dict) -> bool:
-        """
-        Rule 6021: Extract ISO country code from BIC.
-        
-        CRITICAL: Extracts from THIS payment's BIC (positions 5-6), not training data.
-        """
-        modified = False
-        
-        for entity_key in ['cdtrAgt', 'dbtrAgt', 'instgAgt']:
-            entity = payment.get(entity_key, {})
-            if not entity:
-                continue
-            
-            # Get BIC from this payment
-            fin_instn = entity.get('finInstnId', entity.get('FinInstnId', {}))
-            bic = fin_instn.get('bicFi', fin_instn.get('BICFI', ''))
-            
-            if bic and len(bic) >= 6:
-                # Extract country from BIC positions 5-6 (0-indexed: [4:6])
-                country = bic[4:6].upper()
-                entity['ctryOfRes'] = country
-                modified = True
-                logger.debug(f"Rule 6021: Extracted country {country} from BIC {bic}")
-        
-        return modified
-    
-    def rule_6032_domestic_account(self, payment: Dict) -> bool:
-        """Rule 6032: Extract domestic account number from field"""
-        return False
-    
-    def rule_6035_enrich_from_bic(self, payment: Dict) -> bool:
-        """
-        Rule 6035: Enrich with bank details from BIC lookup.
-        
-        CRITICAL: Looks up THIS payment's BIC in learned directory.
-        """
-        modified = False
-        
-        for entity_key in ['cdtrAgt', 'dbtrAgt', 'instgAgt']:
-            entity = payment.get(entity_key, {})
-            if not entity:
-                continue
-            
-            # Get BIC from this payment
-            fin_instn = entity.get('finInstnId', entity.get('FinInstnId', {}))
-            bic = fin_instn.get('bicFi', fin_instn.get('BICFI', ''))
-            
-            if bic:
-                # Look up in learned BIC directory
-                bic_key = bic[:8].upper()
-                bank_info = self.lookup_tables['bic'].get(bic_key)
-                
-                if bank_info:
-                    # Add bank name if available
-                    if bank_info.get('name') and not fin_instn.get('nm'):
-                        if 'finInstnId' not in entity:
-                            entity['finInstnId'] = {}
-                        entity['finInstnId']['nm'] = bank_info['name']
-                        logger.debug(f"Rule 6035: Added name for BIC {bic_key}")
-                    
-                    # Add address if available
-                    if bank_info.get('address') and not fin_instn.get('pstlAdr'):
-                        if 'finInstnId' not in entity:
-                            entity['finInstnId'] = {}
-                        entity['finInstnId']['pstlAdr'] = bank_info['address']
-                        logger.debug(f"Rule 6035: Added address for BIC {bic_key}")
-                    
-                    # Add country if available
-                    if bank_info.get('country') and not entity.get('ctryOfRes'):
-                        entity['ctryOfRes'] = bank_info['country']
-                    
-                    modified = True
-                else:
-                    logger.debug(f"Rule 6035: No lookup data for BIC {bic_key}")
-        
-        return modified
-    
-    def rule_6036_normalize_bic(self, payment: Dict) -> bool:
-        """
-        Rule 6036: Normalize BIC to 8 characters (remove branch code).
-        
-        Converts BIC11 (e.g., BOFAUS3NXXX) to BIC8 (BOFAUS3N)
-        """
-        modified = False
-        
-        for entity_key in ['cdtrAgt', 'dbtrAgt', 'instgAgt']:
-            entity = payment.get(entity_key, {})
-            if not entity:
-                continue
-            
-            fin_instn = entity.get('finInstnId', entity.get('FinInstnId', {}))
-            bic = fin_instn.get('bicFi', fin_instn.get('BICFI', ''))
-            
-            # If BIC is 11 characters, truncate to 8
-            if len(bic) == 11:
-                normalized_bic = bic[:8]
-                
-                if 'finInstnId' not in entity:
-                    entity['finInstnId'] = {}
-                entity['finInstnId']['bicFi'] = normalized_bic
-                modified = True
-                logger.debug(f"Rule 6036: Normalized {bic} to {normalized_bic}")
-                
-                # Also enrich with bank details for the normalized BIC
-                self.rule_6035_enrich_from_bic(payment)
-        
-        return modified
-    
-    def rule_6046_account_from_iban(self, payment: Dict) -> bool:
-        """Rule 6046: Extract account number from IBAN (country-specific)"""
-        return False
-    
-    def rule_8026_enrich_from_routing(self, payment: Dict) -> bool:
-        """
-        Rule 8026: Enrich from routing/clearing system number.
-        
-        Looks up routing number in learned directory.
-        """
-        modified = False
-        
-        for entity_key in ['instgAgt', 'cdtrAgt', 'dbtrAgt']:
-            entity = payment.get(entity_key, {})
-            if not entity:
-                continue
-            
-            # Get clearing system info
-            fin_instn = entity.get('finInstnId', entity.get('FinInstnId', {}))
-            clr_sys = fin_instn.get('clrSysMmbId', fin_instn.get('ClrSysMmbId', {}))
-            
-            clr_sys_id = clr_sys.get('clrSysId', clr_sys.get('ClrSysId', ''))
-            mmb_id = clr_sys.get('mmbId', clr_sys.get('MmbId', ''))
-            
-            if mmb_id:
-                # Look up in routing directory
-                key = f"{clr_sys_id}:{mmb_id}"
-                bank_info = self.lookup_tables['routing'].get(key)
-                
-                if bank_info:
-                    # Add bank name
-                    if bank_info.get('name') and not fin_instn.get('nm'):
-                        if 'finInstnId' not in entity:
-                            entity['finInstnId'] = {}
-                        entity['finInstnId']['nm'] = bank_info['name']
-                    
-                    # Add address
-                    if bank_info.get('address') and not fin_instn.get('pstlAdr'):
-                        if 'finInstnId' not in entity:
-                            entity['finInstnId'] = {}
-                        entity['finInstnId']['pstlAdr'] = bank_info['address']
-                    
-                    # Add country
-                    if bank_info.get('country') and not entity.get('ctryOfRes'):
-                        entity['ctryOfRes'] = bank_info['country']
-                    
-                    # Add othr.id with routing number
-                    if 'finInstnId' not in entity:
-                        entity['finInstnId'] = {}
-                    if 'othr' not in entity['finInstnId']:
-                        entity['finInstnId']['othr'] = {}
-                    entity['finInstnId']['othr']['id'] = mmb_id
-                    
-                    modified = True
-        
-        return modified
-    
-    # ===== HELPER METHODS =====
-    
-    def _is_valid_iban(self, value: str) -> bool:
-        """Basic IBAN validation"""
-        if not value or len(value) < 15:
-            return False
-        return value[:2].isalpha() and value[2:4].isdigit()
+    def save_model(self):
+        os.makedirs(os.path.dirname(self.config.model_save_path), exist_ok=True)
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'best_val_loss': self.best_val_loss,
+            'config': asdict(self.config)
+        }, self.config.model_save_path)
 
 
 # ============================================================================
-# COMPLETE SYSTEM
+# PHASE 3: REPAIR - PREDICTOR WITH LOOKUP SUPPORT
 # ============================================================================
 
-class ComprehensiveRepairSystem:
-    """
-    Complete repair system integrating all components.
+class ACERepairer:
+    """Apply repairs with lookup table support"""
     
-    Workflow:
-    1. Load learned rules and lookup tables
-    2. Load trained ML model
-    3. For new payment:
-       a. Extract features
-       b. ML predicts which rules apply
-       c. Rule executor applies rules using lookups and extraction
-    """
-    
-    def __init__(self, model_dir: str):
-        logger.info(f"Loading system from {model_dir}")
-        
-        # Load learned knowledge
-        self.learner = RuleLearner.load(model_dir)
-        self.executor = RuleExecutor(self.learner)
-        
-        # Load ACE mapping
-        with open(f"{model_dir}/ace_mapping.json", 'r') as f:
-            data = json.load(f)
-            self.ace_to_idx = data['ace_to_idx']
-            self.idx_to_ace = {int(k): v for k, v in data['idx_to_ace'].items()}
-        
-        # Setup feature extractor
-        self.feature_extractor = FeatureExtractor()
-        
-        # Load ML model
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    def __init__(self, model_dir: str = './models', device: str = 'cpu'):
         self.device = device
+        self.model_dir = model_dir
         
-        # Get feature dimension
-        dummy_features = self.feature_extractor.extract({})
+        logger.info(f"Loading model from {model_dir}")
         
-        self.model = RulePredictionModel(len(dummy_features), len(self.ace_to_idx))
-        self.model.load_state_dict(torch.load(f"{model_dir}/model.pt", map_location=device))
+        self.config = Config.load(f"{model_dir}/config.json")
+        self.vocab = Vocabulary.load(self.config.vocab_save_path)
+        self.field_vocab = FieldVocabulary.load(self.config.field_vocab_save_path)
+        self.taxonomy = ACERepairTaxonomy.load(self.config.repair_taxonomy_path)
+        
+        # Load lookup tables
+        self.lookup_tables = LookupTableBuilder.load(self.config.lookup_tables_path)
+        logger.info(f"Loaded {len(self.lookup_tables['bic_to_bank_info'])} BIC entries")
+        
+        self.parser = ACEDataParser(self.config, self.vocab, self.field_vocab, self.taxonomy)
+        
+        self.model = ACERepairModel(
+            self.config, len(self.vocab), len(self.field_vocab), len(self.taxonomy)
+        )
+        
+        checkpoint = torch.load(self.config.model_save_path, map_location=device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.to(device)
         self.model.eval()
         
-        logger.info("System loaded successfully")
+        logger.info("Model loaded successfully")
     
-    def repair(self, payment: Dict, threshold: float = 0.5) -> Dict:
-        """
-        Repair payment using ML prediction + rule execution.
+    def repair(self, payment: Dict, repair_ids: List[str] = None,
+               confidence_threshold: float = 0.7, repair_threshold: float = 0.5) -> Dict:
+        """Apply repairs with automatic repair prediction"""
         
-        Args:
-            payment: Payment to repair
-            threshold: Confidence threshold for rule application
-            
-        Returns:
-            Dictionary with repaired payment and metadata
-        """
-        # Step 1: ML predicts which rules to apply
-        features = self.feature_extractor.extract(payment)
-        features = features.unsqueeze(0).to(self.device)
+        logger.info("="*70)
+        logger.info("PHASE 3: APPLYING REPAIRS")
+        logger.info("="*70)
+        
+        before_flat = flatten_json(normalize_keys(payment))
+        
+        # Step 1: Predict repairs if not provided
+        if not repair_ids:
+            logger.info("Predicting which repairs to apply...")
+            repair_ids = self.predict_repairs(before_flat, repair_threshold)
+            logger.info(f"Predicted repairs: {repair_ids}")
+        else:
+            logger.info(f"Using provided repairs: {repair_ids}")
+        
+        # Step 2: Apply lookups first
+        enriched_from_lookups = self.apply_lookup_tables(before_flat, repair_ids)
+        
+        # Step 3: Apply model predictions
+        encoded = self.parser.encode_fields(enriched_from_lookups)
+        repair_encoded = self.parser.encode_repairs(repair_ids, self.config.max_repairs)
+        encoded['repair_ids'] = repair_encoded
+        
+        batch_input = {k: v.unsqueeze(0).to(self.device) for k, v in encoded.items()}
         
         with torch.no_grad():
-            predictions = self.model(features)[0]
+            outputs = self.model(batch_input)
         
-        # Select rules above threshold
-        predicted_rules = []
-        for idx, prob in enumerate(predictions):
-            if prob > threshold:
-                ace_id = self.idx_to_ace[idx]
-                predicted_rules.append((ace_id, float(prob)))
+        enriched = dict(enriched_from_lookups)
+        applied_repairs = []
         
-        predicted_rules.sort(key=lambda x: x[1], reverse=True)
-        ace_ids = [r[0] for r in predicted_rules]
+        logits = outputs['field_logits'][0]
+        change_probs = outputs['change_probabilities'][0]
+        field_names = encoded['field_names']
+        field_mask = encoded['field_mask']
         
-        # Step 2: Apply rules with executor
-        repaired = self.executor.apply_rules(payment, ace_ids)
+        for i in range(self.config.max_fields):
+            if field_mask[i] == 0:
+                continue
+            
+            field_idx = field_names[i].item()
+            field_name = self.field_vocab.idx2field.get(field_idx, '<UNK>')
+            
+            if field_name in ['<PAD>', '<UNK>']:
+                continue
+            
+            if change_probs[i] >= 0.5:
+                predicted_indices = logits[i].argmax(dim=-1).cpu().tolist()
+                predicted_value = self.vocab.decode(predicted_indices)
+                
+                if predicted_value and predicted_value != enriched_from_lookups.get(field_name, ''):
+                    enriched[field_name] = predicted_value
+                    applied_repairs.append({
+                        'field': field_name,
+                        'before': before_flat.get(field_name, ''),
+                        'after': predicted_value,
+                        'source': 'model_prediction'
+                    })
         
         return {
-            'payment': repaired,
-            'predicted_rules': predicted_rules,
-            'rule_descriptions': [
-                f"{ace_id}: {self.learner.rules[ace_id]['text']}"
-                for ace_id, _ in predicted_rules
+            'enriched_payment': enriched,
+            'applied_repairs': applied_repairs,
+            'predicted_repair_ids': repair_ids,
+            'repair_descriptions': [
+                self.get_repair_description(rid) for rid in repair_ids
             ]
         }
+    
+    def predict_repairs(self, payment: Dict, threshold: float = 0.5) -> List[str]:
+        """Predict which repairs should be applied based on payment data"""
+        # Encode payment
+        encoded = self.parser.encode_fields(payment)
+        
+        # Create dummy repair IDs for prediction mode
+        encoded['repair_ids'] = torch.zeros(self.config.max_repairs, dtype=torch.long)
+        
+        # Prepare batch
+        batch_input = {k: v.unsqueeze(0).to(self.device) for k, v in encoded.items()}
+        
+        # Get repair predictions
+        with torch.no_grad():
+            outputs = self.model(batch_input, predict_repairs=True)
+        
+        # Extract repair probabilities
+        repair_probs = outputs['repair_predictions'][0].cpu().numpy()
+        
+        # Select repairs above threshold
+        predicted_repairs = []
+        for idx, prob in enumerate(repair_probs):
+            if prob > threshold and idx in self.taxonomy.idx2repair:
+                repair_id = self.taxonomy.idx2repair[idx]
+                if repair_id not in ['<NONE>', '<UNK>']:
+                    predicted_repairs.append((repair_id, float(prob)))
+        
+        # Sort by probability
+        predicted_repairs.sort(key=lambda x: x[1], reverse=True)
+        
+        # Log predictions
+        logger.info(f"  Found {len(predicted_repairs)} repairs above threshold {threshold}")
+        for repair_id, prob in predicted_repairs[:5]:
+            logger.info(f"    {repair_id}: {prob:.3f} - {self.get_repair_description(repair_id)}")
+        
+        return [r[0] for r in predicted_repairs]
+    
+    def get_repair_description(self, repair_id: str) -> str:
+        """Get description for a repair ID"""
+        if repair_id in self.taxonomy.repairs:
+            r = self.taxonomy.repairs[repair_id]
+            return f"[{r['code']}] {r['text']}"
+        return "Unknown repair"
+    
+    def apply_lookup_tables(self, payment: Dict, repair_ids: List[str]) -> Dict:
+        """Apply lookup table enrichments"""
+        enriched = dict(payment)
+        
+        # Find BIC in payment
+        bic = self._find_value_by_key(payment, 'bic')
+        if bic and bic in self.lookup_tables['bic_to_bank_info']:
+            bank_info = self.lookup_tables['bic_to_bank_info'][bic]
+            logger.info(f"Applying BIC lookup for {bic}: {bank_info}")
+            for field, value in bank_info.items():
+                enriched[f"enriched.{field}"] = value
+        
+        # Extract country codes
+        if bic and len(bic) >= 6:
+            country = bic[4:6]
+            enriched['enriched.country_from_bic'] = country
+        
+        return enriched
+    
+    def _find_value_by_key(self, data: Dict, search_key: str) -> Optional[str]:
+        """Find value by partial key match"""
+        search_key_lower = search_key.lower()
+        for key, value in data.items():
+            if search_key_lower in key.lower():
+                return value
+        return None
 
 
 # ============================================================================
-# CLI COMMANDS
+# CLI
 # ============================================================================
 
 def learn_command(args):
-    """Learn rules from training data"""
-    logger.info("="*70)
-    logger.info("LEARNING PHASE: Extracting rules and building lookup tables")
-    logger.info("="*70)
-    
-    learner = RuleLearner().learn_from_file(args.input)
-    learner.save(args.output)
-    
-    logger.info("\nTop 20 Rules by Frequency:")
-    sorted_rules = sorted(learner.rules.items(), key=lambda x: x[1]['count'], reverse=True)[:20]
-    for ace_id, rule in sorted_rules:
-        logger.info(f"  {ace_id} ({rule['count']}x): {rule['text']}")
-    
-    logger.info(f"\nLearning complete! Files saved to {args.output}/")
-    logger.info("Next step: Run 'train' command to train the ML predictor")
+    """Phase 1: Learn lookup tables"""
+    builder = LookupTableBuilder()
+    builder.learn_from_transactions(args.input)
+    builder.save(args.output or './models/lookup_tables.pkl')
 
 
 def train_command(args):
-    """Train ML model"""
-    logger.info("="*70)
-    logger.info("TRAINING PHASE: Training ML rule predictor")
-    logger.info("="*70)
+    """Phase 2: Train model"""
+    config = Config()
+    config.num_epochs = args.epochs
+    if args.batch_size:
+        config.batch_size = args.batch_size
     
-    # Check if learn was run first
-    if not os.path.exists(f"{args.output}/learned_rules.json"):
-        logger.error(f"Error: Must run 'learn' command first!")
-        logger.error(f"Run: python {os.path.basename(__file__)} learn --input {args.input} --output {args.output}")
-        return
+    vocab = Vocabulary()
+    field_vocab = FieldVocabulary()
+    taxonomy = ACERepairTaxonomy()
     
-    learner = RuleLearner.load(args.output)
+    parser = ACEDataParser(config, vocab, field_vocab, taxonomy)
+    transactions = parser.parse_file(args.input)
     
-    ace_to_idx = {ace_id: idx for idx, ace_id in enumerate(sorted(learner.rules.keys()))}
-    idx_to_ace = {idx: ace_id for ace_id, idx in ace_to_idx.items()}
+    # Build vocabularies
+    all_texts = []
+    for txn_id, repair_ids, before_data, after_data, diffs in transactions:
+        for field, value in {**before_data, **after_data}.items():
+            field_vocab.add_field(field, before_data.get(field) != after_data.get(field))
+            if value:
+                all_texts.append(str(value))
     
-    with open(f"{args.output}/ace_mapping.json", 'w') as f:
-        json.dump({'ace_to_idx': ace_to_idx, 'idx_to_ace': idx_to_ace}, f)
+    vocab.build_from_texts(all_texts)
     
-    feature_extractor = FeatureExtractor()
-    dataset = RepairDataset(args.input, feature_extractor, ace_to_idx)
+    logger.info(f"Vocab sizes - Chars: {len(vocab)}, Fields: {len(field_vocab)}, Repairs: {len(taxonomy)}")
     
-    logger.info(f"Dataset size: {len(dataset)} transactions")
+    # Save components
+    os.makedirs('models', exist_ok=True)
+    vocab.save(config.vocab_save_path)
+    field_vocab.save(config.field_vocab_save_path)
+    taxonomy.save(config.repair_taxonomy_path)
+    config.save('models/config.json')
     
-    if len(dataset) < 100:
-        logger.warning("WARNING: Dataset is very small (<100 transactions)")
-        logger.warning("For good results, use at least 1000+ transactions")
+    # Split data
+    n = len(transactions)
+    train_size = int(n * config.train_split)
+    val_size = int(n * config.val_split)
     
-    n = len(dataset)
-    train_size = int(n * 0.8)
-    val_size = n - train_size
+    train_txns = transactions[:train_size]
+    val_txns = transactions[train_size:train_size+val_size]
     
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    logger.info(f"Data split: Train={len(train_txns)}, Val={len(val_txns)}")
     
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32)
+    train_dataset = ACERepairDataset(train_txns, parser)
+    val_dataset = ACERepairDataset(val_txns, parser)
     
-    dummy_features = feature_extractor.extract({})
-    model = RulePredictionModel(len(dummy_features), len(ace_to_idx))
-    
-    logger.info(f"Model has {sum(p.numel() for p in model.parameters()):,} parameters")
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size)
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Using device: {device}")
     
-    trainer = Trainer(model, device)
-    trainer.train(train_loader, val_loader, args.epochs, f"{args.output}/model.pt")
-    
-    logger.info(f"\nTraining complete! Files saved to {args.output}/")
-    logger.info("Next step: Run 'repair' command to repair payments")
-
+    model = ACERepairModel(config, len(vocab), len(field_vocab), len(taxonomy))
+    trainer = ACETrainer(model, config, device)
+    trainer.train(train_loader, val_loader)
 
 def repair_command(args):
-    """Repair payment"""
-    logger.info("="*70)
-    logger.info("REPAIR PHASE: Applying learned rules to payment")
-    logger.info("="*70)
-    
-    # Check if system was trained
-    if not os.path.exists(f"{args.model}/model.pt"):
-        logger.error(f"Error: Trained model not found at {args.model}/model.pt")
-        logger.error(f"Run 'learn' and 'train' commands first")
-        return
-    
-    system = ComprehensiveRepairSystem(args.model)
+    """Phase 3: Apply repairs"""
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    repairer = ACERepairer(args.model or './models', device)
     
     with open(args.input, 'r') as f:
-        payment = json.load(f)
+        data = json.load(f)
     
-    result = system.repair(payment, threshold=args.threshold)
+    # Handle transaction ID wrapper format
+    if len(data) == 1:
+        txn_id = list(data.keys())[0]
+        if txn_id.isdigit() or len(txn_id) > 10:
+            logger.info(f"Processing transaction: {txn_id}")
+            payment = data[txn_id]
+        else:
+            payment = data
+    else:
+        payment = data
     
-    logger.info(f"\nPredicted {len(result['predicted_rules'])} rules:")
-    for ace_id, prob in result['predicted_rules']:
-        desc = system.learner.rules[ace_id]['text']
-        logger.info(f"  {ace_id} ({prob:.3f}): {desc}")
+    # Extract repair IDs if provided (optional - will auto-predict if not)
+    repair_ids = None
+    if hasattr(args, 'repairs') and args.repairs:
+        repair_ids = args.repairs.split(',')
+    
+    # Get threshold with default
+    repair_threshold = 0.5
+    if hasattr(args, 'repair_threshold'):
+        repair_threshold = args.repair_threshold
+    
+    # Repair with automatic prediction if no repairs specified
+    results = repairer.repair(
+        payment, 
+        repair_ids=repair_ids,
+        repair_threshold=repair_threshold
+    )
+    
+    logger.info(f"\nPredicted/Applied Repair IDs: {results['predicted_repair_ids']}")
+    for desc in results['repair_descriptions']:
+        logger.info(f"  {desc}")
+    
+    logger.info(f"\nApplied {len(results['applied_repairs'])} field changes:")
+    for repair in results['applied_repairs'][:10]:
+        logger.info(f"  {repair['field']}: {repair['before']} → {repair['after']} ({repair['source']})")
     
     if args.output:
         with open(args.output, 'w') as f:
-            json.dump(result, f, indent=2)
-        logger.info(f"\nRepaired payment saved to {args.output}")
-    else:
-        logger.info("\nRepaired payment:")
-        print(json.dumps(result['payment'], indent=2))
+            json.dump(results, f, indent=2)
+        logger.info(f"\nResults saved to {args.output}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Comprehensive Payment Repair System',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Step 1: Learn rules and build lookup tables
-  python repair_system.py learn --input repair3.json --output models/
-  
-  # Step 2: Train ML predictor
-  python repair_system.py train --input repair3.json --output models/ --epochs 50
-  
-  # Step 3: Repair a payment
-  python repair_system.py repair --input payment.json --output repaired.json --model models/
-        """
-    )
-    
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    parser = argparse.ArgumentParser(description='ACE Repair Model - Three Phase Architecture')
+    subparsers = parser.add_subparsers(dest='command')
     
     # Learn command
-    learn_parser = subparsers.add_parser(
-        'learn', 
-        help='Extract rules and build lookup tables from training data'
-    )
-    learn_parser.add_argument(
-        '--input', 
-        required=True,
-        help='Input JSON file with repair examples (e.g., repair3.json)'
-    )
-    learn_parser.add_argument(
-        '--output', 
-        default='./models',
-        help='Output directory for learned rules and lookups (default: ./models)'
-    )
+    learn_parser = subparsers.add_parser('learn', help='Phase 1: Build lookup tables')
+    learn_parser.add_argument('--input', required=True, help='Input repairs JSON')
+    learn_parser.add_argument('--output', help='Output lookup tables file')
     
     # Train command
-    train_parser = subparsers.add_parser(
-        'train',
-        help='Train ML model to predict which rules to apply'
-    )
-    train_parser.add_argument(
-        '--input', 
-        required=True,
-        help='Input JSON file with repair examples (same as learn phase)'
-    )
-    train_parser.add_argument(
-        '--output', 
-        default='./models',
-        help='Directory with learned rules (from learn phase) and where to save model (default: ./models)'
-    )
-    train_parser.add_argument(
-        '--epochs', 
-        type=int, 
-        default=50,
-        help='Number of training epochs (default: 50)'
-    )
+    train_parser = subparsers.add_parser('train', help='Phase 2: Train model')
+    train_parser.add_argument('--input', required=True, help='Input repairs JSON')
+    train_parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    train_parser.add_argument('--batch_size', type=int, help='Batch size')
     
     # Repair command
-    repair_parser = subparsers.add_parser(
-        'repair',
-        help='Repair a payment using trained system'
-    )
-    repair_parser.add_argument(
-        '--input', 
-        required=True,
-        help='Input payment JSON file to repair'
-    )
-    repair_parser.add_argument(
-        '--output',
-        help='Output file for repaired payment (if not specified, prints to console)'
-    )
-    repair_parser.add_argument(
-        '--model', 
-        default='./models',
-        help='Directory with trained model and learned rules (default: ./models)'
-    )
-    repair_parser.add_argument(
-        '--threshold', 
-        type=float, 
-        default=0.5,
-        help='Confidence threshold for applying rules (default: 0.5)'
-    )
+    repair_parser = subparsers.add_parser('repair', help='Phase 3: Apply repairs')
+    repair_parser.add_argument('--input', required=True, help='Input payment JSON')
+    repair_parser.add_argument('--output', help='Output file')
+    repair_parser.add_argument('--model', default='./models', help='Model directory')
+    repair_parser.add_argument('--repairs', help='Optional: comma-separated repair IDs (auto-predicted if not provided)')
+    repair_parser.add_argument('--repair_threshold', type=float, default=0.5, 
+                               help='Threshold for repair prediction (default: 0.5)')
     
     args = parser.parse_args()
     
@@ -1359,3 +1379,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
