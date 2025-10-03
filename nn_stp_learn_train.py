@@ -61,6 +61,24 @@ Usage:
 Author: Enhanced Three-Phase Implementation
 Version: 2.1 - Fixed clearing lookup and BIC learning
 """
+"""
+Comprehensive Rule-Based Payment Repair System
+===============================================
+
+Three-phase system for automatic payment repair with enhanced learning.
+
+PHASE 1 - LEARN: Extract knowledge from training data
+PHASE 2 - TRAIN: Train ML model to predict rule application  
+PHASE 3 - REPAIR: Apply learned rules to new payments
+
+Usage:
+    python ace_repair_model.py learn --input repairs_large.json
+    python ace_repair_model.py train --input repairs_large.json --epochs 100
+    python ace_repair_model.py repair --input payment.json --output result.json
+
+Author: Enhanced Three-Phase Implementation
+Version: 2.1 - Fixed clearing lookup and BIC learning
+"""
 
 import torch
 import torch.nn as nn
@@ -1075,7 +1093,7 @@ class ACETrainer:
         }
     
     def train_epoch(self, train_loader, epoch):
-        """Train for one epoch"""
+        """Train for one epoch with repair predictor training"""
         self.model.train()
         epoch_losses = defaultdict(float)
         
@@ -1084,8 +1102,18 @@ class ACETrainer:
             targets = {k: v.to(self.device) for k, v in targets.items()}
             
             self.optimizer.zero_grad()
-            outputs = self.model(inputs)
+            
+            # FIXED: Train repair predictor alongside main model
+            # Forward pass 1: Regular training (field predictions)
+            outputs = self.model(inputs, predict_repairs=False)
+            
+            # Forward pass 2: Repair prediction (NEW)
+            repair_outputs = self.model(inputs, predict_repairs=True)
+            outputs['repair_predictions'] = repair_outputs['repair_predictions']
+            
+            # Compute combined loss
             loss, loss_components = self.compute_loss(outputs, targets)
+            
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
             self.optimizer.step()
@@ -1094,7 +1122,11 @@ class ACETrainer:
                 epoch_losses[key] += value
             
             if batch_idx % 10 == 0:
-                logger.info(f'  Epoch {epoch} Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}')
+                logger.info(f'  Epoch {epoch} Batch {batch_idx}/{len(train_loader)}, '
+                           f'Loss: {loss.item():.4f} '
+                           f'(char: {loss_components["char_loss"]:.4f}, '
+                           f'change: {loss_components["change_loss"]:.4f}, '
+                           f'repair: {loss_components["repair_loss"]:.4f})')
         
         for key in epoch_losses:
             epoch_losses[key] /= len(train_loader)
@@ -1102,7 +1134,7 @@ class ACETrainer:
         return epoch_losses
     
     def evaluate(self, val_loader):
-        """Evaluate on validation set"""
+        """Evaluate on validation set with repair prediction"""
         self.model.eval()
         epoch_losses = defaultdict(float)
         
@@ -1110,7 +1142,12 @@ class ACETrainer:
             for inputs, targets in val_loader:
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 targets = {k: v.to(self.device) for k, v in targets.items()}
-                outputs = self.model(inputs)
+                
+                # FIXED: Evaluate repair predictor too
+                outputs = self.model(inputs, predict_repairs=False)
+                repair_outputs = self.model(inputs, predict_repairs=True)
+                outputs['repair_predictions'] = repair_outputs['repair_predictions']
+                
                 loss, loss_components = self.compute_loss(outputs, targets)
                 
                 for key, value in loss_components.items():
