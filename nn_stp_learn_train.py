@@ -50,6 +50,24 @@ Updated Training Loss
            = 0.30 + 0.005 + 0.40 = 0.705
 
 """
+"""
+Comprehensive Rule-Based Payment Repair System
+===============================================
+
+Three-phase system for automatic payment repair with enhanced learning.
+
+PHASE 1 - LEARN: Extract knowledge from training data
+PHASE 2 - TRAIN: Train ML model to predict rule application  
+PHASE 3 - REPAIR: Apply learned rules to new payments
+
+Usage:
+    python ace_repair_model.py learn --input repairs_large.json
+    python ace_repair_model.py train --input repairs_large.json --epochs 100
+    python ace_repair_model.py repair --input payment.json --output result.json
+
+Author: Enhanced Three-Phase Implementation
+Version: 2.1 - Fixed clearing lookup and BIC learning
+"""
 
 import torch
 import torch.nn as nn
@@ -188,6 +206,36 @@ class LookupTableBuilder:
         self.print_statistics()
         return self.compile_lookup_tables()
     
+    def _learn_from_dropped_bic(self, bic: str, before: Dict, repair_ids: List[str]):
+        """
+        NEW: Learn BIC info even when BIC is being dropped.
+        In cases where BIC exists in 'before' but is dropped in 'after',
+        we still want to capture the bank info associated with it.
+        """
+        if bic not in self.bic_to_bank_info:
+            self.bic_to_bank_info[bic] = {}
+        
+        # Look for name in before state
+        name = self._find_value_in_nested_dict(before, ['nm', 'name'])
+        if name:
+            self.bic_to_bank_info[bic]['name'] = name
+        
+        # Look for address in before state
+        address = self._find_value_in_nested_dict(before, ['adrline', 'address'])
+        if address:
+            if 'address' not in self.bic_to_bank_info[bic]:
+                self.bic_to_bank_info[bic]['address'] = []
+            if isinstance(address, list):
+                self.bic_to_bank_info[bic]['address'].extend(address)
+            else:
+                self.bic_to_bank_info[bic]['address'].append(address)
+        
+        for repair_id in repair_ids:
+            self.repair_patterns[repair_id].append({
+                'type': 'BIC_dropped',
+                'source_field': 'BIC'
+            })
+    
     def _learn_from_existing_data(self, before: Dict, after: Dict, 
                                    repair_ids: List[str], entity_key: str):
         """
@@ -226,12 +274,23 @@ class LookupTableBuilder:
         elif action == 'dropped':
             self.stats['field_drops'][field_path] += 1
         
+        # Handle additions and transformations
         if action in ['added', 'transformed']:
             self._detect_lookup_operation(field_path, value, before, after, 
                                          repair_ids, source, entity_key)
+        
+        # Handle edits and transformations
         elif action in ['edited', 'transformed']:
             old_value = diff.get('old_value')
             self._detect_standardization(field_path, old_value, value, repair_ids)
+        
+        # NEW: Handle BIC drops - learn the BIC info before it's dropped
+        elif action == 'dropped':
+            if 'bic' in field_path.lower() and value:
+                # The BIC is being dropped, but we should still learn its info
+                # Look for name/address that might exist in 'before'
+                self._learn_from_dropped_bic(value, before, repair_ids)
+                self.stats['lookup_operations']['BIC_dropped'] += 1
     
     def _detect_lookup_operation(self, field_path: str, value: Any, 
                                   before: Dict, after: Dict, 
@@ -845,8 +904,17 @@ class ACERepairModel(nn.Module):
             dropout=config.dropout if config.num_lstm_layers > 1 else 0
         )
         
-        self.repair_predictor = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
+        # FIXED: Two repair predictors - one for training (with targets), one for inference (input-only)
+        self.repair_predictor_train = nn.Sequential(
+            nn.Linear(config.hidden_dim * 3, config.hidden_dim),  # Training: input + target + diff
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.hidden_dim, num_repairs),
+            nn.Sigmoid()
+        )
+        
+        self.repair_predictor_inference = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim // 2),  # Inference: input only
             nn.ReLU(),
             nn.Dropout(config.dropout),
             nn.Linear(config.hidden_dim // 2, num_repairs),
@@ -892,13 +960,25 @@ class ACERepairModel(nn.Module):
             nn.Linear(config.hidden_dim // 2, vocab_size)
         )
     
-    def forward(self, input_dict, predict_repairs=False):
-        """Forward pass through the model"""
+    def forward(self, input_dict, predict_repairs=False, target_dict=None):
+        """
+        Forward pass through the model.
+        
+        REDESIGNED: Repair predictor now sees both input AND target (during training)
+        to learn which repairs are needed based on what transformations occur.
+        
+        Args:
+            input_dict: Input fields (before state)
+            predict_repairs: If True, predict which repairs to apply
+            target_dict: Target fields (after state) - used during training for repair prediction
+        """
         batch_size = input_dict['field_names'].size(0)
         max_fields = input_dict['field_names'].size(1)
         
+        # Encode field names
         field_name_emb = self.field_name_embedding(input_dict['field_names'])
         
+        # Encode field values (input)
         field_values = input_dict['field_values']
         field_values_flat = field_values.view(batch_size * max_fields, -1)
         char_emb = self.char_embedding(field_values_flat)
@@ -906,11 +986,39 @@ class ACERepairModel(nn.Module):
         value_emb = torch.cat([hidden[-2], hidden[-1]], dim=-1)
         value_emb = value_emb.view(batch_size, max_fields, -1)
         
+        # REDESIGNED: Repair prediction based on input-target gap
         if predict_repairs:
-            field_pooled = value_emb.mean(dim=1)
-            repair_predictions = self.repair_predictor(field_pooled)
+            if target_dict is not None:
+                # Training mode: Compare input vs target to predict repairs
+                target_values = target_dict['field_values']
+                target_values_flat = target_values.view(batch_size * max_fields, -1)
+                target_char_emb = self.char_embedding(target_values_flat)
+                target_lstm_out, (target_hidden, _) = self.value_lstm(target_char_emb)
+                target_value_emb = torch.cat([target_hidden[-2], target_hidden[-1]], dim=-1)
+                target_value_emb = target_value_emb.view(batch_size, max_fields, -1)
+                
+                # Compute difference between input and target
+                value_diff = target_value_emb - value_emb
+                
+                # Combine: input + target + difference (768 dims)
+                repair_input = torch.cat([
+                    value_emb.mean(dim=1),         # What we have
+                    target_value_emb.mean(dim=1),  # What we need
+                    value_diff.mean(dim=1)         # What's changing
+                ], dim=-1)
+                
+                # Use training predictor (expects 768 dims)
+                repair_predictions = self.repair_predictor_train(repair_input)
+            else:
+                # Inference mode: Only have input (256 dims)
+                repair_input = value_emb.mean(dim=1)
+                
+                # Use inference predictor (expects 256 dims)
+                repair_predictions = self.repair_predictor_inference(repair_input)
+            
             return {'repair_predictions': repair_predictions}
         
+        # Normal forward pass for field transformation
         repair_emb = self.repair_embedding(input_dict['repair_ids'])
         repair_context = repair_emb.mean(dim=1, keepdim=True).expand(-1, max_fields, -1)
         combined = torch.cat([repair_context, field_name_emb, value_emb], dim=-1)
@@ -1064,7 +1172,7 @@ class ACETrainer:
         }
     
     def train_epoch(self, train_loader, epoch):
-        """Train for one epoch with repair predictor training"""
+        """Train for one epoch with redesigned repair predictor training"""
         self.model.train()
         epoch_losses = defaultdict(float)
         
@@ -1074,12 +1182,12 @@ class ACETrainer:
             
             self.optimizer.zero_grad()
             
-            # FIXED: Train repair predictor alongside main model
             # Forward pass 1: Regular training (field predictions)
             outputs = self.model(inputs, predict_repairs=False)
             
-            # Forward pass 2: Repair prediction (NEW)
-            repair_outputs = self.model(inputs, predict_repairs=True)
+            # Forward pass 2: Repair prediction WITH target information (REDESIGNED)
+            # Now the model sees both input and target to learn repair patterns
+            repair_outputs = self.model(inputs, predict_repairs=True, target_dict=targets)
             outputs['repair_predictions'] = repair_outputs['repair_predictions']
             
             # Compute combined loss
@@ -1105,7 +1213,7 @@ class ACETrainer:
         return epoch_losses
     
     def evaluate(self, val_loader):
-        """Evaluate on validation set with repair prediction"""
+        """Evaluate on validation set with redesigned repair prediction"""
         self.model.eval()
         epoch_losses = defaultdict(float)
         
@@ -1114,9 +1222,11 @@ class ACETrainer:
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 targets = {k: v.to(self.device) for k, v in targets.items()}
                 
-                # FIXED: Evaluate repair predictor too
+                # Evaluate field transformations
                 outputs = self.model(inputs, predict_repairs=False)
-                repair_outputs = self.model(inputs, predict_repairs=True)
+                
+                # REDESIGNED: Evaluate repair predictor with target information
+                repair_outputs = self.model(inputs, predict_repairs=True, target_dict=targets)
                 outputs['repair_predictions'] = repair_outputs['repair_predictions']
                 
                 loss, loss_components = self.compute_loss(outputs, targets)
