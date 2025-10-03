@@ -29,26 +29,6 @@ Usage:
     # Step 3: Apply repairs to new payments
     python repair_system.py repair --input payment.json --output repaired.json --model models/
 
-Usage:
-    Learn Phase:
-        python ace_repair_model.py learn --input repairs.json
-    
-    Train Phase:
-        python ace_repair_model.py train --input repairs.json --epochs 50
-    
-    Repair Phase:
-        python ace_repair_model.py repair --input payment.json --output result.json
-
-Author: Enhanced Three-Phase Implementation
-Date: 2025
-"""
-
-"""
-Comprehensive Rule-Based Payment Repair System
-===============================================
-
-Three-phase system for automatic payment repair with enhanced learning.
-
 PHASE 1 - LEARN: Extract knowledge from training data
 PHASE 2 - TRAIN: Train ML model to predict rule application  
 PHASE 3 - REPAIR: Apply learned rules to new payments
@@ -60,24 +40,15 @@ Usage:
 
 Author: Enhanced Three-Phase Implementation
 Version: 2.1 - Fixed clearing lookup and BIC learning
-"""
-"""
-Comprehensive Rule-Based Payment Repair System
-===============================================
-
-Three-phase system for automatic payment repair with enhanced learning.
-
-PHASE 1 - LEARN: Extract knowledge from training data
-PHASE 2 - TRAIN: Train ML model to predict rule application  
-PHASE 3 - REPAIR: Apply learned rules to new payments
-
-Usage:
-    python ace_repair_model.py learn --input repairs_large.json
-    python ace_repair_model.py train --input repairs_large.json --epochs 100
-    python ace_repair_model.py repair --input payment.json --output result.json
 
 Author: Enhanced Three-Phase Implementation
 Version: 2.1 - Fixed clearing lookup and BIC learning
+
+Updated Training Loss
+  Total loss = 1.0×char_loss + 0.1×change_loss + 1.0×repair_loss
+  Example:    = 1.0×0.30    + 0.1×0.05      + 1.0×0.40
+           = 0.30 + 0.005 + 0.40 = 0.705
+
 """
 
 import torch
@@ -129,7 +100,7 @@ class Config:
     val_split: float = 0.1
     char_loss_weight: float = 1.0
     change_detection_weight: float = 0.1
-    repair_prediction_weight: float = 0.2
+    repair_prediction_weight: float = 1.0  # FIXED: Increased from 0.2 to 1.0
     model_save_path: str = "./models/ace_model.pt"
     vocab_save_path: str = "./models/ace_vocab.pkl"
     field_vocab_save_path: str = "./models/ace_field_vocab.pkl"
