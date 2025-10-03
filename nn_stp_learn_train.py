@@ -173,6 +173,18 @@ class LookupTableBuilder:
         with open(transactions_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
+        # FIXED: Handle both object format and array format
+        if isinstance(data, list):
+            # Array format: [{txn1}, {txn2}, ...]
+            if len(data) > 0 and isinstance(data[0], dict):
+                # Flatten array of transaction objects into single dict
+                transactions = {}
+                for item in data:
+                    transactions.update(item)
+                data = transactions
+            else:
+                raise ValueError("Invalid array format in JSON file")
+        
         self.stats['total_transactions'] = len(data)
         logger.info(f"Loaded {len(data)} transactions for learning")
         
@@ -791,11 +803,22 @@ class ACEDataParser:
         self.taxonomy = taxonomy
     
     def parse_file(self, json_file: str) -> List[Tuple]:
-        """Parse repair data file"""
+        """Parse repair data file - handles both object and array formats"""
         logger.info(f"Parsing file: {json_file}")
         
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        
+        # FIXED: Handle both object format and array format
+        if isinstance(data, list):
+            # Array format: [{txn1}, {txn2}, ...]
+            if len(data) > 0 and isinstance(data[0], dict):
+                transactions_dict = {}
+                for item in data:
+                    transactions_dict.update(item)
+                data = transactions_dict
+            else:
+                raise ValueError("Invalid array format in JSON file")
         
         transactions = []
         
