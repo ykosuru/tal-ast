@@ -1,7 +1,18 @@
 """
-ACE Repair Pattern Analyzer and Enhanced Predictor
-==================================================
-Fixed version with bug corrections
+ACE Repair Pattern Analyzer
+============================
+
+Analyzes payment repair training data to discover:
+- Most frequent repair codes
+- Deterministic repair patterns (rules with 100% confidence)
+- Repair co-occurrence patterns
+- Field change patterns per repair
+
+Usage:
+    python nn_stp_analyze.py analyze --input repairs_10k.json --output analysis_report.json
+
+Author: Enhanced Version
+Date: 2025-10-04
 """
 
 import json
@@ -10,14 +21,12 @@ import os
 import logging
 from typing import Dict, List, Set, Tuple, Optional
 from collections import defaultdict, Counter
-from dataclasses import dataclass, asdict
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import pickle
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
@@ -27,78 +36,185 @@ logger = logging.getLogger(__name__)
 
 class RepairPatternAnalyzer:
     """
-    Analyzes dataset to discover deterministic repair patterns.
+    Analyzes payment repair dataset to discover patterns and rules.
+    
+    The analyzer processes training data with 'before/after' states and
+    identifies:
+    1. Which repairs occur most frequently
+    2. Which conditions always predict specific repairs (deterministic rules)
+    3. Which repairs commonly occur together
+    4. Which fields are typically modified for each repair
     """
     
     def __init__(self):
+        """Initialize counters and storage for analysis"""
+        # Count how many times each repair code appears
         self.repair_stats = Counter()
+        
+        # Store patterns (conditions) for each repair
         self.repair_patterns = defaultdict(list)
+        
+        # Track which repairs occur together in same transaction
         self.repair_cooccurrence = defaultdict(Counter)
+        
+        # Track field changes per repair
         self.field_changes = defaultdict(list)
-        self.transactions_seen = set()  # Track unique transaction IDs
+        
+        # Track unique transaction IDs processed
+        self.transactions_seen = set()
         
     def analyze(self, json_file: str) -> Dict:
-        """Analyze dataset and return comprehensive statistics"""
+        """
+        Main analysis method - processes entire dataset.
+        
+        Args:
+            json_file: Path to JSON file containing training data
+            
+        Returns:
+            Dictionary containing analysis results with keys:
+            - summary: Overall statistics
+            - top_repairs: Most frequent repairs
+            - deterministic_rules: Rules with 100% confidence
+            - repair_combinations: Commonly co-occurring repairs
+            - field_change_patterns: Field modifications per repair
+        """
         logger.info("="*70)
         logger.info("ANALYZING REPAIR PATTERNS")
         logger.info("="*70)
         
+        # Load JSON data
         with open(json_file, 'r') as f:
             raw_data = json.load(f)
         
-        # Handle different formats
-        if isinstance(raw_data, list):
-            if len(raw_data) > 0 and isinstance(raw_data[0], dict):
-                first_item = raw_data[0]
-                if all(isinstance(v, dict) for v in first_item.values()):
-                    data = first_item
-                else:
-                    data = {f"txn_{i:06d}": txn for i, txn in enumerate(raw_data)}
-            else:
-                raise ValueError("Unexpected array format")
-        else:
-            data = raw_data
+        # Parse data into consistent format (dict of transactions)
+        data = self._parse_input_format(raw_data)
         
-        logger.info(f"Analyzing {len(data)} transactions...")
+        logger.info(f"\nStarting analysis of {len(data)} transactions...")
         
-        # Analyze each transaction
+        # Process each transaction
+        processed_count = 0
+        skipped_count = 0
+        
         for txn_id, txn_data in data.items():
+            # Check if transaction has repairs to analyze
+            if 'ace' not in txn_data or not txn_data['ace']:
+                skipped_count += 1
+                logger.debug(f"Skipping {txn_id}: No 'ace' repairs found")
+                continue
+                
             self._analyze_transaction(txn_id, txn_data)
+            processed_count += 1
+            
+            # Log progress every 100 transactions
+            if processed_count % 100 == 0:
+                logger.info(f"  Processed {processed_count}/{len(data)} transactions...")
         
-        # Generate insights
+        # Log completion stats
+        logger.info(f"\nAnalysis complete:")
+        logger.info(f"  Total transactions in file: {len(data)}")
+        logger.info(f"  Transactions with repairs: {processed_count}")
+        logger.info(f"  Transactions skipped (no repairs): {skipped_count}")
+        logger.info(f"  Total repair instances: {sum(self.repair_stats.values())}")
+        logger.info(f"  Unique repair codes: {len(self.repair_stats)}")
+        
+        # Generate insights from collected data
         analysis = self._generate_insights()
         
-        # Print report
+        # Print human-readable report
         self._print_report(analysis)
         
         return analysis
     
+    def _parse_input_format(self, raw_data) -> Dict:
+        """
+        Parse various input formats into standard dict of transactions.
+        
+        Handles three formats:
+        1. Array containing single dict: [{txn1: {...}, txn2: {...}}]
+        2. Array of dicts: [{...}, {...}]
+        3. Dict of transactions: {txn1: {...}, txn2: {...}}
+        
+        Returns:
+            Dict mapping transaction_id -> transaction_data
+        """
+        if isinstance(raw_data, list):
+            logger.info(f"Input format: Array with {len(raw_data)} element(s)")
+            
+            if len(raw_data) == 0:
+                raise ValueError("Empty array in input file")
+            
+            # Check first element
+            first_item = raw_data[0]
+            
+            if not isinstance(first_item, dict):
+                raise ValueError(f"First array element is {type(first_item)}, expected dict")
+            
+            # Determine if it's format 1 or 2
+            # Format 1: All values in first dict are themselves dicts (transactions)
+            if all(isinstance(v, dict) for v in first_item.values()):
+                # Format 1: Array containing dict of transactions
+                data = first_item
+                logger.info(f"Detected: Array containing dict of {len(data)} transactions")
+                
+            else:
+                # Format 2: Array of transaction objects
+                data = {f"txn_{i:06d}": txn for i, txn in enumerate(raw_data)}
+                logger.info(f"Detected: Array of {len(data)} transaction objects")
+                
+        elif isinstance(raw_data, dict):
+            # Format 3: Direct dict of transactions
+            data = raw_data
+            logger.info(f"Detected: Dict of {len(data)} transactions")
+            
+        else:
+            raise ValueError(f"Unsupported data type: {type(raw_data)}")
+        
+        # Log sample transaction IDs
+        sample_ids = list(data.keys())[:5]
+        logger.info(f"Sample transaction IDs: {sample_ids}")
+        
+        return data
+    
     def _analyze_transaction(self, txn_id: str, txn_data: Dict):
-        """Analyze a single transaction for patterns"""
+        """
+        Analyze a single transaction to extract repair patterns.
+        
+        For each repair in the transaction:
+        1. Count its occurrence
+        2. Extract conditions when it occurred
+        3. Track which other repairs it occurred with
+        4. Record field changes associated with it
+        
+        Args:
+            txn_id: Unique transaction identifier
+            txn_data: Transaction data including 'ace' repairs and entities
+        """
+        # Extract repair IDs from 'ace' array
         repairs = [r['id'] for r in txn_data.get('ace', [])]
         
         if not repairs:
             return
         
-        # Track transaction
+        # Track that we processed this transaction
         self.transactions_seen.add(txn_id)
         
-        # Count repair frequency
+        # Count each repair occurrence
         for repair_id in repairs:
             self.repair_stats[repair_id] += 1
         
-        # Track co-occurrence
+        # Track co-occurrence: which repairs appear together?
         for i, repair1 in enumerate(repairs):
             for repair2 in repairs[i+1:]:
+                # Increment both directions for easier lookup later
                 self.repair_cooccurrence[repair1][repair2] += 1
                 self.repair_cooccurrence[repair2][repair1] += 1
         
-        # Extract patterns for each repair
+        # Extract pattern for each repair (what conditions were present?)
         for repair_id in repairs:
             pattern = self._extract_pattern(txn_data, repair_id, txn_id)
             self.repair_patterns[repair_id].append(pattern)
         
-        # Analyze field changes
+        # Analyze what fields changed in each entity
         for entity_key, entity_data in txn_data.items():
             if isinstance(entity_data, dict) and 'before' in entity_data and 'after' in entity_data:
                 changes = self._analyze_entity_changes(entity_key, entity_data, repairs)
@@ -106,7 +222,22 @@ class RepairPatternAnalyzer:
                     self.field_changes[repair_id].append(changes)
     
     def _extract_pattern(self, txn_data: Dict, repair_id: str, txn_id: str) -> Dict:
-        """Extract features/conditions when a repair occurs"""
+        """
+        Extract features/conditions present when a repair occurred.
+        
+        This captures the "state" of the payment when the repair was needed:
+        - Which key fields exist (BIC, IBAN, clearing, country, etc.)
+        - Which entities are present
+        - What specific changes occurred
+        
+        Args:
+            txn_data: Full transaction data
+            repair_id: The repair code being analyzed
+            txn_id: Transaction identifier
+            
+        Returns:
+            Pattern dict with boolean flags for conditions
+        """
         pattern = {
             'repair_id': repair_id,
             'txn_id': txn_id,
@@ -120,38 +251,62 @@ class RepairPatternAnalyzer:
             'field_changes': []
         }
         
-        # Normalize to lowercase
+        # Normalize all keys to lowercase for consistent checking
         txn_normalized = self._normalize_dict(txn_data)
         
-        # Check for key fields
-        pattern['has_bic'] = self._has_field(txn_normalized, 'bicfi') or self._has_field(txn_normalized, 'bic')
+        # Check for presence of key fields anywhere in the payment
+        pattern['has_bic'] = self._has_field(txn_normalized, 'bicfi') or \
+                            self._has_field(txn_normalized, 'bic')
         pattern['has_iban'] = self._has_field(txn_normalized, 'iban')
-        pattern['has_clearing'] = self._has_field(txn_normalized, 'mmbid') or self._has_field(txn_normalized, 'clrsysmmbid')
-        pattern['has_country'] = self._has_field(txn_normalized, 'ctryofres') or self._has_field(txn_normalized, 'ctry')
+        pattern['has_clearing'] = self._has_field(txn_normalized, 'mmbid') or \
+                                  self._has_field(txn_normalized, 'clrsysmmbid')
+        pattern['has_country'] = self._has_field(txn_normalized, 'ctryofres') or \
+                                self._has_field(txn_normalized, 'ctry')
         pattern['has_name'] = self._has_field(txn_normalized, 'nm')
-        pattern['has_address'] = self._has_field(txn_normalized, 'adrline') or self._has_field(txn_normalized, 'pstladr')
+        pattern['has_address'] = self._has_field(txn_normalized, 'adrline') or \
+                                self._has_field(txn_normalized, 'pstladr')
         
-        # Track which entities have before/after
-        for key in ['cdtr', 'dbtr', 'cdtragt', 'dbtragt', 'instgagt', 'instdagt', 'rmtinf']:
+        # Track which entities have before/after (are being modified)
+        entity_keys = ['cdtr', 'dbtr', 'cdtragt', 'dbtragt', 'instgagt', 'instdagt', 'rmtinf']
+        
+        for key in entity_keys:
             if key in txn_normalized:
                 entity_data = txn_normalized[key]
+                
+                # Only count entities that have transformations
                 if isinstance(entity_data, dict) and 'before' in entity_data:
                     pattern['entities_present'].append(key)
                     
-                    # Track what changed
+                    # Extract specific field changes from 'diffs' array
                     if 'diffs' in entity_data:
                         for diff in entity_data['diffs']:
                             pattern['field_changes'].append({
                                 'entity': key,
                                 'field': diff.get('key', ''),
                                 'action': diff.get('msg', ''),
-                                'value': str(diff.get('val', ''))[:50]  # Truncate
+                                'value': str(diff.get('val', ''))[:50]  # Truncate long values
                             })
         
         return pattern
     
-    def _analyze_entity_changes(self, entity_key: str, entity_data: Dict, repairs: List[str]) -> Dict:
-        """Analyze what changed in an entity"""
+    def _analyze_entity_changes(self, entity_key: str, entity_data: Dict, 
+                                repairs: List[str]) -> Dict:
+        """
+        Analyze what changed in a specific entity (cdtrAgt, dbtrAgt, etc.).
+        
+        Categorizes changes into:
+        - Fields added (new fields in 'after' that weren't in 'before')
+        - Fields removed (fields in 'before' removed in 'after')
+        - Fields transformed (fields that changed value)
+        
+        Args:
+            entity_key: Entity name (e.g., 'cdtrAgt')
+            entity_data: Entity dict with 'before', 'after', 'diffs'
+            repairs: List of repairs applied to this transaction
+            
+        Returns:
+            Dict summarizing changes in this entity
+        """
         changes = {
             'entity': entity_key,
             'fields_added': [],
@@ -160,6 +315,7 @@ class RepairPatternAnalyzer:
             'repairs': repairs
         }
         
+        # Parse 'diffs' array to categorize changes
         if 'diffs' in entity_data:
             for diff in entity_data['diffs']:
                 action = diff.get('msg', '')
@@ -175,9 +331,21 @@ class RepairPatternAnalyzer:
         return changes
     
     def _generate_insights(self) -> Dict:
-        """Generate actionable insights from analysis"""
+        """
+        Generate actionable insights from collected data.
+        
+        Produces:
+        1. Summary statistics
+        2. Top 15 most frequent repairs
+        3. Deterministic rules (patterns with 100% confidence)
+        4. Common repair combinations
+        5. Field change patterns per repair
+        
+        Returns:
+            Dict with all insights
+        """
         total_repairs = sum(self.repair_stats.values())
-        total_transactions = len(self.transactions_seen)  # FIXED: Use tracked transaction IDs
+        total_transactions = len(self.transactions_seen)
         
         insights = {
             'summary': {
@@ -201,12 +369,11 @@ class RepairPatternAnalyzer:
                 'percentage': percentage
             })
         
-        # Find deterministic patterns
+        # Find deterministic patterns (need at least 3 examples to be confident)
         for repair_id, patterns in self.repair_patterns.items():
-            if len(patterns) < 3:  # Need at least 3 examples
+            if len(patterns) < 3:
                 continue
             
-            # Check if pattern is deterministic (100% consistent)
             rules = self._find_deterministic_rules(repair_id, patterns)
             if rules:
                 insights['deterministic_rules'].extend(rules)
@@ -215,7 +382,7 @@ class RepairPatternAnalyzer:
         combo_list = []
         for repair1, cooccur_dict in self.repair_cooccurrence.items():
             for repair2, count in cooccur_dict.most_common(3):
-                # Avoid duplicates (only add if repair1 < repair2)
+                # Avoid duplicates - only add if repair1 < repair2 (alphabetically)
                 if repair1 < repair2:
                     combo_list.append({
                         'repair1': repair1,
@@ -223,11 +390,11 @@ class RepairPatternAnalyzer:
                         'count': count
                     })
         
-        # Sort and take top 10
+        # Sort by frequency and take top 10
         combo_list.sort(key=lambda x: x['count'], reverse=True)
         insights['repair_combinations'] = combo_list[:10]
         
-        # Field change patterns
+        # Field change patterns - what fields does each repair typically modify?
         for repair_id, changes_list in self.field_changes.items():
             field_add_counter = Counter()
             field_transform_counter = Counter()
@@ -248,12 +415,27 @@ class RepairPatternAnalyzer:
         return insights
     
     def _find_deterministic_rules(self, repair_id: str, patterns: List[Dict]) -> List[Dict]:
-        """Find conditions that always predict this repair"""
+        """
+        Identify deterministic rules - conditions that always predict a repair.
+        
+        A rule is deterministic if it occurs in 100% of cases for that repair.
+        For example: "If BIC present AND country missing → always apply repair 6021"
+        
+        Args:
+            repair_id: Repair code to analyze
+            patterns: List of pattern dicts from all occurrences
+            
+        Returns:
+            List of rule dicts with condition, confidence, description
+        """
         rules = []
         
-        # Rule: BIC present + Country missing → Extract country from BIC
+        # Rule 1: Country from BIC (repair 6021)
+        # If repair is 6021, check if it ALWAYS occurs when BIC present + country missing
         if repair_id == '6021':
-            has_bic_no_country = sum(1 for p in patterns if p['has_bic'] and not p['has_country'])
+            has_bic_no_country = sum(1 for p in patterns 
+                                    if p['has_bic'] and not p['has_country'])
+            
             if has_bic_no_country == len(patterns):
                 rules.append({
                     'repair_id': repair_id,
@@ -263,9 +445,11 @@ class RepairPatternAnalyzer:
                     'description': 'Extract ISO country code from BIC'
                 })
         
-        # Rule: Clearing ID present + BIC missing → Lookup BIC
+        # Rule 2: BIC from clearing system (repair 6035)
         if repair_id == '6035':
-            has_clearing_no_bic = sum(1 for p in patterns if p['has_clearing'] and not p['has_bic'])
+            has_clearing_no_bic = sum(1 for p in patterns 
+                                     if p['has_clearing'] and not p['has_bic'])
+            
             if has_clearing_no_bic == len(patterns):
                 rules.append({
                     'repair_id': repair_id,
@@ -275,9 +459,11 @@ class RepairPatternAnalyzer:
                     'description': 'Resolve BIC from clearing system ID'
                 })
         
-        # Rule: BIC present + Name missing → Lookup name
+        # Rule 3: Bank name from BIC (repair 6036)
         if repair_id == '6036':
-            has_bic_no_name = sum(1 for p in patterns if p['has_bic'] and not p['has_name'])
+            has_bic_no_name = sum(1 for p in patterns 
+                                 if p['has_bic'] and not p['has_name'])
+            
             if has_bic_no_name == len(patterns):
                 rules.append({
                     'repair_id': repair_id,
@@ -287,13 +473,13 @@ class RepairPatternAnalyzer:
                     'description': 'Lookup bank name from BIC directory'
                 })
         
-        # Check entity-specific patterns
+        # Entity-specific patterns: Does this repair always affect the same entity?
         entity_consistency = defaultdict(int)
         for pattern in patterns:
             for entity in pattern['entities_present']:
                 entity_consistency[entity] += 1
         
-        # If repair always occurs in same entity with 95%+ consistency
+        # If repair occurs in same entity 95%+ of the time, it's a strong pattern
         for entity, count in entity_consistency.items():
             consistency = count / len(patterns)
             if consistency >= 0.95:
@@ -305,14 +491,15 @@ class RepairPatternAnalyzer:
                     'description': f'Repair typically affects {entity} entity'
                 })
         
-        # Check for common field change patterns
+        # Field change patterns: Does a specific field change always trigger this repair?
         field_change_counter = Counter()
         for pattern in patterns:
             for change in pattern['field_changes']:
+                # Create unique key: entity.field.action
                 key = f"{change['entity']}.{change['field']}.{change['action']}"
                 field_change_counter[key] += 1
         
-        # If a specific field change happens in 90%+ of cases
+        # If specific field change happens in 90%+ of cases, it's deterministic
         for change_pattern, count in field_change_counter.items():
             consistency = count / len(patterns)
             if consistency >= 0.90:
@@ -327,11 +514,17 @@ class RepairPatternAnalyzer:
         return rules
     
     def _print_report(self, analysis: Dict):
-        """Print analysis report"""
+        """
+        Print human-readable analysis report to console.
+        
+        Args:
+            analysis: Insights dict from _generate_insights()
+        """
         logger.info("\n" + "="*70)
         logger.info("REPAIR PATTERN ANALYSIS REPORT")
         logger.info("="*70)
         
+        # Summary section
         summary = analysis['summary']
         logger.info(f"\nDataset Summary:")
         logger.info(f"  Total Transactions: {summary['total_transactions']}")
@@ -339,51 +532,94 @@ class RepairPatternAnalyzer:
         logger.info(f"  Unique Repair Codes: {summary['unique_repairs']}")
         logger.info(f"  Avg Repairs/Transaction: {summary['avg_repairs_per_transaction']:.2f}")
         
+        # Top repairs section
         logger.info(f"\nTop 15 Most Frequent Repairs:")
         for repair in analysis['top_repairs']:
-            logger.info(f"  {repair['repair_id']}: {repair['count']} occurrences ({repair['percentage']:.1f}%)")
+            logger.info(f"  {repair['repair_id']}: {repair['count']} occurrences "
+                       f"({repair['percentage']:.1f}%)")
         
+        # Deterministic rules section
         logger.info(f"\nDeterministic Rules Found: {len(analysis['deterministic_rules'])}")
-        for rule in analysis['deterministic_rules']:
-            logger.info(f"  {rule['repair_id']}: {rule['condition']}")
-            logger.info(f"    Confidence: {rule['confidence']:.1%}, Occurrences: {rule['occurrences']}")
-            logger.info(f"    Description: {rule['description']}")
+        if analysis['deterministic_rules']:
+            for rule in analysis['deterministic_rules']:
+                logger.info(f"  {rule['repair_id']}: {rule['condition']}")
+                logger.info(f"    Confidence: {rule['confidence']:.1%}, "
+                          f"Occurrences: {rule['occurrences']}")
+                logger.info(f"    Description: {rule['description']}")
+        else:
+            logger.info("  (Need at least 3 examples per repair to detect patterns)")
         
+        # Repair combinations section
         if analysis['repair_combinations']:
             logger.info(f"\nCommon Repair Combinations:")
             for combo in analysis['repair_combinations'][:10]:
-                logger.info(f"  {combo['repair1']} + {combo['repair2']}: {combo['count']} times")
+                logger.info(f"  {combo['repair1']} + {combo['repair2']}: "
+                          f"{combo['count']} times")
         else:
-            logger.info(f"\nNo common repair combinations found (single repairs only)")
+            logger.info(f"\nNo common repair combinations found")
         
-        logger.info(f"\nField Change Patterns:")
+        # Field change patterns section
+        logger.info(f"\nField Change Patterns (Top 10 repairs):")
         for pattern in analysis['field_change_patterns'][:10]:
             logger.info(f"  Repair {pattern['repair_id']}:")
             if pattern['common_additions']:
-                logger.info(f"    Often adds: {list(pattern['common_additions'].keys())[:3]}")
+                top_additions = list(pattern['common_additions'].keys())[:3]
+                logger.info(f"    Often adds: {top_additions}")
             if pattern['common_transformations']:
-                logger.info(f"    Often transforms: {list(pattern['common_transformations'].keys())[:3]}")
+                top_transforms = list(pattern['common_transformations'].keys())[:3]
+                logger.info(f"    Often transforms: {top_transforms}")
+    
+    # Helper methods
     
     def _normalize_dict(self, obj):
-        """Recursively normalize dict keys to lowercase"""
+        """
+        Recursively normalize all dictionary keys to lowercase.
+        
+        This ensures consistent field access regardless of capitalization
+        (e.g., 'BICFI', 'BicFi', 'bicfi' all become 'bicfi')
+        
+        Args:
+            obj: Any object (dict, list, or primitive)
+            
+        Returns:
+            Normalized version with lowercase keys
+        """
         if isinstance(obj, dict):
-            return {k.lower() if isinstance(k, str) else k: self._normalize_dict(v) for k, v in obj.items()}
+            return {k.lower() if isinstance(k, str) else k: self._normalize_dict(v) 
+                   for k, v in obj.items()}
         elif isinstance(obj, list):
             return [self._normalize_dict(item) for item in obj]
         return obj
     
     def _has_field(self, obj, field_name: str) -> bool:
-        """Check if field exists anywhere in object"""
+        """
+        Check if a field exists anywhere in nested structure with non-empty value.
+        
+        Recursively searches through dicts and lists for field matching name.
+        A field is considered present only if it has a non-empty value.
+        
+        Args:
+            obj: Object to search (dict, list, or primitive)
+            field_name: Field name to search for (case-insensitive)
+            
+        Returns:
+            True if field exists with non-empty value, False otherwise
+        """
         field_name = field_name.lower()
         
         if isinstance(obj, dict):
             for k, v in obj.items():
+                # Check if key matches field name
                 if isinstance(k, str) and field_name in k.lower():
+                    # Only count as "has field" if value is non-empty
                     if v is not None and v != '' and v != []:
                         return True
+                
+                # Recursively search nested structures
                 if isinstance(v, (dict, list)):
                     if self._has_field(v, field_name):
                         return True
+                        
         elif isinstance(obj, list):
             for item in obj:
                 if self._has_field(item, field_name):
@@ -397,10 +633,16 @@ class RepairPatternAnalyzer:
 # ============================================================================
 
 def analyze_command(args):
-    """Analyze dataset for patterns"""
+    """
+    Execute the analyze command from CLI.
+    
+    Args:
+        args: Parsed command-line arguments
+    """
     analyzer = RepairPatternAnalyzer()
     analysis = analyzer.analyze(args.input)
     
+    # Save results to JSON if output path specified
     if args.output:
         with open(args.output, 'w') as f:
             json.dump(analysis, f, indent=2)
@@ -408,17 +650,36 @@ def analyze_command(args):
 
 
 def main():
+    """Main entry point for CLI"""
     parser = argparse.ArgumentParser(
-        description='ACE Repair Pattern Analyzer',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description='ACE Repair Pattern Analyzer - Discover patterns in repair training data',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Analyze repair patterns and print to console
+  python nn_stp_analyze.py analyze --input repairs_10k.json
+  
+  # Analyze and save results to JSON file
+  python nn_stp_analyze.py analyze --input repairs_10k.json --output analysis_report.json
+        """
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
-    # Analyze
-    analyze_parser = subparsers.add_parser('analyze', help='Analyze dataset for patterns')
-    analyze_parser.add_argument('--input', required=True, help='Training data JSON file')
-    analyze_parser.add_argument('--output', help='Output analysis JSON file')
+    # Analyze command
+    analyze_parser = subparsers.add_parser(
+        'analyze', 
+        help='Analyze dataset for repair patterns'
+    )
+    analyze_parser.add_argument(
+        '--input', 
+        required=True, 
+        help='Training data JSON file'
+    )
+    analyze_parser.add_argument(
+        '--output', 
+        help='Output JSON file for analysis results (optional)'
+    )
     
     args = parser.parse_args()
     
@@ -430,5 +691,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
