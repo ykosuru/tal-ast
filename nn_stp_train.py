@@ -1,5 +1,6 @@
 """
-ace_repair_predictor_enhanced.py
+ace_repair_predictor.py
+Author: Yekesa Kosuru
 ================================
 
 Enhanced ACE Payment Repair Predictor with:
@@ -90,7 +91,7 @@ class Config:
 
 
 # ============================================================================
-# FEATURE EXTRACTION
+# FEATURE EXTRACTION (Same as original)
 # ============================================================================
 
 class PaymentFeatureExtractor:
@@ -272,7 +273,6 @@ class PaymentFeatureExtractor:
         return features
     
     def _normalize_payment(self, payment: Dict) -> Dict:
-        """Recursively normalize dict keys to lowercase"""
         if isinstance(payment, dict):
             return {k.lower() if isinstance(k, str) else k: self._normalize_payment(v) 
                    for k, v in payment.items()}
@@ -280,8 +280,10 @@ class PaymentFeatureExtractor:
             return [self._normalize_payment(item) for item in payment]
         return payment
     
+    # Include all the extraction methods from original script
+    # (I'll include a few key ones, but in practice you'd copy all from original)
+    
     def _extract_bic_info(self, payment: Dict) -> Dict:
-        """Extract BIC-related features (15 features)"""
         bic_fields = self._find_all_values(payment, 'bic')
         has_bic = len(bic_fields) > 0
         bic_value = bic_fields[0] if bic_fields else None
@@ -304,8 +306,11 @@ class PaymentFeatureExtractor:
             'format_xxxxxxxxxxx': float(bic_value and len(str(bic_value)) == 11) if bic_value else 0.0
         }
     
+    # Copy all other _extract_* methods from original script
+    # For brevity, I'm showing structure - you'd include all methods
+    
     def _extract_iban_info(self, payment: Dict) -> Dict:
-        """Extract IBAN-related features (10 features)"""
+        # Copy from original
         iban_fields = self._find_all_values(payment, 'iban')
         has_iban = len(iban_fields) > 0
         iban_value = str(iban_fields[0]) if iban_fields else None
@@ -324,7 +329,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_clearing_info(self, payment: Dict) -> Dict:
-        """Extract clearing system features (12 features)"""
         clearing_fields = self._find_all_values(payment, 'mmbid')
         clearing_sys = self._find_all_values(payment, 'clrsysid')
         clearing_cd = self._find_all_values(payment, 'cd')
@@ -355,8 +359,10 @@ class PaymentFeatureExtractor:
             'has_system_code': float(len(clearing_sys) > 0 or len(clearing_cd) > 0)
         }
     
+    # Continue with all other extraction methods...
+    # (Copy from original script - too long to include all here)
+    
     def _extract_name_info(self, payment: Dict) -> Dict:
-        """Extract name-related features (18 features)"""
         bank_names = self._find_all_values(payment, 'nm')
         all_names = bank_names.copy()
         has_bank_name = len(bank_names) > 0
@@ -387,7 +393,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_address_info(self, payment: Dict) -> Dict:
-        """Extract address-related features (20 features)"""
         addresses = self._find_all_values(payment, 'adrline')
         postal_addr = self._find_all_values(payment, 'pstladr')
         has_address = len(addresses) > 0
@@ -418,7 +423,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_country_info(self, payment: Dict) -> Dict:
-        """Extract country-related features (15 features)"""
         countries = self._find_all_values(payment, 'ctryofres')
         countries.extend(self._find_all_values(payment, 'ctry'))
         has_country = len(countries) > 0
@@ -445,7 +449,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_account_info(self, payment: Dict) -> Dict:
-        """Extract account-related features (12 features)"""
         has_cdtr_acct = 'cdtracct' in payment
         has_dbtr_acct = 'dbtracct' in payment
         acct_ids = self._find_all_values(payment, 'id')
@@ -470,7 +473,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_entity_info(self, payment: Dict) -> Dict:
-        """Extract entity presence features (15 features)"""
         entities = {
             'cdtr': 'cdtr' in payment,
             'dbtr': 'dbtr' in payment,
@@ -509,7 +511,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_fininstn_info(self, payment: Dict) -> Dict:
-        """Extract financial institution ID features (10 features)"""
         fininstn_fields = self._find_all_values(payment, 'fininstnid')
         has_fininstn = len(fininstn_fields) > 0
         fininstn_entities = []
@@ -532,7 +533,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_remittance_info(self, payment: Dict) -> Dict:
-        """Extract remittance information features (12 features)"""
         rmt_fields = self._find_all_values(payment, 'ustrd')
         strd_fields = self._find_all_values(payment, 'strd')
         has_rmt = len(rmt_fields) > 0 or len(strd_fields) > 0
@@ -570,7 +570,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_flags_info(self, payment: Dict) -> Dict:
-        """Extract flags features (10 features)"""
         flags = payment.get('flags', {})
         flag_count = sum(1 for v in flags.values() if v) if flags else 0
         
@@ -588,7 +587,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_structural_info(self, payment: Dict) -> Dict:
-        """Extract structural features (15 features)"""
         total_fields = self._count_all_fields(payment)
         total_entities = sum(1 for k in payment.keys() if isinstance(payment.get(k), dict))
         total_leaf = self._count_leaf_values(payment)
@@ -742,11 +740,13 @@ class PaymentFeatureExtractor:
 # ============================================================================
 
 class EnhancedDeterministicRules:
+    
     """Enhanced rule-based system using discovered patterns"""
     
     def __init__(self, analysis: Optional[Dict] = None):
         self.rule_stats = Counter()
         self.discovered_rules = []
+        self.debug_mode = True  # Enable debug logging
         
         if analysis:
             self.discovered_rules = analysis.get('deterministic_rules', [])
@@ -755,26 +755,50 @@ class EnhancedDeterministicRules:
                 logger.info(f"  - {rule['repair_id']}: {rule['description']} (confidence: {rule['confidence']:.1%})")
     
     def predict_repairs(self, payment: Dict, features: np.ndarray) -> Tuple[List[str], List[float]]:
-        """Apply enhanced deterministic rules"""
+        """Apply enhanced deterministic rules with debug logging"""
         repairs = []
         confidences = []
         payment = self._normalize(payment)
         
-        # Base rules
+        if self.debug_mode:
+            logger.info("\n" + "="*60)
+            logger.info("RULE EVALUATION DEBUG")
+            logger.info("="*60)
+            logger.info(f"Feature[0] has_bic: {features[0]:.3f}")
+            logger.info(f"Feature[25] has_clearing: {features[25]:.3f}")
+            logger.info(f"Feature[37] has_name: {features[37]:.3f}")
+            logger.info(f"Feature[75] has_country: {features[75]:.3f}")
+            logger.info(f"Feature[15] has_iban: {features[15]:.3f}")
+        
+        # Rule 1: Country from BIC
         if self._needs_country_from_bic(payment, features):
             repairs.append('6021')
             confidences.append(1.0)
             self.rule_stats['6021_country_from_bic'] += 1
+            if self.debug_mode:
+                logger.info("✓ Rule fired: 6021 (Country from BIC)")
         
+        # Rule 2: BIC from clearing - ENHANCED
         if self._needs_bic_from_clearing(payment, features):
             repairs.append('6035')
             confidences.append(1.0)
             self.rule_stats['6035_bic_from_clearing'] += 1
+            if self.debug_mode:
+                logger.info("✓ Rule fired: 6035 (BIC from clearing)")
+                # Show which clearing ID was found
+                clearing_ids = self._find_all_values(payment, 'mmbid')
+                logger.info(f"  Clearing IDs found: {clearing_ids}")
+        elif self.debug_mode:
+            logger.info("✗ Rule 6035 not fired (BIC from clearing)")
+            logger.info(f"  has_clearing={features[25]:.3f}, has_bic={features[0]:.3f}")
         
+        # Rule 3: Bank name from BIC
         if self._needs_bank_name_from_bic(payment, features):
             repairs.append('6036')
             confidences.append(1.0)
             self.rule_stats['6036_name_from_bic'] += 1
+            if self.debug_mode:
+                logger.info("✓ Rule fired: 6036 (Name from BIC)")
         
         # Enhanced rules from analysis
         if self._needs_address_standardization(payment, features):
@@ -787,6 +811,8 @@ class EnhancedDeterministicRules:
                         confidences.append(rule['confidence'])
                         self.rule_stats[f"{rule['repair_id']}_address_std"] += 1
                         repair_added = True
+                        if self.debug_mode:
+                            logger.info(f"✓ Rule fired: {rule['repair_id']} (Address standardization)")
                         break
         
         if self._needs_remittance_split(payment, features):
@@ -797,6 +823,8 @@ class EnhancedDeterministicRules:
                         repairs.append(rule['repair_id'])
                         confidences.append(rule['confidence'])
                         self.rule_stats[f"{rule['repair_id']}_rmt_split"] += 1
+                        if self.debug_mode:
+                            logger.info(f"✓ Rule fired: {rule['repair_id']} (Remittance split)")
                         break
         
         if self._needs_country_from_iban(payment, features):
@@ -804,6 +832,8 @@ class EnhancedDeterministicRules:
                 repairs.append('6021')
                 confidences.append(0.95)
                 self.rule_stats['6021_country_from_iban'] += 1
+                if self.debug_mode:
+                    logger.info("✓ Rule fired: 6021 (Country from IBAN)")
         
         # Apply high-confidence discovered rules
         for rule in self.discovered_rules:
@@ -812,6 +842,12 @@ class EnhancedDeterministicRules:
                     repairs.append(rule['repair_id'])
                     confidences.append(rule['confidence'])
                     self.rule_stats[f"{rule['repair_id']}_discovered"] += 1
+                    if self.debug_mode:
+                        logger.info(f"✓ Rule fired: {rule['repair_id']} (Discovered rule)")
+        
+        if self.debug_mode:
+            logger.info(f"\nTotal rules fired: {len(repairs)}")
+            logger.info("="*60 + "\n")
         
         return repairs, confidences
     
@@ -1040,7 +1076,7 @@ def compute_class_weights(y_train: np.ndarray, max_weight: float = 10.0) -> torc
 
 
 # ============================================================================
-# ML MODELS
+# ML MODELS (Same as original)
 # ============================================================================
 
 class RepairPredictor(nn.Module):
@@ -1087,7 +1123,7 @@ class RepairDataset(Dataset):
 
 
 # ============================================================================
-# DATA PROCESSOR
+# DATA PROCESSOR (Same as original)
 # ============================================================================
 
 class DataProcessor:
@@ -1105,7 +1141,6 @@ class DataProcessor:
         with open(json_file, 'r') as f:
             raw_data = json.load(f)
         
-        # Parse input format - FIXED to merge all dicts
         if isinstance(raw_data, list):
             if len(raw_data) == 0:
                 raise ValueError(f"Empty array in {json_file}")
@@ -1124,9 +1159,7 @@ class DataProcessor:
                 else:
                     data = {f"txn_{i:06d}": txn for i, txn in enumerate(raw_data)}
                     logger.info(f"Detected format: Array of {len(data)} transaction objects")
-            else:
-                raise ValueError(f"Unexpected array format in {json_file}")
-                
+                    
         elif isinstance(raw_data, dict):
             data = raw_data
             logger.info(f"Detected format: Dict of {len(data)} transactions")
@@ -1171,10 +1204,6 @@ class DataProcessor:
                 all_payments.append(txn_data)
                 processed_count += 1
                 
-                # Progress logging for large datasets
-                if processed_count % 1000 == 0:
-                    logger.info(f"Progress: {processed_count}/{len(data)} transactions processed...")
-                
             except Exception as e:
                 logger.warning(f"Error processing transaction {txn_id}: {e}")
                 continue
@@ -1198,7 +1227,6 @@ class DataProcessor:
         return features_array, labels_array, all_payments
     
     def _has_after_state(self, txn_data: Dict) -> bool:
-        """Check if transaction has 'after' state in any entity"""
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1215,15 +1243,12 @@ class DataProcessor:
         return False
     
     def _extract_before_state(self, txn_data: Dict) -> Dict:
-        """Extract 'before' state from transaction for feature extraction"""
         payment = {}
         
-        # Copy metadata fields
         for key in ['source', 'clearing', 'flags', 'parties']:
             if key in txn_data:
                 payment[key] = txn_data[key]
         
-        # Extract 'before' state from entities
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1245,7 +1270,6 @@ class DataProcessor:
         return payment
     
     def _build_repair_vocabulary(self, data: Dict):
-        """Build vocabulary of all unique repair codes"""
         all_repairs = set()
         
         for txn_data in data.values():
@@ -1260,7 +1284,6 @@ class DataProcessor:
         logger.info(f"Built vocabulary with {len(self.repair_vocabulary)} repairs: {sorted_repairs}")
     
     def _repairs_to_labels(self, repairs: List[str]) -> np.ndarray:
-        """Convert repair IDs to binary label vector"""
         labels = np.zeros(len(self.repair_vocabulary))
         
         for repair_id in repairs:
@@ -1271,7 +1294,6 @@ class DataProcessor:
         return labels
     
     def labels_to_repairs(self, labels: np.ndarray, threshold: float = 0.5) -> List[str]:
-        """Convert binary label vector to repair IDs"""
         repairs = []
         
         for idx, prob in enumerate(labels):
@@ -1404,6 +1426,7 @@ class EnhancedHybridPredictor:
         
         # Use weighted loss if class weights available
         if self.class_weights is not None and self.config.use_class_weights:
+            # Expand weights to match batch size
             criterion = nn.BCELoss(reduction='none')
         else:
             criterion = nn.BCELoss()
@@ -1520,7 +1543,7 @@ class EnhancedHybridPredictor:
         return metrics
     
     def predict(self, payment: Dict, use_rules: bool = True, use_ml: bool = True) -> Dict:
-        """Predict repairs for a payment"""
+        """Predict repairs with dynamic thresholds for rare repairs"""
         features = self.feature_extractor.extract_features(payment)
         features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
         
@@ -1528,14 +1551,18 @@ class EnhancedHybridPredictor:
         confidences = []
         sources = []
         
-        # Apply rules
+        # Apply rules first (highest priority)
         if use_rules:
             rule_repairs, rule_confs = self.rules.predict_repairs(payment, features)
             repairs.extend(rule_repairs)
             confidences.extend(rule_confs)
             sources.extend(['rule'] * len(rule_repairs))
+            
+            logger.info(f"\nRule-based predictions: {len(rule_repairs)} repairs")
+            for r, c in zip(rule_repairs, rule_confs):
+                logger.info(f"  {r}: {c:.3f}")
         
-        # Apply ML
+        # Apply ML with dynamic thresholds
         if use_ml:
             self.ml_model.eval()
             with torch.no_grad():
@@ -1555,16 +1582,32 @@ class EnhancedHybridPredictor:
             # Ensemble
             ensemble_probs = (ml_probs + rf_probs) / 2
             
+            logger.info(f"\nML predictions (before threshold):")
+            
             for idx, prob in enumerate(ensemble_probs):
                 repair_id = self.processor.idx_to_repair[idx]
                 
+                # Skip if already predicted by rules
                 if repair_id in repairs:
                     continue
                 
-                if prob > self.config.ml_threshold:
+                # Dynamic threshold based on training support
+                # For rare repairs (support < 10), use lower threshold
+                support = self.class_weights[idx].item() if self.class_weights is not None else 1.0
+                
+                # Inverse relationship: high weight = low support = lower threshold
+                if support >= 5.0:  # Very rare (< 10 examples)
+                    threshold = 0.2
+                elif support >= 2.0:  # Rare (< 100 examples)
+                    threshold = 0.35
+                else:
+                    threshold = self.config.ml_threshold  # 0.5
+                
+                if prob > threshold:
                     repairs.append(repair_id)
                     confidences.append(float(prob))
                     sources.append('ml')
+                    logger.info(f"  {repair_id}: {prob:.3f} (threshold: {threshold:.2f}, support_weight: {support:.2f})")
         
         return {
             'repairs': repairs,
@@ -1576,12 +1619,13 @@ class EnhancedHybridPredictor:
         """Save all models and metadata"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
-        # Save model architecture info
+        # Save model architecture info - more robust detection
+        # Count BatchNorm layers to determine if it was used
         has_batchnorm = any(isinstance(layer, nn.BatchNorm1d) for layer in self.ml_model.network)
         
         model_info = {
             'num_features': self.ml_model.network[0].in_features,
-            'num_repairs': self.ml_model.network[-2].out_features,
+            'num_repairs': self.ml_model.network[-2].out_features,  # -2 because -1 is Sigmoid
             'hidden_dim': self.ml_model.network[0].out_features,
             'use_batchnorm': has_batchnorm
         }
@@ -1590,7 +1634,7 @@ class EnhancedHybridPredictor:
             json.dump(model_info, f, indent=2)
         
         torch.save(self.ml_model.state_dict(), 
-                  os.path.join(self.config.model_dir, 'neural_model.pt'))
+                os.path.join(self.config.model_dir, 'neural_model.pt'))
         
         with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
             pickle.dump(self.rf_model, f)
@@ -1612,6 +1656,7 @@ class EnhancedHybridPredictor:
         logger.info(f"Architecture: {model_info['num_features']} -> {model_info['hidden_dim']} -> "
                     f"{model_info['hidden_dim']//2} -> {model_info['num_repairs']}")
         logger.info(f"BatchNorm: {model_info['use_batchnorm']}")
+
 
     def load_models(self, model_dir: str):
         """Load saved models from disk"""
@@ -1664,7 +1709,7 @@ class EnhancedHybridPredictor:
         
         self.ml_model.load_state_dict(
             torch.load(os.path.join(model_dir, 'neural_model.pt'), 
-                      map_location=self.device)
+                    map_location=self.device)
         )
         self.ml_model.eval()
         
@@ -1675,6 +1720,37 @@ class EnhancedHybridPredictor:
 # CLI COMMANDS
 # ============================================================================
 
+def debug_features(self, payment: Dict) -> None:
+    """Debug helper to show extracted features"""
+    features = self.feature_extractor.extract_features(payment)
+    
+    logger.info("\n" + "="*60)
+    logger.info("FEATURE EXTRACTION DEBUG")
+    logger.info("="*60)
+    
+    important_features = {
+        0: 'has_bic',
+        15: 'has_iban',
+        25: 'has_clearing_id',
+        37: 'has_bank_name',
+        75: 'has_country_field'
+    }
+    
+    for idx, name in important_features.items():
+        logger.info(f"Feature[{idx:3d}] {name:20s}: {features[idx]:.3f}")
+    
+    # Show what was found in payment
+    payment_norm = self.feature_extractor._normalize_payment(payment)
+    bics = self.feature_extractor._find_all_values(payment_norm, 'bic')
+    clearings = self.feature_extractor._find_all_values(payment_norm, 'mmbid')
+    countries = self.feature_extractor._find_all_values(payment_norm, 'ctryofres')
+    
+    logger.info(f"\nValues found in payment:")
+    logger.info(f"  BICs: {bics}")
+    logger.info(f"  Clearing IDs: {clearings}")
+    logger.info(f"  Countries: {countries}")
+    logger.info("="*60 + "\n")
+    
 def train_command(args):
     """Train the enhanced model"""
     config = Config()
@@ -1726,6 +1802,10 @@ def predict_command(args):
     else:
         payment = data
     
+    # Debug features
+    predictor.debug_features(payment)
+    
+    # Predict
     result = predictor.predict(payment)
     
     logger.info("\n" + "="*70)
@@ -1753,7 +1833,7 @@ def evaluate_command(args):
         metrics = predictor.evaluate_detailed(features, labels)
     else:
         # Quick evaluation
-        predictor.ml_model.eval()
+        self.ml_model.eval()
         dataset = RepairDataset(features, labels)
         loader = DataLoader(dataset, batch_size=predictor.config.batch_size)
         
@@ -1816,7 +1896,7 @@ def main():
     elif args.command == 'predict':
         predict_command(args)
     elif args.command == 'evaluate':
-        evaluate_command(args)
+        eval_parser(args)
     else:
         parser.print_help()
 
