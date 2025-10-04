@@ -8,19 +8,20 @@ Enhanced ACE Payment Repair Predictor with:
 - Class-weighted loss for imbalanced repairs
 - Per-repair detailed metrics
 - Support for analysis integration
+- Directory-based data loading from multiple JSON files
 
 Usage:
-    # Train with enhancements
-    python ace_repair_predictor.py train --input repairs_10k.json --analysis analysis_report.json --epochs 50
+    # Train with enhancements from directory of JSON files
+    python ace_repair_predictor.py train --input ./data_directory --analysis analysis_report.json --epochs 50
     
     # Train without analysis (uses baseline rules only)
-    python ace_repair_predictor.py train --input repairs_10k.json --epochs 50
+    python ace_repair_predictor.py train --input ./data_directory --epochs 50
     
-    # Predict repairs
+    # Predict repairs for a single file
     python ace_repair_predictor.py predict --input payment.json --output result.json
     
     # Evaluate with detailed per-repair metrics
-    python ace_repair_predictor.py evaluate --input test_data.json --detailed
+    python ace_repair_predictor.py evaluate --input ./test_data_directory --detailed
 """
 
 import json
@@ -33,6 +34,7 @@ from typing import Dict, List, Set, Tuple, Optional
 from dataclasses import dataclass, asdict
 from collections import defaultdict, Counter
 from pathlib import Path
+import glob
 
 import numpy as np
 import torch
@@ -42,6 +44,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -75,17 +78,19 @@ class Config:
     ml_threshold: float = 0.5
     rule_confidence: float = 1.0
     
-    # Class weighting
+    # Class weighting for imbalanced repairs
     use_class_weights: bool = True
     max_class_weight: float = 10.0
     
     def save(self, path: str):
+        """Save configuration to JSON file"""
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f:
             json.dump(asdict(self), f, indent=2)
     
     @classmethod
     def load(cls, path: str):
+        """Load configuration from JSON file"""
         with open(path, 'r') as f:
             return cls(**json.load(f))
 
@@ -95,14 +100,31 @@ class Config:
 # ============================================================================
 
 class PaymentFeatureExtractor:
-    """Extracts 172 domain-specific features from payment structure"""
+    """
+    Extracts 172 domain-specific features from payment structure.
+    
+    Features cover:
+    - BIC (Bank Identifier Code) information
+    - IBAN (International Bank Account Number) details
+    - Clearing system identifiers
+    - Entity names and addresses
+    - Country codes
+    - Account information
+    - Entity presence
+    - Financial institution IDs
+    - Remittance information
+    - Source/clearing metadata
+    - Flags
+    - Structural complexity
+    """
     
     def __init__(self):
         self.feature_names = []
         self._build_feature_names()
     
     def _build_feature_names(self):
-        """Define all 172 feature names"""
+        """Define all 172 feature names in order"""
+        
         # BIC features (15)
         self.feature_names.extend([
             'has_bic', 'bic_length_8', 'bic_length_11', 'bic_valid_format',
@@ -213,59 +235,82 @@ class PaymentFeatureExtractor:
         logger.info(f"Initialized {len(self.feature_names)} features")
     
     def extract_features(self, payment: Dict) -> np.ndarray:
-        """Extract all 172 features from a payment"""
+        """
+        Extract all 172 features from a payment transaction.
+        
+        Args:
+            payment: Payment transaction dictionary
+            
+        Returns:
+            Numpy array of 172 feature values (all normalized to 0-1 range)
+        """
         features = np.zeros(len(self.feature_names))
         payment = self._normalize_payment(payment)
         
+        # Extract features in the same order as feature_names
         idx = 0
+        
+        # BIC features
         bic_info = self._extract_bic_info(payment)
         features[idx:idx+15] = list(bic_info.values())
         idx += 15
         
+        # IBAN features
         iban_info = self._extract_iban_info(payment)
         features[idx:idx+10] = list(iban_info.values())
         idx += 10
         
+        # Clearing features
         clearing_info = self._extract_clearing_info(payment)
         features[idx:idx+12] = list(clearing_info.values())
         idx += 12
         
+        # Name features
         name_info = self._extract_name_info(payment)
         features[idx:idx+18] = list(name_info.values())
         idx += 18
         
+        # Address features
         address_info = self._extract_address_info(payment)
         features[idx:idx+20] = list(address_info.values())
         idx += 20
         
+        # Country features
         country_info = self._extract_country_info(payment)
         features[idx:idx+15] = list(country_info.values())
         idx += 15
         
+        # Account features
         account_info = self._extract_account_info(payment)
         features[idx:idx+12] = list(account_info.values())
         idx += 12
         
+        # Entity features
         entity_info = self._extract_entity_info(payment)
         features[idx:idx+15] = list(entity_info.values())
         idx += 15
         
+        # Financial institution features
         fininstn_info = self._extract_fininstn_info(payment)
         features[idx:idx+10] = list(fininstn_info.values())
         idx += 10
         
+        # Remittance features
         rmt_info = self._extract_remittance_info(payment)
         features[idx:idx+12] = list(rmt_info.values())
         idx += 12
         
+        # Metadata features
         metadata_info = self._extract_metadata_info(payment)
         features[idx:idx+8] = list(metadata_info.values())
         idx += 8
         
+        # Flags features
         flags_info = self._extract_flags_info(payment)
         features[idx:idx+10] = list(flags_info.values())
         idx += 10
         
+        # Structural features
         struct_info = self._extract_structural_info(payment)
         features[idx:idx+15] = list(struct_info.values())
         idx += 15
@@ -273,6 +318,7 @@ class PaymentFeatureExtractor:
         return features
     
     def _normalize_payment(self, payment: Dict) -> Dict:
+        """Recursively lowercase all string keys for consistent field access"""
         if isinstance(payment, dict):
             return {k.lower() if isinstance(k, str) else k: self._normalize_payment(v) 
                    for k, v in payment.items()}
@@ -281,6 +327,7 @@ class PaymentFeatureExtractor:
         return payment
     
     def _extract_bic_info(self, payment: Dict) -> Dict:
+        """Extract 15 BIC-related features"""
         bic_fields = self._find_all_values(payment, 'bic')
         has_bic = len(bic_fields) > 0
         bic_value = bic_fields[0] if bic_fields else None
@@ -304,6 +351,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_iban_info(self, payment: Dict) -> Dict:
+        """Extract 10 IBAN-related features"""
         iban_fields = self._find_all_values(payment, 'iban')
         has_iban = len(iban_fields) > 0
         iban_value = str(iban_fields[0]) if iban_fields else None
@@ -322,6 +370,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_clearing_info(self, payment: Dict) -> Dict:
+        """Extract 12 clearing system features"""
         clearing_fields = self._find_all_values(payment, 'mmbid')
         clearing_sys = self._find_all_values(payment, 'clrsysid')
         clearing_cd = self._find_all_values(payment, 'cd')
@@ -353,6 +402,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_name_info(self, payment: Dict) -> Dict:
+        """Extract 18 name-related features"""
         bank_names = self._find_all_values(payment, 'nm')
         all_names = bank_names.copy()
         has_bank_name = len(bank_names) > 0
@@ -383,6 +433,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_address_info(self, payment: Dict) -> Dict:
+        """Extract 20 address-related features"""
         addresses = self._find_all_values(payment, 'adrline')
         postal_addr = self._find_all_values(payment, 'pstladr')
         has_address = len(addresses) > 0
@@ -413,6 +464,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_country_info(self, payment: Dict) -> Dict:
+        """Extract 15 country-related features"""
         countries = self._find_all_values(payment, 'ctryofres')
         countries.extend(self._find_all_values(payment, 'ctry'))
         has_country = len(countries) > 0
@@ -439,6 +491,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_account_info(self, payment: Dict) -> Dict:
+        """Extract 12 account-related features"""
         has_cdtr_acct = 'cdtracct' in payment
         has_dbtr_acct = 'dbtracct' in payment
         acct_ids = self._find_all_values(payment, 'id')
@@ -463,6 +516,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_entity_info(self, payment: Dict) -> Dict:
+        """Extract 15 entity presence features"""
         entities = {
             'cdtr': 'cdtr' in payment,
             'dbtr': 'dbtr' in payment,
@@ -501,6 +555,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_fininstn_info(self, payment: Dict) -> Dict:
+        """Extract 10 financial institution ID features"""
         fininstn_fields = self._find_all_values(payment, 'fininstnid')
         has_fininstn = len(fininstn_fields) > 0
         fininstn_entities = []
@@ -523,6 +578,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_remittance_info(self, payment: Dict) -> Dict:
+        """Extract 12 remittance information features"""
         rmt_fields = self._find_all_values(payment, 'ustrd')
         strd_fields = self._find_all_values(payment, 'strd')
         has_rmt = len(rmt_fields) > 0 or len(strd_fields) > 0
@@ -544,6 +600,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_metadata_info(self, payment: Dict) -> Dict:
+        """Extract 8 source/clearing metadata features"""
         source = str(payment.get('source', '')).lower()
         clearing = str(payment.get('clearing', '')).lower()
         
@@ -559,6 +616,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_flags_info(self, payment: Dict) -> Dict:
+        """Extract 10 flag-related features"""
         flags = payment.get('flags', {})
         flag_count = sum(1 for v in flags.values() if v) if flags else 0
         
@@ -576,6 +634,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_structural_info(self, payment: Dict) -> Dict:
+        """Extract 15 structural complexity features"""
         total_fields = self._count_all_fields(payment)
         total_entities = sum(1 for k in payment.keys() if isinstance(payment.get(k), dict))
         total_leaf = self._count_leaf_values(payment)
@@ -605,19 +664,25 @@ class PaymentFeatureExtractor:
             'data_completeness': 1.0 - (empty_fields / max(total_fields, 1))
         }
     
-    # Helper methods
+    # ========================================================================
+    # HELPER METHODS
+    # ========================================================================
+    
     def _is_valid_bic(self, bic: str) -> bool:
+        """Check if BIC has valid format"""
         if not bic or not isinstance(bic, str):
             return False
         return len(bic) in [8, 11] and bic[:6].isalpha() and bic[6:8].isalnum()
     
     def _is_valid_iban(self, iban: str) -> bool:
+        """Check if IBAN has valid format"""
         if not iban or not isinstance(iban, str):
             return False
         iban = iban.replace(' ', '')
         return len(iban) >= 15 and iban[:2].isalpha() and iban[2:4].isdigit()
     
     def _bic_country_matches_field(self, payment: Dict, bic: str) -> bool:
+        """Check if BIC country code matches country field"""
         if not bic or len(bic) < 6:
             return False
         bic_country = bic[4:6].upper()
@@ -626,6 +691,7 @@ class PaymentFeatureExtractor:
         return any(bic_country == str(c).upper() for c in country_fields)
     
     def _iban_country_matches_field(self, payment: Dict, iban: str) -> bool:
+        """Check if IBAN country code matches country field"""
         if not iban or len(iban) < 2:
             return False
         iban_country = iban[:2].upper()
@@ -634,6 +700,7 @@ class PaymentFeatureExtractor:
         return any(iban_country == str(c).upper() for c in country_fields)
     
     def _count_leaf_values(self, obj) -> int:
+        """Count total leaf (non-container) values in nested structure"""
         count = 0
         if isinstance(obj, dict):
             for v in obj.values():
@@ -646,6 +713,7 @@ class PaymentFeatureExtractor:
         return count
     
     def _get_max_depth(self, obj, current_depth=0) -> int:
+        """Get maximum nesting depth of object"""
         if isinstance(obj, dict):
             if not obj:
                 return current_depth
@@ -657,6 +725,7 @@ class PaymentFeatureExtractor:
         return current_depth
     
     def _count_arrays(self, obj) -> int:
+        """Count total arrays in nested structure"""
         count = 0
         if isinstance(obj, dict):
             for v in obj.values():
@@ -669,6 +738,7 @@ class PaymentFeatureExtractor:
         return count
     
     def _count_empty_fields(self, obj) -> int:
+        """Count empty/null fields in nested structure"""
         count = 0
         if isinstance(obj, dict):
             for v in obj.values():
@@ -682,6 +752,7 @@ class PaymentFeatureExtractor:
         return count
     
     def _find_all_values(self, obj, key: str) -> List:
+        """Recursively find all values for a given key"""
         results = []
         key = key.lower()
         
@@ -703,6 +774,7 @@ class PaymentFeatureExtractor:
         return results
     
     def _field_in_entity(self, payment: Dict, field: str, entity: str) -> bool:
+        """Check if a field exists within a specific entity"""
         entity = entity.lower()
         if entity not in payment:
             return False
@@ -711,6 +783,7 @@ class PaymentFeatureExtractor:
         return len(values) > 0
     
     def _count_all_fields(self, obj) -> int:
+        """Count total fields in nested structure"""
         count = 0
         if isinstance(obj, dict):
             for v in obj.values():
@@ -729,13 +802,23 @@ class PaymentFeatureExtractor:
 # ============================================================================
 
 class EnhancedDeterministicRules:
-    """Enhanced rule-based system using discovered patterns"""
+    """
+    Enhanced rule-based system using discovered patterns.
+    
+    Implements high-confidence deterministic rules for common repair scenarios:
+    - Country derivation from BIC
+    - BIC lookup from clearing ID
+    - Bank name lookup from BIC
+    - Address standardization
+    - Remittance info splitting
+    """
     
     def __init__(self, analysis: Optional[Dict] = None):
         self.rule_stats = Counter()
         self.discovered_rules = []
         self.debug_mode = True
         
+        # Load discovered rules from analysis if available
         if analysis:
             self.discovered_rules = analysis.get('deterministic_rules', [])
             logger.info(f"Loaded {len(self.discovered_rules)} discovered rules from analysis")
@@ -743,7 +826,16 @@ class EnhancedDeterministicRules:
                 logger.info(f"  - {rule['repair_id']}: {rule['description']} (confidence: {rule['confidence']:.1%})")
     
     def predict_repairs(self, payment: Dict, features: np.ndarray) -> Tuple[List[str], List[float]]:
-        """Apply enhanced deterministic rules with debug logging"""
+        """
+        Apply deterministic rules and return predicted repairs with confidences.
+        
+        Args:
+            payment: Normalized payment dictionary
+            features: Extracted feature array
+            
+        Returns:
+            Tuple of (repair_ids, confidences)
+        """
         repairs = []
         confidences = []
         payment = self._normalize(payment)
@@ -758,7 +850,7 @@ class EnhancedDeterministicRules:
             logger.info(f"Feature[75] has_country: {features[75]:.3f}")
             logger.info(f"Feature[15] has_iban: {features[15]:.3f}")
         
-        # Rule 1: Country from BIC
+        # Rule 1: Country from BIC (Repair 6021)
         if self._needs_country_from_bic(payment, features):
             repairs.append('6021')
             confidences.append(1.0)
@@ -766,7 +858,7 @@ class EnhancedDeterministicRules:
             if self.debug_mode:
                 logger.info("✓ Rule fired: 6021 (Country from BIC)")
         
-        # Rule 2: BIC from clearing - ENHANCED
+        # Rule 2: BIC from clearing ID (Repair 6035)
         if self._needs_bic_from_clearing(payment, features):
             repairs.append('6035')
             confidences.append(1.0)
@@ -779,7 +871,7 @@ class EnhancedDeterministicRules:
             logger.info("✗ Rule 6035 not fired (BIC from clearing)")
             logger.info(f"  has_clearing={features[25]:.3f}, has_bic={features[0]:.3f}")
         
-        # Rule 3: Bank name from BIC
+        # Rule 3: Bank name from BIC (Repair 6036)
         if self._needs_bank_name_from_bic(payment, features):
             repairs.append('6036')
             confidences.append(1.0)
@@ -787,7 +879,7 @@ class EnhancedDeterministicRules:
             if self.debug_mode:
                 logger.info("✓ Rule fired: 6036 (Name from BIC)")
         
-        # Enhanced rules from analysis
+        # Enhanced rules from analysis - Address standardization
         if self._needs_address_standardization(payment, features):
             for rule in self.discovered_rules:
                 desc = rule.get('description', '').lower()
@@ -800,6 +892,7 @@ class EnhancedDeterministicRules:
                             logger.info(f"✓ Rule fired: {rule['repair_id']} (Address standardization)")
                         break
         
+        # Enhanced rules from analysis - Remittance split
         if self._needs_remittance_split(payment, features):
             for rule in self.discovered_rules:
                 desc = rule.get('description', '').lower()
@@ -812,6 +905,7 @@ class EnhancedDeterministicRules:
                             logger.info(f"✓ Rule fired: {rule['repair_id']} (Remittance split)")
                         break
         
+        # Country from IBAN
         if self._needs_country_from_iban(payment, features):
             if '6021' not in repairs:
                 repairs.append('6021')
@@ -820,7 +914,7 @@ class EnhancedDeterministicRules:
                 if self.debug_mode:
                     logger.info("✓ Rule fired: 6021 (Country from IBAN)")
         
-        # Apply high-confidence discovered rules
+        # Apply high-confidence discovered rules (confidence >= 95%)
         for rule in self.discovered_rules:
             if rule['confidence'] >= 0.95 and rule['repair_id'] not in repairs:
                 if self._check_rule_condition(payment, features, rule):
@@ -837,6 +931,7 @@ class EnhancedDeterministicRules:
         return repairs, confidences
     
     def _needs_address_standardization(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if address needs standardization (too long or too many lines)"""
         addresses = self._find_all_values(payment, 'adrline')
         if not addresses:
             return False
@@ -844,6 +939,7 @@ class EnhancedDeterministicRules:
         return total_len > 140 or len(addresses) > 3
     
     def _needs_remittance_split(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if remittance info needs to be split (> 140 chars)"""
         rmt_fields = self._find_all_values(payment, 'ustrd')
         if not rmt_fields:
             return False
@@ -853,12 +949,14 @@ class EnhancedDeterministicRules:
         return False
     
     def _needs_country_from_iban(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if country should be derived from IBAN"""
         has_iban = features[15] > 0.5
         has_country = features[75] > 0.5
         has_bic = features[0] > 0.5
         return has_iban and not has_bic and not has_country
     
     def _check_rule_condition(self, payment: Dict, features: np.ndarray, rule: Dict) -> bool:
+        """Evaluate rule condition from discovered rules"""
         condition = rule.get('condition', '')
         
         if 'AND' in condition:
@@ -868,14 +966,17 @@ class EnhancedDeterministicRules:
             return self._eval_condition_part(payment, features, condition)
     
     def _eval_condition_part(self, payment: Dict, features: np.ndarray, condition: str) -> bool:
+        """Evaluate a single condition part"""
         condition = condition.lower()
         
+        # Handle negations
         if 'not has_bic' in condition or 'not has_country' in condition:
             if 'bic' in condition:
                 return features[0] < 0.5
             if 'country' in condition:
                 return features[75] < 0.5
         
+        # Handle positive conditions
         if 'has_bic' in condition:
             return features[0] > 0.5
         if 'has_clearing' in condition:
@@ -889,6 +990,7 @@ class EnhancedDeterministicRules:
         return False
     
     def _normalize(self, payment: Dict) -> Dict:
+        """Recursively normalize payment keys to lowercase"""
         if isinstance(payment, dict):
             return {k.lower() if isinstance(k, str) else k: self._normalize(v) 
                    for k, v in payment.items()}
@@ -897,21 +999,25 @@ class EnhancedDeterministicRules:
         return payment
     
     def _needs_country_from_bic(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if country should be derived from BIC"""
         has_bic = features[0] > 0.5
         has_country = features[75] > 0.5
         return has_bic and not has_country
     
     def _needs_bic_from_clearing(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if BIC should be looked up from clearing ID"""
         has_clearing = features[25] > 0.5
         has_bic = features[0] > 0.5
         return has_clearing and not has_bic
     
     def _needs_bank_name_from_bic(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if bank name should be looked up from BIC"""
         has_bic = features[0] > 0.5
         has_name = features[37] > 0.5
         return has_bic and not has_name
     
     def _find_all_values(self, obj, key: str) -> List:
+        """Recursively find all values for a given key"""
         results = []
         key = key.lower()
         
@@ -933,6 +1039,7 @@ class EnhancedDeterministicRules:
         return results
     
     def print_stats(self):
+        """Print statistics on which rules were fired"""
         logger.info("\nEnhanced Rule Statistics:")
         for rule, count in self.rule_stats.most_common():
             logger.info(f"  {rule}: {count}")
@@ -943,12 +1050,29 @@ class EnhancedDeterministicRules:
 # ============================================================================
 
 class PerRepairMetrics:
-    """Compute and report per-repair-code metrics"""
+    """
+    Compute and report per-repair-code metrics.
+    
+    Provides detailed performance analysis for each repair type including:
+    - Precision, Recall, F1-score
+    - True/False Positives/Negatives
+    - Support (number of occurrences)
+    """
     
     @staticmethod
     def compute_detailed_metrics(y_true: np.ndarray, y_pred: np.ndarray, 
                                  repair_vocabulary: Dict) -> Dict:
-        """Compute metrics for each repair code"""
+        """
+        Compute detailed metrics for each repair code.
+        
+        Args:
+            y_true: Ground truth labels (samples x repairs)
+            y_pred: Predicted labels (samples x repairs)
+            repair_vocabulary: Mapping of repair_id to index
+            
+        Returns:
+            Dictionary with overall and per-repair metrics
+        """
         metrics = {'per_repair': {}, 'overall': {}}
         
         idx_to_repair = {v: k for k, v in repair_vocabulary.items()}
@@ -996,7 +1120,7 @@ class PerRepairMetrics:
     
     @staticmethod
     def print_detailed_report(metrics: Dict):
-        """Print detailed per-repair report"""
+        """Print formatted detailed per-repair report"""
         logger.info("\n" + "="*70)
         logger.info("DETAILED PER-REPAIR METRICS")
         logger.info("="*70)
@@ -1011,6 +1135,7 @@ class PerRepairMetrics:
         logger.info(f"{'Repair':<10} {'Precision':<12} {'Recall':<12} {'F1':<12} {'Accuracy':<12} {'Support':<10}")
         logger.info("-" * 70)
         
+        # Sort by support (most common repairs first)
         sorted_repairs = sorted(metrics['per_repair'].items(), 
                                key=lambda x: x[1]['support'], reverse=True)
         
@@ -1024,6 +1149,7 @@ class PerRepairMetrics:
                 f"{m['support']:>8d}"
             )
         
+        # Highlight problem repairs
         logger.info(f"\nRepairs Needing Attention (F1 < 0.7 and Support > 10):")
         problem_repairs = [
             (rid, m) for rid, m in metrics['per_repair'].items()
@@ -1043,18 +1169,29 @@ class PerRepairMetrics:
 # ============================================================================
 
 def compute_class_weights(y_train: np.ndarray, max_weight: float = 10.0) -> torch.Tensor:
-    """Compute class weights for imbalanced repairs"""
-    pos_counts = y_train.sum(axis=0)
-    neg_counts = len(y_train) - pos_counts
+    """
+    Compute class weights for imbalanced repair labels.
+    
+    Applies inverse frequency weighting to help model learn rare repairs.
+    
+    Args:
+        y_train: Training labels (samples x repairs)
+        max_weight: Maximum allowed weight (cap to prevent extreme values)
+        
+    Returns:
+        Tensor of weights for each repair class
+    """
+    pos_counts = y_train.sum(axis=0)  # Count of positive examples per repair
+    neg_counts = len(y_train) - pos_counts  # Count of negative examples
     
     # Avoid division by zero
     pos_counts = np.maximum(pos_counts, 1)
     neg_counts = np.maximum(neg_counts, 1)
     
-    # Weight = neg_count / pos_count
+    # Weight = neg_count / pos_count (inverse frequency)
     weights = neg_counts / pos_counts
     
-    # Cap weights
+    # Cap weights to prevent extreme values
     weights = np.minimum(weights, max_weight)
     
     return torch.FloatTensor(weights)
@@ -1065,27 +1202,39 @@ def compute_class_weights(y_train: np.ndarray, max_weight: float = 10.0) -> torc
 # ============================================================================
 
 class RepairPredictor(nn.Module):
-    """Neural network for repair prediction"""
+    """
+    Neural network for multi-label repair prediction.
+    
+    Architecture:
+        Input (172 features) -> 
+        Hidden Layer (256 neurons) -> ReLU -> BatchNorm -> Dropout ->
+        Hidden Layer (128 neurons) -> ReLU -> BatchNorm -> Dropout ->
+        Output (N repairs) -> Sigmoid
+    """
     
     def __init__(self, num_features: int, num_repairs: int, hidden_dim: int = 256, 
                  dropout: float = 0.3, use_batchnorm: bool = True):
         super().__init__()
         
         layers = []
+        
+        # First hidden layer
         layers.append(nn.Linear(num_features, hidden_dim))
         layers.append(nn.ReLU())
         if use_batchnorm:
             layers.append(nn.BatchNorm1d(hidden_dim))
         layers.append(nn.Dropout(dropout))
         
+        # Second hidden layer
         layers.append(nn.Linear(hidden_dim, hidden_dim // 2))
         layers.append(nn.ReLU())
         if use_batchnorm:
             layers.append(nn.BatchNorm1d(hidden_dim // 2))
         layers.append(nn.Dropout(dropout))
         
+        # Output layer
         layers.append(nn.Linear(hidden_dim // 2, num_repairs))
-        layers.append(nn.Sigmoid())
+        layers.append(nn.Sigmoid())  # Multi-label classification
         
         self.network = nn.Sequential(*layers)
     
@@ -1108,51 +1257,77 @@ class RepairDataset(Dataset):
 
 
 # ============================================================================
-# DATA PROCESSOR
+# DATA PROCESSOR - WITH DIRECTORY SUPPORT
 # ============================================================================
 
 class DataProcessor:
-    """Process training data and prepare for modeling"""
+    """
+    Process training data from files or directories.
+    
+    Supports:
+    - Single JSON file: {"txn_id": {...}, ...}
+    - Directory of JSON files: each file contains {"txn_id": {...}, ...}
+    - Automatic transaction merging from multiple files
+    """
     
     def __init__(self):
         self.feature_extractor = PaymentFeatureExtractor()
         self.repair_vocabulary = {}
         self.idx_to_repair = {}
     
-    def load_and_process(self, json_file: str) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
-        """Load training data and extract features + labels"""
-        logger.info(f"Loading data from {json_file}")
+    def load_and_process(self, path: str) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
+        """
+        Load training data from file or directory and extract features + labels.
         
-        with open(json_file, 'r') as f:
-            raw_data = json.load(f)
-        
-        if isinstance(raw_data, list):
-            if len(raw_data) == 0:
-                raise ValueError(f"Empty array in {json_file}")
+        Args:
+            path: Path to JSON file or directory containing JSON files
             
-            if isinstance(raw_data[0], dict):
-                first_item = raw_data[0]
-                
-                if all(isinstance(v, dict) for v in first_item.values()):
-                    data = {}
-                    for item in raw_data:
-                        if isinstance(item, dict):
-                            data.update(item)
-                    logger.info(f"Detected format: Array of {len(raw_data)} dicts merged into {len(data)} transactions")
-                else:
-                    data = {f"txn_{i:06d}": txn for i, txn in enumerate(raw_data)}
-                    logger.info(f"Detected format: Array of {len(data)} transaction objects")
-            else:
-                raise ValueError(f"Unexpected array format in {json_file}")
-                    
-        elif isinstance(raw_data, dict):
-            data = raw_data
-            logger.info(f"Detected format: Dict of {len(data)} transactions")
+        Returns:
+            Tuple of (features, labels, payments)
+            - features: numpy array (N x 172)
+            - labels: numpy array (N x num_repairs)
+            - payments: list of transaction dictionaries
+        """
+        logger.info(f"Loading data from {path}")
+        
+        # Determine if path is file or directory
+        if os.path.isfile(path):
+            json_files = [path]
+            logger.info(f"Single file mode: {path}")
+        elif os.path.isdir(path):
+            json_files = glob.glob(os.path.join(path, '*.json'))
+            logger.info(f"Directory mode: Found {len(json_files)} JSON files in {path}")
         else:
-            raise ValueError(f"Unexpected data format in {json_file}: {type(raw_data)}")
+            raise ValueError(f"Path does not exist: {path}")
         
-        self._build_repair_vocabulary(data)
+        if len(json_files) == 0:
+            raise ValueError(f"No JSON files found at {path}")
         
+        # Load all transactions from all files
+        all_transactions = {}
+        for json_file in json_files:
+            logger.info(f"  Loading {os.path.basename(json_file)}...")
+            try:
+                with open(json_file, 'r') as f:
+                    file_data = json.load(f)
+                
+                # Each file should contain transactions in format: {"txn_id": {...}, ...}
+                if isinstance(file_data, dict):
+                    # Merge transactions from this file
+                    all_transactions.update(file_data)
+                    logger.info(f"    Added {len(file_data)} transactions")
+                else:
+                    logger.warning(f"    Skipping {json_file}: unexpected format (expected dict)")
+            except Exception as e:
+                logger.warning(f"    Error loading {json_file}: {e}")
+                continue
+        
+        logger.info(f"Loaded {len(all_transactions)} total transactions from {len(json_files)} files")
+        
+        # Build repair vocabulary across all transactions
+        self._build_repair_vocabulary(all_transactions)
+        
+        # Process transactions
         entity_stats = Counter()
         skipped_count = 0
         processed_count = 0
@@ -1161,8 +1336,9 @@ class DataProcessor:
         all_labels = []
         all_payments = []
         
-        for txn_idx, (txn_id, txn_data) in enumerate(data.items()):
+        for txn_idx, (txn_id, txn_data) in enumerate(all_transactions.items()):
             try:
+                # Check if transaction has 'after' state (needed for training)
                 has_after = self._has_after_state(txn_data)
                 
                 if not has_after:
@@ -1171,16 +1347,22 @@ class DataProcessor:
                         logger.info(f"Skipping {txn_id}: No 'after' state")
                     continue
                 
+                # Extract repairs (labels)
                 repairs = [r['id'] for r in txn_data.get('ace', [])]
+                
+                # Extract 'before' state for features
                 payment_for_features = self._extract_before_state(txn_data)
                 
+                # Track entity statistics
                 present_entities = [k for k in payment_for_features.keys() 
                                    if k not in ['source', 'clearing', 'flags', 'parties']]
                 entity_stats.update(present_entities)
                 
+                # Log first few transactions
                 if processed_count < 3:
                     logger.info(f"Training on {txn_id}: Entities: {present_entities}, Repairs: {repairs}")
                 
+                # Extract features and create labels
                 features = self.feature_extractor.extract_features(payment_for_features)
                 labels = self._repairs_to_labels(repairs)
                 
@@ -1189,33 +1371,40 @@ class DataProcessor:
                 all_payments.append(txn_data)
                 processed_count += 1
                 
-                # Progress logging
+                # Progress logging for large datasets
                 if processed_count % 1000 == 0:
-                    logger.info(f"Progress: {processed_count}/{len(data)} transactions processed...")
+                    logger.info(f"Progress: {processed_count}/{len(all_transactions)} transactions processed...")
                 
             except Exception as e:
                 logger.warning(f"Error processing transaction {txn_id}: {e}")
                 continue
         
         if len(all_features) == 0:
-            raise ValueError(f"No trainable transactions found in {json_file}")
+            raise ValueError(f"No trainable transactions found in {path}")
         
         features_array = np.array(all_features)
         labels_array = np.array(all_labels)
         
+        # Print summary
         logger.info(f"\n{'='*70}")
         logger.info(f"DATA PROCESSING SUMMARY")
         logger.info(f"{'='*70}")
-        logger.info(f"Total transactions: {len(data)}")
+        logger.info(f"Total files processed: {len(json_files)}")
+        logger.info(f"Total transactions: {len(all_transactions)}")
         logger.info(f"Trainable: {processed_count}")
-        logger.info(f"Skipped: {skipped_count}")
+        logger.info(f"Skipped (no 'after' state): {skipped_count}")
         logger.info(f"Feature shape: {features_array.shape}")
         logger.info(f"Label shape: {labels_array.shape}")
         logger.info(f"Unique repairs: {len(self.repair_vocabulary)}")
+        logger.info(f"{'='*70}\n")
         
         return features_array, labels_array, all_payments
     
     def _has_after_state(self, txn_data: Dict) -> bool:
+        """
+        Check if transaction has 'after' state for any entity.
+        Required for training as we need to know what repairs were applied.
+        """
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1232,12 +1421,29 @@ class DataProcessor:
         return False
     
     def _extract_before_state(self, txn_data: Dict) -> Dict:
+        """
+        Extract 'before' state from transaction for feature extraction.
+        
+        Transaction format:
+        {
+            "source": "...",
+            "clearing": "...",
+            "flags": {...},
+            "cdtrAgt": {
+                "before": {...},
+                "after": {...}
+            },
+            ...
+        }
+        """
         payment = {}
         
+        # Copy metadata fields
         for key in ['source', 'clearing', 'flags', 'parties']:
             if key in txn_data:
                 payment[key] = txn_data[key]
         
+        # Extract 'before' state from entities
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1250,8 +1456,10 @@ class DataProcessor:
                     entity_data = txn_data[key]
                     
                     if isinstance(entity_data, dict) and 'before' in entity_data:
+                        # Has before/after structure - use 'before'
                         payment[entity] = entity_data['before']
                     elif isinstance(entity_data, dict):
+                        # No before/after structure - use as is
                         payment[entity] = entity_data
                     
                     break
@@ -1259,6 +1467,10 @@ class DataProcessor:
         return payment
     
     def _build_repair_vocabulary(self, data: Dict):
+        """
+        Build mapping of repair IDs to indices.
+        Scans all transactions to find unique repair codes.
+        """
         all_repairs = set()
         
         for txn_data in data.values():
@@ -1273,6 +1485,7 @@ class DataProcessor:
         logger.info(f"Built vocabulary with {len(self.repair_vocabulary)} repairs: {sorted_repairs}")
     
     def _repairs_to_labels(self, repairs: List[str]) -> np.ndarray:
+        """Convert repair IDs to multi-hot encoded labels"""
         labels = np.zeros(len(self.repair_vocabulary))
         
         for repair_id in repairs:
@@ -1283,6 +1496,7 @@ class DataProcessor:
         return labels
     
     def labels_to_repairs(self, labels: np.ndarray, threshold: float = 0.5) -> List[str]:
+        """Convert multi-hot labels back to repair IDs"""
         repairs = []
         
         for idx, prob in enumerate(labels):
@@ -1297,7 +1511,14 @@ class DataProcessor:
 # ============================================================================
 
 class EnhancedHybridPredictor:
-    """Enhanced hybrid predictor with class weights and detailed metrics"""
+    """
+    Enhanced hybrid predictor combining:
+    - Rule-based system (deterministic rules)
+    - Random Forest ensemble
+    - Neural Network
+    - Class weighting for imbalanced repairs
+    - Dynamic thresholds based on repair rarity
+    """
     
     def __init__(self, config: Config, analysis: Optional[Dict] = None):
         self.config = config
@@ -1311,13 +1532,17 @@ class EnhancedHybridPredictor:
         self.analysis = analysis
 
     def debug_features(self, payment: Dict) -> None:
-        """Debug helper to show extracted features"""
+        """
+        Debug helper to show extracted features for a payment.
+        Useful for understanding what the model "sees".
+        """
         features = self.feature_extractor.extract_features(payment)
         
         logger.info("\n" + "="*60)
         logger.info("FEATURE EXTRACTION DEBUG")
         logger.info("="*60)
         
+        # Show key features
         important_features = {
             0: 'has_bic',
             15: 'has_iban',
@@ -1342,17 +1567,37 @@ class EnhancedHybridPredictor:
         logger.info("="*60 + "\n")
     
     def train(self, train_file: str):
-        """Train the enhanced hybrid model"""
+        """
+        Train the enhanced hybrid model.
+        
+        Process:
+        1. Load and process data from file/directory
+        2. Split into train/val/test sets
+        3. Compute class weights for imbalanced repairs
+        4. Train Random Forest ensemble
+        5. Train Neural Network with early stopping
+        6. Evaluate on test set
+        7. Save all models
+        
+        Args:
+            train_file: Path to JSON file or directory
+            
+        Returns:
+            Test metrics dictionary
+        """
         logger.info("="*70)
         logger.info("TRAINING ENHANCED HYBRID REPAIR PREDICTOR")
         logger.info("="*70)
         
+        # Load and process all data
         features, labels, payments = self.processor.load_and_process(train_file)
         
         n = len(features)
         
+        # Handle small datasets
         if n < 10:
             logger.warning(f"\nSmall dataset detected ({n} samples)")
+            logger.warning("Using same data for train/val/test due to small size")
             X_train = features
             y_train = labels
             X_val = features
@@ -1360,6 +1605,7 @@ class EnhancedHybridPredictor:
             X_test = features
             y_test = labels
         else:
+            # Random split for train/val/test
             indices = np.random.permutation(n)
             
             train_size = int(n * self.config.train_split)
@@ -1375,10 +1621,10 @@ class EnhancedHybridPredictor:
         
         logger.info(f"Split: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
         
-        # Compute class weights
+        # Compute class weights for imbalanced repairs
         if self.config.use_class_weights:
             self.class_weights = compute_class_weights(y_train, self.config.max_class_weight)
-            logger.info(f"\nClass Weights:")
+            logger.info(f"\nClass Weights (higher = rarer repair):")
             for idx, weight in enumerate(self.class_weights):
                 repair_id = self.processor.idx_to_repair[idx]
                 support = int(y_train[:, idx].sum())
@@ -1388,7 +1634,7 @@ class EnhancedHybridPredictor:
         logger.info("\nTraining Random Forest...")
         self.rf_model = MultiOutputClassifier(
             RandomForestClassifier(
-                n_estimators=min(200, max(10, n * 10)),
+                n_estimators=min(200, max(10, n * 10)),  # Scale with dataset size
                 max_depth=min(15, max(3, n // 2)),
                 min_samples_split=max(2, n // 10),
                 min_samples_leaf=1,
@@ -1397,10 +1643,11 @@ class EnhancedHybridPredictor:
             )
         )
         self.rf_model.fit(X_train, y_train)
+        logger.info("Random Forest training complete")
         
         # Train Neural Network
         logger.info("\nTraining Neural Network...")
-        use_batchnorm = n >= 10
+        use_batchnorm = n >= 10  # Only use BatchNorm for larger datasets
         
         self.ml_model = RepairPredictor(
             num_features=features.shape[1],
@@ -1412,20 +1659,28 @@ class EnhancedHybridPredictor:
         
         self._train_neural_network(X_train, y_train, X_val, y_val)
         
-        # Final evaluation
+        # Final evaluation on test set
         logger.info("\n" + "="*70)
         logger.info("FINAL TEST SET EVALUATION")
         logger.info("="*70)
         
         test_metrics = self.evaluate_detailed(X_test, y_test)
         
-        # Save models
+        # Save all models
         self.save_models()
         
         return test_metrics
     
     def _train_neural_network(self, X_train, y_train, X_val, y_val):
-        """Train neural network with class weights"""
+        """
+        Train neural network with class weights and early stopping.
+        
+        Features:
+        - Class-weighted loss for imbalanced repairs
+        - Learning rate scheduling
+        - Early stopping based on validation performance
+        - Model checkpointing
+        """
         train_dataset = RepairDataset(X_train, y_train)
         val_dataset = RepairDataset(X_val, y_val)
         
@@ -1434,16 +1689,19 @@ class EnhancedHybridPredictor:
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size)
         
+        # Optimizer with weight decay for regularization
         optimizer = torch.optim.AdamW(
             self.ml_model.parameters(),
             lr=self.config.learning_rate,
             weight_decay=1e-4
         )
         
+        # Learning rate scheduler
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', patience=5, factor=0.5
         )
         
+        # Loss function (weighted if class weights available)
         if self.class_weights is not None and self.config.use_class_weights:
             criterion = nn.BCELoss(reduction='none')
         else:
@@ -1454,7 +1712,7 @@ class EnhancedHybridPredictor:
         patience = 10
         
         for epoch in range(1, self.config.num_epochs + 1):
-            # Training
+            # Training phase
             self.ml_model.train()
             train_loss = 0.0
             
@@ -1465,6 +1723,7 @@ class EnhancedHybridPredictor:
                 optimizer.zero_grad()
                 predictions = self.ml_model(batch_features)
                 
+                # Apply class weights if available
                 if self.class_weights is not None and self.config.use_class_weights:
                     loss_per_sample = criterion(predictions, batch_labels)
                     weights = self.class_weights.to(self.device)
@@ -1480,7 +1739,7 @@ class EnhancedHybridPredictor:
             
             train_loss /= len(train_loader)
             
-            # Validation
+            # Validation phase
             val_predictions = []
             val_labels = []
             
@@ -1496,6 +1755,7 @@ class EnhancedHybridPredictor:
             val_labels = np.vstack(val_labels)
             val_predictions_binary = (val_predictions > 0.5).astype(int)
             
+            # Compute validation metrics
             val_metrics = PerRepairMetrics.compute_detailed_metrics(
                 val_labels, val_predictions_binary, self.processor.repair_vocabulary
             )
@@ -1504,16 +1764,18 @@ class EnhancedHybridPredictor:
             
             scheduler.step(val_f1)
             
+            # Log progress every 5 epochs
             if epoch % 5 == 0:
                 logger.info(f"Epoch {epoch}/{self.config.num_epochs} - "
                            f"Loss: {train_loss:.4f} - "
                            f"Val Hamming Acc: {val_f1:.3f} - "
                            f"Val Exact Match: {val_metrics['overall']['exact_match_accuracy']:.3f}")
             
-            # Early stopping
-            if val_f1 > best_f1 + 0.001:
+            # Early stopping logic
+            if val_f1 > best_f1 + 0.001:  # Improvement threshold
                 best_f1 = val_f1
                 patience_counter = 0
+                # Save best model
                 torch.save(self.ml_model.state_dict(), 
                           os.path.join(self.config.model_dir, 'best_model.pt'))
             else:
@@ -1526,9 +1788,19 @@ class EnhancedHybridPredictor:
         self.ml_model.load_state_dict(
             torch.load(os.path.join(self.config.model_dir, 'best_model.pt'))
         )
+        logger.info(f"Loaded best model with validation Hamming accuracy: {best_f1:.3f}")
     
     def evaluate_detailed(self, X, y):
-        """Evaluate with detailed per-repair metrics"""
+        """
+        Evaluate model with detailed per-repair metrics.
+        
+        Args:
+            X: Features array
+            y: Labels array
+            
+        Returns:
+            Detailed metrics dictionary
+        """
         self.ml_model.eval()
         
         dataset = RepairDataset(X, y)
@@ -1560,7 +1832,22 @@ class EnhancedHybridPredictor:
         return metrics
     
     def predict(self, payment: Dict, use_rules: bool = True, use_ml: bool = True) -> Dict:
-        """Predict repairs with dynamic thresholds for rare repairs"""
+        """
+        Predict repairs for a payment using hybrid approach.
+        
+        Process:
+        1. Apply deterministic rules (highest confidence)
+        2. Apply ML models with dynamic thresholds based on repair rarity
+        3. Ensemble ML predictions (Neural Net + Random Forest)
+        
+        Args:
+            payment: Payment transaction dictionary
+            use_rules: Whether to apply deterministic rules
+            use_ml: Whether to apply ML models
+            
+        Returns:
+            Dictionary with repairs, confidences, and sources
+        """
         features = self.feature_extractor.extract_features(payment)
         features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
         
@@ -1568,7 +1855,7 @@ class EnhancedHybridPredictor:
         confidences = []
         sources = []
         
-        # Apply rules first (highest priority)
+        # Apply deterministic rules first (highest priority)
         if use_rules:
             rule_repairs, rule_confs = self.rules.predict_repairs(payment, features)
             repairs.extend(rule_repairs)
@@ -1585,18 +1872,21 @@ class EnhancedHybridPredictor:
             with torch.no_grad():
                 ml_probs = self.ml_model(features_tensor)[0].cpu().numpy()
             
-            # RF predictions
+            # Get Random Forest predictions
             rf_probs_raw = self.rf_model.predict_proba(features.reshape(1, -1))
             
+            # Extract positive class probabilities
             rf_probs = []
             for pred in rf_probs_raw:
                 if pred.shape[1] == 1:
+                    # Binary classification with single class
                     rf_probs.append(1.0 if pred[0, 0] > 0.5 else 0.0)
                 else:
+                    # Binary classification with two classes
                     rf_probs.append(pred[0, 1])
             rf_probs = np.array(rf_probs)
             
-            # Ensemble
+            # Ensemble: average Neural Net and Random Forest
             ensemble_probs = (ml_probs + rf_probs) / 2
             
             logger.info(f"\nML predictions (before threshold):")
@@ -1609,15 +1899,16 @@ class EnhancedHybridPredictor:
                     continue
                 
                 # Dynamic threshold based on training support
+                # Rare repairs get lower thresholds to improve recall
                 support = self.class_weights[idx].item() if self.class_weights is not None else 1.0
                 
                 # Inverse relationship: high weight = low support = lower threshold
-                if support >= 5.0:  # Very rare
+                if support >= 5.0:  # Very rare (< 10 examples in training)
                     threshold = 0.2
-                elif support >= 2.0:  # Rare
+                elif support >= 2.0:  # Rare (< 100 examples)
                     threshold = 0.35
                 else:
-                    threshold = self.config.ml_threshold
+                    threshold = self.config.ml_threshold  # 0.5 (default)
                 
                 if prob > threshold:
                     repairs.append(repair_id)
@@ -1632,14 +1923,27 @@ class EnhancedHybridPredictor:
         }
     
     def save_models(self):
-        """Save all models and metadata"""
+        """
+        Save all trained models and metadata.
+        
+        Saves:
+        - Neural network state dict
+        - Random Forest model
+        - Data processor (with vocabulary)
+        - Class weights
+        - Analysis data (if available)
+        - Model architecture info
+        - Configuration
+        """
         os.makedirs(self.config.model_dir, exist_ok=True)
         
+        # Detect if BatchNorm was used
         has_batchnorm = any(isinstance(layer, nn.BatchNorm1d) for layer in self.ml_model.network)
         
+        # Save model architecture info for loading
         model_info = {
             'num_features': self.ml_model.network[0].in_features,
-            'num_repairs': self.ml_model.network[-2].out_features,
+            'num_repairs': self.ml_model.network[-2].out_features,  # -2 because -1 is Sigmoid
             'hidden_dim': self.ml_model.network[0].out_features,
             'use_batchnorm': has_batchnorm
         }
@@ -1647,23 +1951,29 @@ class EnhancedHybridPredictor:
         with open(os.path.join(self.config.model_dir, 'model_info.json'), 'w') as f:
             json.dump(model_info, f, indent=2)
         
+        # Save neural network
         torch.save(self.ml_model.state_dict(), 
                   os.path.join(self.config.model_dir, 'neural_model.pt'))
         
+        # Save Random Forest
         with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
             pickle.dump(self.rf_model, f)
         
+        # Save data processor (contains vocabulary)
         with open(os.path.join(self.config.model_dir, 'processor.pkl'), 'wb') as f:
             pickle.dump(self.processor, f)
         
+        # Save class weights if available
         if self.class_weights is not None:
             with open(os.path.join(self.config.model_dir, 'class_weights.pkl'), 'wb') as f:
                 pickle.dump(self.class_weights, f)
         
+        # Save analysis if available
         if self.analysis is not None:
             with open(os.path.join(self.config.model_dir, 'analysis.json'), 'w') as f:
                 json.dump(self.analysis, f, indent=2)
         
+        # Save configuration
         self.config.save(os.path.join(self.config.model_dir, 'config.json'))
         
         logger.info(f"\nModels saved to {self.config.model_dir}")
@@ -1672,12 +1982,20 @@ class EnhancedHybridPredictor:
         logger.info(f"BatchNorm: {model_info['use_batchnorm']}")
 
     def load_models(self, model_dir: str):
-        """Load saved models from disk"""
+        """
+        Load saved models from disk.
+        
+        Args:
+            model_dir: Directory containing saved models
+        """
+        # Load configuration
         self.config = Config.load(os.path.join(model_dir, 'config.json'))
         
+        # Load data processor
         with open(os.path.join(model_dir, 'processor.pkl'), 'rb') as f:
             self.processor = pickle.load(f)
         
+        # Load Random Forest
         with open(os.path.join(model_dir, 'rf_model.pkl'), 'rb') as f:
             self.rf_model = pickle.load(f)
         
@@ -1720,6 +2038,7 @@ class EnhancedHybridPredictor:
             use_batchnorm=model_info['use_batchnorm']
         ).to(self.device)
         
+        # Load model weights
         self.ml_model.load_state_dict(
             torch.load(os.path.join(model_dir, 'neural_model.pt'), 
                       map_location=self.device)
@@ -1734,7 +2053,11 @@ class EnhancedHybridPredictor:
 # ============================================================================
 
 def train_command(args):
-    """Train the enhanced model"""
+    """
+    Execute training command.
+    
+    Trains the hybrid model on data from file or directory.
+    """
     config = Config()
     config.num_epochs = args.epochs
     config.batch_size = args.batch_size
@@ -1756,25 +2079,34 @@ def train_command(args):
     logger.info(f"Test Exact Match Accuracy: {metrics['overall']['exact_match_accuracy']:.1%}")
     logger.info(f"Test Hamming Accuracy: {metrics['overall']['hamming_accuracy']:.1%}")
     
+    # Check if goal achieved
     if metrics['overall']['exact_match_accuracy'] >= 0.90:
-        logger.info("GOAL ACHIEVED: 90%+ exact match accuracy!")
+        logger.info("🎯 GOAL ACHIEVED: 90%+ exact match accuracy!")
     else:
         gap = 0.90 - metrics['overall']['exact_match_accuracy']
         logger.info(f"Need {gap:.1%} more to reach 90% exact match")
 
 
 def predict_command(args):
-    """Predict repairs for a payment"""
+    """
+    Execute prediction command.
+    
+    Predicts repairs for a single payment transaction.
+    """
     predictor = EnhancedHybridPredictor(Config())
     predictor.load_models(args.model or './models')
     
+    # Load payment data
     with open(args.input, 'r') as f:
         data = json.load(f)
     
+    # Handle different input formats
     if isinstance(data, dict) and len(data) == 1:
+        # Single transaction in format: {"txn_id": {...}}
         txn_id = list(data.keys())[0]
         payment_data = data[txn_id]
         
+        # Check if it has training format (before/after states)
         if predictor.processor._has_after_state(payment_data):
             logger.info(f"Detected training format - extracting 'before' state")
             payment = predictor.processor._extract_before_state(payment_data)
@@ -1782,14 +2114,16 @@ def predict_command(args):
             logger.info(f"Detected inference format")
             payment = payment_data
     else:
+        # Direct payment object
         payment = data
     
-    # Debug features
+    # Debug features (shows what the model sees)
     predictor.debug_features(payment)
     
-    # Predict
+    # Predict repairs
     result = predictor.predict(payment)
     
+    # Display results
     logger.info("\n" + "="*70)
     logger.info("REPAIR PREDICTION RESULTS")
     logger.info("="*70)
@@ -1798,6 +2132,7 @@ def predict_command(args):
     for repair, conf, source in zip(result['repairs'], result['confidences'], result['sources']):
         logger.info(f"  {repair}: {conf:.3f} ({source})")
     
+    # Save results if output specified
     if args.output:
         with open(args.output, 'w') as f:
             json.dump(result, f, indent=2)
@@ -1805,13 +2140,19 @@ def predict_command(args):
 
 
 def evaluate_command(args):
-    """Evaluate model with detailed metrics"""
+    """
+    Execute evaluation command.
+    
+    Evaluates model performance on test data.
+    """
     predictor = EnhancedHybridPredictor(Config())
     predictor.load_models(args.model or './models')
     
+    # Load and process test data
     features, labels, payments = predictor.processor.load_and_process(args.input)
     
     if args.detailed:
+        # Detailed per-repair metrics
         metrics = predictor.evaluate_detailed(features, labels)
     else:
         # Quick evaluation
@@ -1844,33 +2185,106 @@ def evaluate_command(args):
 
 
 def main():
+    """
+    Main entry point for CLI.
+    
+    Supports three commands:
+    - train: Train models on data
+    - predict: Predict repairs for a payment
+    - evaluate: Evaluate model performance
+    """
     parser = argparse.ArgumentParser(
         description='Enhanced ACE Payment Repair Predictor',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Train on directory of JSON files
+  python ace_repair_predictor.py train --input ./data --epochs 50
+  
+  # Train with analysis report
+  python ace_repair_predictor.py train --input ./data --analysis analysis.json
+  
+  # Predict repairs for single payment
+  python ace_repair_predictor.py predict --input payment.json --output result.json
+  
+  # Evaluate on test directory with detailed metrics
+  python ace_repair_predictor.py evaluate --input ./test_data --detailed
+        """
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
-    # Train
+    # ========================================================================
+    # TRAIN COMMAND
+    # ========================================================================
     train_parser = subparsers.add_parser('train', help='Train the enhanced model')
-    train_parser.add_argument('--input', required=True, help='Training data JSON file')
-    train_parser.add_argument('--analysis', help='Analysis report JSON from analyzer')
-    train_parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    train_parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    train_parser.add_argument('--no-class-weights', action='store_true', help='Disable class weighting')
+    train_parser.add_argument(
+        '--input', 
+        required=True, 
+        help='Path to JSON file or directory containing training data'
+    )
+    train_parser.add_argument(
+        '--analysis', 
+        help='Path to analysis report JSON from analyzer (optional)'
+    )
+    train_parser.add_argument(
+        '--epochs', 
+        type=int, 
+        default=50, 
+        help='Number of training epochs (default: 50)'
+    )
+    train_parser.add_argument(
+        '--batch_size', 
+        type=int, 
+        default=32, 
+        help='Batch size for training (default: 32)'
+    )
+    train_parser.add_argument(
+        '--no-class-weights', 
+        action='store_true', 
+        help='Disable class weighting for imbalanced repairs'
+    )
     
-    # Predict
+    # ========================================================================
+    # PREDICT COMMAND
+    # ========================================================================
     predict_parser = subparsers.add_parser('predict', help='Predict repairs for payment')
-    predict_parser.add_argument('--input', required=True, help='Payment JSON file')
-    predict_parser.add_argument('--output', help='Output file for results')
-    predict_parser.add_argument('--model', default='./models', help='Model directory')
+    predict_parser.add_argument(
+        '--input', 
+        required=True, 
+        help='Path to payment JSON file'
+    )
+    predict_parser.add_argument(
+        '--output', 
+        help='Path to save prediction results (optional)'
+    )
+    predict_parser.add_argument(
+        '--model', 
+        default='./models', 
+        help='Path to model directory (default: ./models)'
+    )
     
-    # Evaluate
-    eval_parser = subparsers.add_parser('evaluate', help='Evaluate model')
-    eval_parser.add_argument('--input', required=True, help='Test data JSON file')
-    eval_parser.add_argument('--model', default='./models', help='Model directory')
-    eval_parser.add_argument('--detailed', action='store_true', help='Show detailed per-repair metrics')
+    # ========================================================================
+    # EVALUATE COMMAND
+    # ========================================================================
+    eval_parser = subparsers.add_parser('evaluate', help='Evaluate model performance')
+    eval_parser.add_argument(
+        '--input', 
+        required=True, 
+        help='Path to test data JSON file or directory'
+    )
+    eval_parser.add_argument(
+        '--model', 
+        default='./models', 
+        help='Path to model directory (default: ./models)'
+    )
+    eval_parser.add_argument(
+        '--detailed', 
+        action='store_true', 
+        help='Show detailed per-repair metrics'
+    )
     
+    # Parse arguments and execute command
     args = parser.parse_args()
     
     if args.command == 'train':
@@ -1882,6 +2296,6 @@ def main():
     else:
         parser.print_help()
 
-
 if __name__ == "__main__":
     main()
+
