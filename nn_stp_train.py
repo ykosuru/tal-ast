@@ -11,16 +11,16 @@ Enhanced ACE Payment Repair Predictor with:
 
 Usage:
     # Train with enhancements
-    python ace_repair_predictor_enhanced.py train --input repairs_10k.json --analysis analysis_report.json --epochs 50
+    python ace_repair_predictor.py train --input repairs_10k.json --analysis analysis_report.json --epochs 50
     
     # Train without analysis (uses baseline rules only)
-    python ace_repair_predictor_enhanced.py train --input repairs_10k.json --epochs 50
+    python ace_repair_predictor.py train --input repairs_10k.json --epochs 50
     
     # Predict repairs
-    python ace_repair_predictor_enhanced.py predict --input payment.json --output result.json
+    python ace_repair_predictor.py predict --input payment.json --output result.json
     
     # Evaluate with detailed per-repair metrics
-    python ace_repair_predictor_enhanced.py evaluate --input test_data.json --detailed
+    python ace_repair_predictor.py evaluate --input test_data.json --detailed
 """
 
 import json
@@ -91,7 +91,7 @@ class Config:
 
 
 # ============================================================================
-# FEATURE EXTRACTION (Same as original)
+# FEATURE EXTRACTION
 # ============================================================================
 
 class PaymentFeatureExtractor:
@@ -280,9 +280,6 @@ class PaymentFeatureExtractor:
             return [self._normalize_payment(item) for item in payment]
         return payment
     
-    # Include all the extraction methods from original script
-    # (I'll include a few key ones, but in practice you'd copy all from original)
-    
     def _extract_bic_info(self, payment: Dict) -> Dict:
         bic_fields = self._find_all_values(payment, 'bic')
         has_bic = len(bic_fields) > 0
@@ -306,11 +303,7 @@ class PaymentFeatureExtractor:
             'format_xxxxxxxxxxx': float(bic_value and len(str(bic_value)) == 11) if bic_value else 0.0
         }
     
-    # Copy all other _extract_* methods from original script
-    # For brevity, I'm showing structure - you'd include all methods
-    
     def _extract_iban_info(self, payment: Dict) -> Dict:
-        # Copy from original
         iban_fields = self._find_all_values(payment, 'iban')
         has_iban = len(iban_fields) > 0
         iban_value = str(iban_fields[0]) if iban_fields else None
@@ -358,9 +351,6 @@ class PaymentFeatureExtractor:
             'id_length': min(len(clearing_id_val) / 15.0, 1.0) if clearing_id_val else 0.0,
             'has_system_code': float(len(clearing_sys) > 0 or len(clearing_cd) > 0)
         }
-    
-    # Continue with all other extraction methods...
-    # (Copy from original script - too long to include all here)
     
     def _extract_name_info(self, payment: Dict) -> Dict:
         bank_names = self._find_all_values(payment, 'nm')
@@ -554,7 +544,6 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_metadata_info(self, payment: Dict) -> Dict:
-        """Extract source/clearing metadata (8 features)"""
         source = str(payment.get('source', '')).lower()
         clearing = str(payment.get('clearing', '')).lower()
         
@@ -740,13 +729,12 @@ class PaymentFeatureExtractor:
 # ============================================================================
 
 class EnhancedDeterministicRules:
-    
     """Enhanced rule-based system using discovered patterns"""
     
     def __init__(self, analysis: Optional[Dict] = None):
         self.rule_stats = Counter()
         self.discovered_rules = []
-        self.debug_mode = True  # Enable debug logging
+        self.debug_mode = True
         
         if analysis:
             self.discovered_rules = analysis.get('deterministic_rules', [])
@@ -785,7 +773,6 @@ class EnhancedDeterministicRules:
             self.rule_stats['6035_bic_from_clearing'] += 1
             if self.debug_mode:
                 logger.info("✓ Rule fired: 6035 (BIC from clearing)")
-                # Show which clearing ID was found
                 clearing_ids = self._find_all_values(payment, 'mmbid')
                 logger.info(f"  Clearing IDs found: {clearing_ids}")
         elif self.debug_mode:
@@ -802,7 +789,6 @@ class EnhancedDeterministicRules:
         
         # Enhanced rules from analysis
         if self._needs_address_standardization(payment, features):
-            repair_added = False
             for rule in self.discovered_rules:
                 desc = rule.get('description', '').lower()
                 if 'address' in desc or 'adrline' in desc:
@@ -810,7 +796,6 @@ class EnhancedDeterministicRules:
                         repairs.append(rule['repair_id'])
                         confidences.append(rule['confidence'])
                         self.rule_stats[f"{rule['repair_id']}_address_std"] += 1
-                        repair_added = True
                         if self.debug_mode:
                             logger.info(f"✓ Rule fired: {rule['repair_id']} (Address standardization)")
                         break
@@ -1076,7 +1061,7 @@ def compute_class_weights(y_train: np.ndarray, max_weight: float = 10.0) -> torc
 
 
 # ============================================================================
-# ML MODELS (Same as original)
+# ML MODELS
 # ============================================================================
 
 class RepairPredictor(nn.Module):
@@ -1123,7 +1108,7 @@ class RepairDataset(Dataset):
 
 
 # ============================================================================
-# DATA PROCESSOR (Same as original)
+# DATA PROCESSOR
 # ============================================================================
 
 class DataProcessor:
@@ -1148,9 +1133,7 @@ class DataProcessor:
             if isinstance(raw_data[0], dict):
                 first_item = raw_data[0]
                 
-                # Check if values are dicts (transaction objects)
                 if all(isinstance(v, dict) for v in first_item.values()):
-                    # Merge all dicts in the array
                     data = {}
                     for item in raw_data:
                         if isinstance(item, dict):
@@ -1159,6 +1142,8 @@ class DataProcessor:
                 else:
                     data = {f"txn_{i:06d}": txn for i, txn in enumerate(raw_data)}
                     logger.info(f"Detected format: Array of {len(data)} transaction objects")
+            else:
+                raise ValueError(f"Unexpected array format in {json_file}")
                     
         elif isinstance(raw_data, dict):
             data = raw_data
@@ -1203,6 +1188,10 @@ class DataProcessor:
                 all_labels.append(labels)
                 all_payments.append(txn_data)
                 processed_count += 1
+                
+                # Progress logging
+                if processed_count % 1000 == 0:
+                    logger.info(f"Progress: {processed_count}/{len(data)} transactions processed...")
                 
             except Exception as e:
                 logger.warning(f"Error processing transaction {txn_id}: {e}")
@@ -1455,9 +1444,7 @@ class EnhancedHybridPredictor:
             optimizer, mode='max', patience=5, factor=0.5
         )
         
-        # Use weighted loss if class weights available
         if self.class_weights is not None and self.config.use_class_weights:
-            # Expand weights to match batch size
             criterion = nn.BCELoss(reduction='none')
         else:
             criterion = nn.BCELoss()
@@ -1479,7 +1466,6 @@ class EnhancedHybridPredictor:
                 predictions = self.ml_model(batch_features)
                 
                 if self.class_weights is not None and self.config.use_class_weights:
-                    # Apply per-sample weights
                     loss_per_sample = criterion(predictions, batch_labels)
                     weights = self.class_weights.to(self.device)
                     weighted_loss = (loss_per_sample * weights).mean()
@@ -1623,16 +1609,15 @@ class EnhancedHybridPredictor:
                     continue
                 
                 # Dynamic threshold based on training support
-                # For rare repairs (support < 10), use lower threshold
                 support = self.class_weights[idx].item() if self.class_weights is not None else 1.0
                 
                 # Inverse relationship: high weight = low support = lower threshold
-                if support >= 5.0:  # Very rare (< 10 examples)
+                if support >= 5.0:  # Very rare
                     threshold = 0.2
-                elif support >= 2.0:  # Rare (< 100 examples)
+                elif support >= 2.0:  # Rare
                     threshold = 0.35
                 else:
-                    threshold = self.config.ml_threshold  # 0.5
+                    threshold = self.config.ml_threshold
                 
                 if prob > threshold:
                     repairs.append(repair_id)
@@ -1650,13 +1635,11 @@ class EnhancedHybridPredictor:
         """Save all models and metadata"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
-        # Save model architecture info - more robust detection
-        # Count BatchNorm layers to determine if it was used
         has_batchnorm = any(isinstance(layer, nn.BatchNorm1d) for layer in self.ml_model.network)
         
         model_info = {
             'num_features': self.ml_model.network[0].in_features,
-            'num_repairs': self.ml_model.network[-2].out_features,  # -2 because -1 is Sigmoid
+            'num_repairs': self.ml_model.network[-2].out_features,
             'hidden_dim': self.ml_model.network[0].out_features,
             'use_batchnorm': has_batchnorm
         }
@@ -1665,7 +1648,7 @@ class EnhancedHybridPredictor:
             json.dump(model_info, f, indent=2)
         
         torch.save(self.ml_model.state_dict(), 
-                os.path.join(self.config.model_dir, 'neural_model.pt'))
+                  os.path.join(self.config.model_dir, 'neural_model.pt'))
         
         with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
             pickle.dump(self.rf_model, f)
@@ -1687,7 +1670,6 @@ class EnhancedHybridPredictor:
         logger.info(f"Architecture: {model_info['num_features']} -> {model_info['hidden_dim']} -> "
                     f"{model_info['hidden_dim']//2} -> {model_info['num_repairs']}")
         logger.info(f"BatchNorm: {model_info['use_batchnorm']}")
-
 
     def load_models(self, model_dir: str):
         """Load saved models from disk"""
@@ -1740,7 +1722,7 @@ class EnhancedHybridPredictor:
         
         self.ml_model.load_state_dict(
             torch.load(os.path.join(model_dir, 'neural_model.pt'), 
-                    map_location=self.device)
+                      map_location=self.device)
         )
         self.ml_model.eval()
         
@@ -1751,37 +1733,6 @@ class EnhancedHybridPredictor:
 # CLI COMMANDS
 # ============================================================================
 
-def debug_features(self, payment: Dict) -> None:
-    """Debug helper to show extracted features"""
-    features = self.feature_extractor.extract_features(payment)
-    
-    logger.info("\n" + "="*60)
-    logger.info("FEATURE EXTRACTION DEBUG")
-    logger.info("="*60)
-    
-    important_features = {
-        0: 'has_bic',
-        15: 'has_iban',
-        25: 'has_clearing_id',
-        37: 'has_bank_name',
-        75: 'has_country_field'
-    }
-    
-    for idx, name in important_features.items():
-        logger.info(f"Feature[{idx:3d}] {name:20s}: {features[idx]:.3f}")
-    
-    # Show what was found in payment
-    payment_norm = self.feature_extractor._normalize_payment(payment)
-    bics = self.feature_extractor._find_all_values(payment_norm, 'bic')
-    clearings = self.feature_extractor._find_all_values(payment_norm, 'mmbid')
-    countries = self.feature_extractor._find_all_values(payment_norm, 'ctryofres')
-    
-    logger.info(f"\nValues found in payment:")
-    logger.info(f"  BICs: {bics}")
-    logger.info(f"  Clearing IDs: {clearings}")
-    logger.info(f"  Countries: {countries}")
-    logger.info("="*60 + "\n")
-    
 def train_command(args):
     """Train the enhanced model"""
     config = Config()
@@ -1864,7 +1815,7 @@ def evaluate_command(args):
         metrics = predictor.evaluate_detailed(features, labels)
     else:
         # Quick evaluation
-        self.ml_model.eval()
+        predictor.ml_model.eval()
         dataset = RepairDataset(features, labels)
         loader = DataLoader(dataset, batch_size=predictor.config.batch_size)
         
@@ -1927,7 +1878,7 @@ def main():
     elif args.command == 'predict':
         predict_command(args)
     elif args.command == 'evaluate':
-        eval_parser(args)
+        evaluate_command(args)
     else:
         parser.print_help()
 
