@@ -28,7 +28,7 @@ Usage:
     python ace_repair_predictor.py evaluate --input test_data.json
 
 Author: Production Implementation
-Version: 4.0 - All bugs fixed
+Version: 4.1 - BatchNorm fix for small datasets
 """
 
 import json
@@ -139,7 +139,6 @@ class PaymentFeatureExtractor:
         """Define all 172 feature names"""
         
         # BIC features (15)
-        # Captures BIC code presence, format, and location in payment structure
         self.feature_names.extend([
             'has_bic', 'bic_length_8', 'bic_length_11', 'bic_valid_format',
             'bic_in_cdtrAgt', 'bic_in_dbtrAgt', 'bic_in_instgAgt', 'bic_in_instdAgt',
@@ -148,7 +147,6 @@ class PaymentFeatureExtractor:
         ])
         
         # IBAN features (10)
-        # Captures IBAN presence, validation, and country information
         self.feature_names.extend([
             'has_iban', 'iban_valid_format', 'iban_length_valid', 
             'iban_in_cdtrAcct', 'iban_in_dbtrAcct',
@@ -157,7 +155,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Clearing system features (12)
-        # Captures routing/clearing information (USABA, FedWire, CHIPS, etc.)
         self.feature_names.extend([
             'has_clearing_id', 'clearing_in_cdtrAgt', 'clearing_in_dbtrAgt', 'clearing_in_instgAgt',
             'clearing_type_usaba', 'clearing_type_fedwire', 'clearing_type_chips', 'clearing_type_other',
@@ -165,7 +162,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Name features (18)
-        # Captures bank and party name information
         self.feature_names.extend([
             'has_bank_name', 'has_party_name', 
             'bank_name_in_cdtrAgt', 'bank_name_in_dbtrAgt', 'bank_name_in_instgAgt', 'bank_name_in_instdAgt',
@@ -176,7 +172,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Address features (20)
-        # Captures address presence, structure, and completeness
         self.feature_names.extend([
             'has_address', 'has_postal_address', 'has_structured_address',
             'address_in_cdtrAgt', 'address_in_dbtrAgt', 'address_in_instgAgt', 'address_in_instdAgt',
@@ -187,7 +182,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Country features (15)
-        # Captures country code presence and validation
         self.feature_names.extend([
             'has_country_field', 'country_in_cdtrAgt', 'country_in_dbtrAgt', 'country_in_instgAgt',
             'country_in_cdtr', 'country_in_dbtr', 'country_in_address',
@@ -196,7 +190,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Account features (12)
-        # Captures account information, types, and currencies
         self.feature_names.extend([
             'has_cdtrAcct', 'has_dbtrAcct', 'has_account_id', 'has_account_type',
             'account_type_iban', 'account_type_other', 'account_type_proprietary',
@@ -205,7 +198,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Entity presence features (15)
-        # Captures which payment entities exist (variable structure handling)
         self.feature_names.extend([
             'has_cdtr', 'has_dbtr', 'has_cdtrAgt', 'has_dbtrAgt',
             'has_instgAgt', 'has_instdAgt',
@@ -215,7 +207,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Financial institution ID features (10)
-        # Captures completeness of financial institution data
         self.feature_names.extend([
             'has_fininstnid', 'fininstnid_in_multiple_entities',
             'fininstnid_has_bic', 'fininstnid_has_clearing', 'fininstnid_has_name',
@@ -224,7 +215,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Remittance features (12)
-        # Captures payment description information
         self.feature_names.extend([
             'has_rmtInf', 'rmtInf_has_ustrd', 'rmtInf_has_strd',
             'rmtInf_length', 'rmtInf_needs_split', 'rmtInf_multiline',
@@ -233,14 +223,12 @@ class PaymentFeatureExtractor:
         ])
         
         # Source/Clearing metadata (8)
-        # Captures payment source and clearing system metadata
         self.feature_names.extend([
             'source_swf', 'source_fed', 'source_chips', 'source_other',
             'clearing_fed', 'clearing_chips', 'clearing_swift', 'clearing_other'
         ])
         
         # Flags features (10)
-        # Captures processing flags and queue information
         self.feature_names.extend([
             'flag_ace_repairs', 'flag_autotrieve', 'flag_stp_failed', 
             'flag_repair_queue', 'flag_exception_queue', 'flag_verify_queue',
@@ -249,7 +237,6 @@ class PaymentFeatureExtractor:
         ])
         
         # Structural features (15)
-        # Captures payment complexity and completeness metrics
         self.feature_names.extend([
             'total_fields', 'total_entities', 'total_leaf_values',
             'max_nesting_depth', 'has_arrays', 'array_count',
@@ -400,11 +387,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_clearing_info(self, payment: Dict) -> Dict:
-        """
-        Extract clearing system features (12 features)
-        
-        FIXED: Proper boolean logic to avoid empty string conversion errors
-        """
+        """Extract clearing system features (12 features)"""
         clearing_fields = self._find_all_values(payment, 'mmbid')
         clearing_sys = self._find_all_values(payment, 'clrsysid')
         clearing_cd = self._find_all_values(payment, 'cd')
@@ -415,7 +398,7 @@ class PaymentFeatureExtractor:
         clearing_type = str(clearing_sys[0]).lower() if clearing_sys else ""
         clearing_id_val = str(clearing_fields[0]) if clearing_fields else ""
         
-        # CRITICAL FIX: Explicitly convert to bool first to avoid empty string issues
+        # Explicitly convert to bool first to avoid empty string issues
         is_usaba = bool(clearing_type and 'usaba' in clearing_type)
         is_fedwire = bool(clearing_type and ('fed' in clearing_type or 'fedwire' in clearing_type))
         is_chips = bool(clearing_type and 'chips' in clearing_type)
@@ -560,12 +543,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_entity_info(self, payment: Dict) -> Dict:
-        """
-        Extract entity presence features (15 features)
-        
-        CRITICAL: Handles variable payment structure
-        Some payments have all entities, some have only one
-        """
+        """Extract entity presence features (15 features)"""
         entities = {
             'cdtr': 'cdtr' in payment,
             'dbtr': 'dbtr' in payment,
@@ -610,7 +588,6 @@ class PaymentFeatureExtractor:
         
         has_fininstn = len(fininstn_fields) > 0
         
-        # Check for completeness in financial institution blocks
         fininstn_entities = []
         for entity in ['cdtragt', 'dbtragt', 'instgagt', 'instdagt']:
             if entity in payment and 'fininstnid' in str(payment[entity]).lower():
@@ -699,11 +676,9 @@ class PaymentFeatureExtractor:
         arrays = self._count_arrays(payment)
         empty_fields = self._count_empty_fields(payment)
         
-        # Count agents vs parties
         agents = sum(1 for k in payment.keys() if 'agt' in k.lower())
         parties = sum(1 for k in payment.keys() if k.lower() in ['cdtr', 'dbtr'])
         
-        # Routing completeness
         has_bic = len(self._find_all_values(payment, 'bic')) > 0
         has_clearing = len(self._find_all_values(payment, 'mmbid')) > 0
         
@@ -725,9 +700,7 @@ class PaymentFeatureExtractor:
             'data_completeness': 1.0 - (empty_fields / max(total_fields, 1))
         }
     
-    # ========================================================================
-    # HELPER METHODS
-    # ========================================================================
+    # Helper methods
     
     def _is_valid_iban(self, iban: str) -> bool:
         """Check if IBAN format is valid"""
@@ -875,48 +848,30 @@ class DeterministicRules:
     - BIC present + country missing → Extract country from BIC[4:6]
     - Clearing ID present + BIC missing → Lookup BIC from clearing system
     - BIC present + bank name missing → Lookup name from BIC directory
-    
-    Rules handle ~30-40% of all repairs with perfect accuracy.
     """
     
     def __init__(self):
         self.rule_stats = Counter()
     
     def predict_repairs(self, payment: Dict, features: np.ndarray) -> Tuple[List[str], List[float]]:
-        """
-        Apply deterministic rules to predict repairs.
-        
-        Args:
-            payment: Payment dictionary (not used currently, but available)
-            features: 172 feature vector extracted from payment
-            
-        Returns:
-            Tuple of (repair_ids, confidences)
-            Example: (['6021', '6036'], [1.0, 1.0])
-        """
+        """Apply deterministic rules to predict repairs"""
         repairs = []
         confidences = []
         payment = self._normalize(payment)
         
-        # Rule 1: Country from BIC (Repair 6021)
-        # Trigger: BIC exists but country field doesn't
-        # Action: Extract country from BIC characters 4-5
+        # Rule 1: Country from BIC
         if self._needs_country_from_bic(payment, features):
             repairs.append('6021')
             confidences.append(1.0)
             self.rule_stats['6021_country_from_bic'] += 1
         
-        # Rule 2: BIC from clearing (Repair 6035)
-        # Trigger: Clearing system ID exists but BIC doesn't
-        # Action: Lookup BIC from clearing system database
+        # Rule 2: BIC from clearing
         if self._needs_bic_from_clearing(payment, features):
             repairs.append('6035')
             confidences.append(1.0)
             self.rule_stats['6035_bic_from_clearing'] += 1
         
-        # Rule 3: Bank name from BIC (Repair 6036)
-        # Trigger: BIC exists but bank name doesn't
-        # Action: Lookup bank name from BIC directory
+        # Rule 3: Bank name from BIC
         if self._needs_bank_name_from_bic(payment, features):
             repairs.append('6036')
             confidences.append(1.0)
@@ -934,42 +889,21 @@ class DeterministicRules:
         return payment
     
     def _needs_country_from_bic(self, payment: Dict, features: np.ndarray) -> bool:
-        """
-        Check if country code should be extracted from BIC.
-        
-        Feature indices:
-        - features[0]: has_bic
-        - features[75]: has_country_field (in country features block)
-        """
+        """Check if country code should be extracted from BIC"""
         has_bic = features[0] > 0.5
-        has_country = features[75] > 0.5  # has_country_field
-        
+        has_country = features[75] > 0.5
         return has_bic and not has_country
     
     def _needs_bic_from_clearing(self, payment: Dict, features: np.ndarray) -> bool:
-        """
-        Check if BIC should be resolved from clearing system.
-        
-        Feature indices:
-        - features[25]: has_clearing_id (in clearing features block)
-        - features[0]: has_bic
-        """
-        has_clearing = features[25] > 0.5  # has_clearing_id
+        """Check if BIC should be resolved from clearing system"""
+        has_clearing = features[25] > 0.5
         has_bic = features[0] > 0.5
-        
         return has_clearing and not has_bic
     
     def _needs_bank_name_from_bic(self, payment: Dict, features: np.ndarray) -> bool:
-        """
-        Check if bank name should be looked up from BIC.
-        
-        Feature indices:
-        - features[0]: has_bic
-        - features[37]: has_bank_name (in name features block)
-        """
+        """Check if bank name should be looked up from BIC"""
         has_bic = features[0] > 0.5
-        has_name = features[37] > 0.5  # has_bank_name
-        
+        has_name = features[37] > 0.5
         return has_bic and not has_name
     
     def print_stats(self):
@@ -991,26 +925,34 @@ class RepairPredictor(nn.Module):
     - Input: 172 features
     - Hidden layers: 256 → 128
     - Output: N repairs (multi-label with sigmoid)
-    - Regularization: Dropout + BatchNorm
+    - Regularization: Dropout + BatchNorm (optional for small datasets)
     """
     
-    def __init__(self, num_features: int, num_repairs: int, hidden_dim: int = 256, dropout: float = 0.3):
+    def __init__(self, num_features: int, num_repairs: int, hidden_dim: int = 256, 
+                 dropout: float = 0.3, use_batchnorm: bool = True):
         super().__init__()
         
-        self.network = nn.Sequential(
-            nn.Linear(num_features, hidden_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim // 2),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_dim // 2, num_repairs),
-            nn.Sigmoid()  # Multi-label: each repair independent
-        )
+        layers = []
+        
+        # First layer
+        layers.append(nn.Linear(num_features, hidden_dim))
+        layers.append(nn.ReLU())
+        if use_batchnorm:
+            layers.append(nn.BatchNorm1d(hidden_dim))
+        layers.append(nn.Dropout(dropout))
+        
+        # Second layer
+        layers.append(nn.Linear(hidden_dim, hidden_dim // 2))
+        layers.append(nn.ReLU())
+        if use_batchnorm:
+            layers.append(nn.BatchNorm1d(hidden_dim // 2))
+        layers.append(nn.Dropout(dropout))
+        
+        # Output layer
+        layers.append(nn.Linear(hidden_dim // 2, num_repairs))
+        layers.append(nn.Sigmoid())
+        
+        self.network = nn.Sequential(*layers)
     
     def forward(self, x):
         return self.network(x)
@@ -1052,31 +994,13 @@ class DataProcessor:
         self.idx_to_repair = {}
     
     def load_and_process(self, json_file: str) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
-        """
-        Load training data and extract features + labels.
-        
-        CRITICAL: Only processes transactions with 'before' AND 'after' sections
-        Skips transactions without 'after' as there's nothing to learn
-        
-        Args:
-            json_file: Path to JSON file containing training data
-            
-        Returns:
-            Tuple of (features, labels, raw_payments)
-            - features: (N, 172) array of feature vectors
-            - labels: (N, num_repairs) binary array of repair labels
-            - raw_payments: List of original payment dicts
-        """
+        """Load training data and extract features + labels"""
         logger.info(f"Loading data from {json_file}")
         
         with open(json_file, 'r') as f:
             raw_data = json.load(f)
         
         # Handle multiple input formats
-        # Format 1: [{"txn_id1": {...}, "txn_id2": {...}}] - array containing dict
-        # Format 2: {"txn_id1": {...}, "txn_id2": {...}} - direct dict
-        # Format 3: [{"source": "SWF", ...}, {...}] - array of transactions
-        
         if isinstance(raw_data, list):
             if len(raw_data) == 0:
                 raise ValueError(f"Empty array in {json_file}")
@@ -1084,13 +1008,10 @@ class DataProcessor:
             if isinstance(raw_data[0], dict):
                 first_item = raw_data[0]
                 
-                # Check if first element is a transaction dict
-                # (all values are dicts = it's a transaction collection)
                 if all(isinstance(v, dict) for v in first_item.values()):
                     data = first_item
                     logger.info(f"Detected format: Array containing dict of {len(data)} transactions")
                 else:
-                    # Array of individual transactions - convert to dict
                     data = {f"txn_{i:06d}": txn for i, txn in enumerate(raw_data)}
                     logger.info(f"Detected format: Array of {len(data)} transaction objects")
             else:
@@ -1101,23 +1022,20 @@ class DataProcessor:
         else:
             raise ValueError(f"Unexpected data format in {json_file}: {type(raw_data)}")
         
-        # Build repair vocabulary from all transactions
+        # Build repair vocabulary
         self._build_repair_vocabulary(data)
         
-        # Track statistics
+        # Extract features and labels
         entity_stats = Counter()
         skipped_count = 0
         processed_count = 0
         
-        # Extract features and labels
         all_features = []
         all_labels = []
         all_payments = []
         
         for txn_idx, (txn_id, txn_data) in enumerate(data.items()):
             try:
-                # CRITICAL: Only train on transactions with 'after' sections
-                # Training requires before/after pairs to learn transformations
                 has_after = self._has_after_state(txn_data)
                 
                 if not has_after:
@@ -1126,27 +1044,17 @@ class DataProcessor:
                         logger.info(f"Skipping {txn_id}: No 'after' state (nothing to learn)")
                     continue
                 
-                # Get repair labels from 'ace' field
                 repairs = [r['id'] for r in txn_data.get('ace', [])]
-                
-                # Convert training format to feature-extraction format
-                # Training: {entity: {before: {...}, after: {...}}}
-                # Features: {entity: {...}} (just the before state)
                 payment_for_features = self._extract_before_state(txn_data)
                 
-                # Track which entities are present
                 present_entities = [k for k in payment_for_features.keys() 
                                    if k not in ['source', 'clearing', 'flags', 'parties']]
                 entity_stats.update(present_entities)
                 
-                # Log first few for verification
                 if processed_count < 3:
                     logger.info(f"Training on {txn_id}: Entities: {present_entities}, Repairs: {repairs}")
                 
-                # Extract 172 features from payment
                 features = self.feature_extractor.extract_features(payment_for_features)
-                
-                # Convert repair IDs to binary label vector
                 labels = self._repairs_to_labels(repairs)
                 
                 all_features.append(features)
@@ -1167,7 +1075,6 @@ class DataProcessor:
         features_array = np.array(all_features)
         labels_array = np.array(all_labels)
         
-        # Log summary statistics
         logger.info(f"\n{'='*70}")
         logger.info(f"DATA PROCESSING SUMMARY")
         logger.info(f"{'='*70}")
@@ -1178,26 +1085,19 @@ class DataProcessor:
         logger.info(f"Label shape: {labels_array.shape}")
         logger.info(f"Unique repairs: {len(self.repair_vocabulary)}")
         
-        # Log entity distribution
         if entity_stats:
             logger.info(f"\nEntity Distribution (trainable transactions):")
             for entity, count in entity_stats.most_common():
                 percentage = (count / processed_count) * 100
                 logger.info(f"  {entity}: {count} ({percentage:.1f}%)")
         
-        # Show feature statistics
         logger.info(f"\nFeature Statistics:")
         logger.info(f"  Non-zero features per transaction (avg): {(features_array != 0).sum(axis=1).mean():.1f}/{len(self.feature_extractor.feature_names)}")
         
         return features_array, labels_array, all_payments
     
     def _has_after_state(self, txn_data: Dict) -> bool:
-        """
-        Check if transaction has any entities with 'after' state.
-        
-        Returns True if we can learn from this transaction.
-        Training requires before/after pairs to see the transformations.
-        """
+        """Check if transaction has any entities with 'after' state"""
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1214,25 +1114,13 @@ class DataProcessor:
         return False
     
     def _extract_before_state(self, txn_data: Dict) -> Dict:
-        """
-        Extract 'before' state from training format.
-        
-        Handles variable entity presence - some payments have cdtr, some dbtr, etc.
-        
-        Training format:
-          {"cdtrAgt": {"before": {...}, "after": {...}, "diffs": [...]}}
-        
-        Returns format for feature extraction:
-          {"cdtrAgt": {...}}
-        """
+        """Extract 'before' state from training format"""
         payment = {}
         
-        # Copy top-level metadata
         for key in ['source', 'clearing', 'flags', 'parties']:
             if key in txn_data:
                 payment[key] = txn_data[key]
         
-        # Extract 'before' state from all possible entities
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1240,15 +1128,12 @@ class DataProcessor:
         ]
         
         for entity in possible_entities:
-            # Check case-insensitive
             for key in txn_data.keys():
                 if key.lower() == entity.lower():
                     entity_data = txn_data[key]
                     
-                    # If it has 'before', extract it
                     if isinstance(entity_data, dict) and 'before' in entity_data:
                         payment[entity] = entity_data['before']
-                    # Otherwise use directly (might be inference format)
                     elif isinstance(entity_data, dict):
                         payment[entity] = entity_data
                     
@@ -1257,20 +1142,13 @@ class DataProcessor:
         return payment
     
     def _build_repair_vocabulary(self, data: Dict):
-        """
-        Build repair ID vocabulary from all transactions.
-        
-        Creates bidirectional mapping:
-        - repair_vocabulary: repair_id → index
-        - idx_to_repair: index → repair_id
-        """
+        """Build repair ID vocabulary from all transactions"""
         all_repairs = set()
         
         for txn_data in data.values():
             for repair in txn_data.get('ace', []):
                 all_repairs.add(repair['id'])
         
-        # Sort for consistency
         sorted_repairs = sorted(all_repairs)
         
         self.repair_vocabulary = {repair_id: idx for idx, repair_id in enumerate(sorted_repairs)}
@@ -1279,14 +1157,7 @@ class DataProcessor:
         logger.info(f"Built vocabulary with {len(self.repair_vocabulary)} repairs: {sorted_repairs}")
     
     def _repairs_to_labels(self, repairs: List[str]) -> np.ndarray:
-        """
-        Convert repair IDs to binary label vector.
-        
-        Example:
-        repairs = ['6021', '6036']
-        vocabulary = {'6021': 0, '6035': 1, '6036': 2}
-        returns = [1.0, 0.0, 1.0]
-        """
+        """Convert repair IDs to binary label vector"""
         labels = np.zeros(len(self.repair_vocabulary))
         
         for repair_id in repairs:
@@ -1320,8 +1191,6 @@ class HybridRepairPredictor:
     2. Random Forest (fast, interpretable baseline)
     3. Neural Network (complex pattern learning)
     4. Ensemble (average RF + NN predictions)
-    
-    Goal: 90%+ repair prediction accuracy
     """
     
     def __init__(self, config: Config):
@@ -1334,23 +1203,7 @@ class HybridRepairPredictor:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     def train(self, train_file: str):
-        """
-        Train the hybrid model.
-        
-        Process:
-        1. Load and process training data
-        2. Split into train/val/test sets
-        3. Train Random Forest model
-        4. Train Neural Network model
-        5. Evaluate on test set
-        6. Save models if performance is good
-        
-        Args:
-            train_file: Path to JSON file with training data
-            
-        Returns:
-            Dictionary of test metrics
-        """
+        """Train the hybrid model"""
         logger.info("="*70)
         logger.info("TRAINING HYBRID REPAIR PREDICTOR")
         logger.info("="*70)
@@ -1360,7 +1213,7 @@ class HybridRepairPredictor:
         
         n = len(features)
         
-        # Handle small datasets (< 10 samples)
+        # Handle small datasets
         if n < 10:
             logger.warning(f"\n⚠️  Small dataset detected ({n} samples)")
             logger.warning("For datasets < 10 samples:")
@@ -1368,7 +1221,6 @@ class HybridRepairPredictor:
             logger.warning("  - Model will overfit - this is for demonstration only")
             logger.warning("  - Recommend 1000+ samples for production use\n")
             
-            # Use all data for everything (demonstration mode)
             X_train = features
             y_train = labels
             X_val = features
@@ -1396,7 +1248,7 @@ class HybridRepairPredictor:
         logger.info("\nTraining Random Forest model...")
         self.rf_model = MultiOutputClassifier(
             RandomForestClassifier(
-                n_estimators=min(200, max(10, n * 10)),  # Scale with dataset size
+                n_estimators=min(200, max(10, n * 10)),
                 max_depth=min(15, max(3, n // 2)),
                 min_samples_split=max(2, n // 10),
                 min_samples_leaf=1,
@@ -1409,15 +1261,11 @@ class HybridRepairPredictor:
         # Evaluate RF
         rf_val_pred = self.rf_model.predict_proba(X_val)
         
-        # CRITICAL FIX: Handle edge case where only one class is seen during training
-        # If all validation samples have the same repair, predict_proba returns (n, 1) not (n, 2)
         rf_val_pred_processed = []
         for pred in rf_val_pred:
             if pred.shape[1] == 1:
-                # Only one class seen - assume it's class 1 (repair present)
                 rf_val_pred_processed.append(np.ones(pred.shape[0]))
             else:
-                # Normal case: extract probability of class 1 (repair present)
                 rf_val_pred_processed.append(pred[:, 1])
         
         rf_val_pred = np.array(rf_val_pred_processed).T
@@ -1433,16 +1281,22 @@ class HybridRepairPredictor:
         
         # Train Neural Network
         logger.info("\nTraining Neural Network model...")
+        use_batchnorm = n >= 10
+        
+        if not use_batchnorm:
+            logger.warning("  Disabling BatchNorm due to small dataset")
+        
         self.ml_model = RepairPredictor(
             num_features=features.shape[1],
             num_repairs=labels.shape[1],
             hidden_dim=min(self.config.hidden_dim, max(32, n * 10)),
-            dropout=self.config.dropout
+            dropout=self.config.dropout,
+            use_batchnorm=use_batchnorm
         ).to(self.device)
         
         self._train_neural_network(X_train, y_train, X_val, y_val)
         
-        # Final evaluation on test set
+        # Final evaluation
         logger.info("\n" + "="*70)
         logger.info("FINAL TEST SET EVALUATION")
         logger.info("="*70)
@@ -1459,8 +1313,10 @@ class HybridRepairPredictor:
         train_dataset = RepairDataset(X_train, y_train)
         val_dataset = RepairDataset(X_val, y_val)
         
-        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size)
+        batch_size = min(self.config.batch_size, max(1, len(X_train) // 2))
+        
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size)
         
         optimizer = torch.optim.AdamW(
             self.ml_model.parameters(),
@@ -1526,7 +1382,7 @@ class HybridRepairPredictor:
         )
     
     def evaluate(self, X, y, loader=None):
-        """Evaluate model performance with comprehensive metrics"""
+        """Evaluate model performance"""
         if loader is None:
             dataset = RepairDataset(X, y)
             loader = DataLoader(dataset, batch_size=self.config.batch_size)
@@ -1549,29 +1405,13 @@ class HybridRepairPredictor:
         return self._compute_metrics(labels, predictions)
     
     def _compute_metrics(self, y_true, y_pred_probs, threshold=0.5):
-        """
-        Compute comprehensive evaluation metrics.
-        
-        Metrics:
-        - Exact Match: All repairs correct for a payment
-        - Hamming: Per-repair accuracy
-        - F1 (micro/macro): Precision-recall balance
-        - Precision: Of predicted repairs, how many are correct
-        - Recall: Of actual repairs, how many we found
-        """
+        """Compute comprehensive evaluation metrics"""
         y_pred = (y_pred_probs > threshold).astype(int)
         
-        # Exact match accuracy (all repairs correct)
         exact_match = np.mean(np.all(y_pred == y_true, axis=1))
-        
-        # Hamming accuracy (per-repair accuracy)
         hamming = accuracy_score(y_true.flatten(), y_pred.flatten())
-        
-        # F1 scores
         f1_micro = f1_score(y_true, y_pred, average='micro', zero_division=0)
         f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0)
-        
-        # Precision and recall
         precision = precision_score(y_true, y_pred, average='micro', zero_division=0)
         recall = recall_score(y_true, y_pred, average='micro', zero_division=0)
         
@@ -1585,28 +1425,7 @@ class HybridRepairPredictor:
         }
     
     def predict(self, payment: Dict, use_rules: bool = True, use_ml: bool = True) -> Dict:
-        """
-        Predict repairs for a payment (inference mode).
-        
-        Process:
-        1. Extract 172 features from payment
-        2. Apply deterministic rules (100% confidence)
-        3. Apply ML models (ensemble RF + NN)
-        4. Combine predictions
-        
-        Args:
-            payment: Payment dictionary (raw or before state)
-            use_rules: Whether to apply deterministic rules
-            use_ml: Whether to apply ML models
-            
-        Returns:
-            {
-                'repairs': List of repair IDs ['6021', '6036'],
-                'confidences': List of confidence scores [1.0, 0.87],
-                'sources': List of prediction sources ['rule', 'ml']
-            }
-        """
-        # Extract features
+        """Predict repairs for a payment"""
         features = self.feature_extractor.extract_features(payment)
         features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
         
@@ -1614,40 +1433,36 @@ class HybridRepairPredictor:
         confidences = []
         sources = []
         
-        # Apply deterministic rules first
+        # Apply rules
         if use_rules:
             rule_repairs, rule_confs = self.rules.predict_repairs(payment, features)
             repairs.extend(rule_repairs)
             confidences.extend(rule_confs)
             sources.extend(['rule'] * len(rule_repairs))
         
-        # Apply ML models
+        # Apply ML
         if use_ml:
             self.ml_model.eval()
             with torch.no_grad():
                 ml_probs = self.ml_model(features_tensor)[0].cpu().numpy()
             
-            # Also get RF predictions
+            # RF predictions
             rf_probs_raw = self.rf_model.predict_proba(features.reshape(1, -1))
             
-            # CRITICAL FIX: Handle single-class edge case
             rf_probs = []
             for pred in rf_probs_raw:
                 if pred.shape[1] == 1:
-                    # Only one class seen during training
                     rf_probs.append(1.0 if pred[0, 0] > 0.5 else 0.0)
                 else:
                     rf_probs.append(pred[0, 1])
             rf_probs = np.array(rf_probs)
             
-            # Ensemble: average RF and NN predictions
+            # Ensemble
             ensemble_probs = (ml_probs + rf_probs) / 2
             
-            # Add ML predictions above threshold
             for idx, prob in enumerate(ensemble_probs):
                 repair_id = self.processor.idx_to_repair[idx]
                 
-                # Skip if already predicted by rules
                 if repair_id in repairs:
                     continue
                 
@@ -1663,22 +1478,18 @@ class HybridRepairPredictor:
         }
     
     def save_models(self):
-        """Save all models and metadata to disk"""
+        """Save all models and metadata"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
-        # Save neural network
         torch.save(self.ml_model.state_dict(), 
                   os.path.join(self.config.model_dir, 'neural_model.pt'))
         
-        # Save RF model
         with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
             pickle.dump(self.rf_model, f)
         
-        # Save processor (contains repair vocabulary)
         with open(os.path.join(self.config.model_dir, 'processor.pkl'), 'wb') as f:
             pickle.dump(self.processor, f)
         
-        # Save config
         self.config.save(os.path.join(self.config.model_dir, 'config.json'))
         
         logger.info(f"\nModels saved to {self.config.model_dir}")
@@ -1687,15 +1498,12 @@ class HybridRepairPredictor:
         """Load saved models from disk"""
         self.config = Config.load(os.path.join(model_dir, 'config.json'))
         
-        # Load processor
         with open(os.path.join(model_dir, 'processor.pkl'), 'rb') as f:
             self.processor = pickle.load(f)
         
-        # Load RF model
         with open(os.path.join(model_dir, 'rf_model.pkl'), 'rb') as f:
             self.rf_model = pickle.load(f)
         
-        # Load neural network
         num_features = len(self.feature_extractor.feature_names)
         num_repairs = len(self.processor.repair_vocabulary)
         
@@ -1703,7 +1511,8 @@ class HybridRepairPredictor:
             num_features=num_features,
             num_repairs=num_repairs,
             hidden_dim=self.config.hidden_dim,
-            dropout=self.config.dropout
+            dropout=self.config.dropout,
+            use_batchnorm=True
         ).to(self.device)
         
         self.ml_model.load_state_dict(
@@ -1741,20 +1550,17 @@ def train_command(args):
 
 
 def predict_command(args):
-    """Predict repairs for a payment (inference on data without 'after' sections)"""
+    """Predict repairs for a payment"""
     predictor = HybridRepairPredictor(Config())
     predictor.load_models(args.model or './models')
     
     with open(args.input, 'r') as f:
         data = json.load(f)
     
-    # Handle different input formats
-    # Format 1: Single transaction wrapped in dict
     if isinstance(data, dict) and len(data) == 1:
         txn_id = list(data.keys())[0]
         payment_data = data[txn_id]
         
-        # Check if training format (has before/after) or inference format (raw)
         if predictor.processor._has_after_state(payment_data):
             logger.info(f"Detected training format with 'before/after' sections")
             logger.info(f"Extracting 'before' state for prediction...")
@@ -1763,7 +1569,6 @@ def predict_command(args):
             logger.info(f"Detected inference format (raw payment data)")
             payment = payment_data
     else:
-        # Format 2: Raw payment structure
         payment = data
     
     result = predictor.predict(payment)
