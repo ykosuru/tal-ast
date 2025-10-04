@@ -1,7 +1,7 @@
 """
 ace_repair_predictor.py
 Author: Yekesa Kosuru
-================================
+========================
 
 Enhanced ACE Payment Repair Predictor with:
 - Discovered pattern-based rules
@@ -1320,6 +1320,37 @@ class EnhancedHybridPredictor:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.class_weights = None
         self.analysis = analysis
+
+    def debug_features(self, payment: Dict) -> None:
+        """Debug helper to show extracted features"""
+        features = self.feature_extractor.extract_features(payment)
+        
+        logger.info("\n" + "="*60)
+        logger.info("FEATURE EXTRACTION DEBUG")
+        logger.info("="*60)
+        
+        important_features = {
+            0: 'has_bic',
+            15: 'has_iban',
+            25: 'has_clearing_id',
+            37: 'has_bank_name',
+            75: 'has_country_field'
+        }
+        
+        for idx, name in important_features.items():
+            logger.info(f"Feature[{idx:3d}] {name:20s}: {features[idx]:.3f}")
+        
+        # Show what was found in payment
+        payment_norm = self.feature_extractor._normalize_payment(payment)
+        bics = self.feature_extractor._find_all_values(payment_norm, 'bic')
+        clearings = self.feature_extractor._find_all_values(payment_norm, 'mmbid')
+        countries = self.feature_extractor._find_all_values(payment_norm, 'ctryofres')
+        
+        logger.info(f"\nValues found in payment:")
+        logger.info(f"  BICs: {bics}")
+        logger.info(f"  Clearing IDs: {clearings}")
+        logger.info(f"  Countries: {countries}")
+        logger.info("="*60 + "\n")
     
     def train(self, train_file: str):
         """Train the enhanced hybrid model"""
