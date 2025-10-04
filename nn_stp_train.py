@@ -90,7 +90,7 @@ class Config:
 
 
 # ============================================================================
-# FEATURE EXTRACTION (Same as original)
+# FEATURE EXTRACTION
 # ============================================================================
 
 class PaymentFeatureExtractor:
@@ -272,6 +272,7 @@ class PaymentFeatureExtractor:
         return features
     
     def _normalize_payment(self, payment: Dict) -> Dict:
+        """Recursively normalize dict keys to lowercase"""
         if isinstance(payment, dict):
             return {k.lower() if isinstance(k, str) else k: self._normalize_payment(v) 
                    for k, v in payment.items()}
@@ -279,10 +280,8 @@ class PaymentFeatureExtractor:
             return [self._normalize_payment(item) for item in payment]
         return payment
     
-    # Include all the extraction methods from original script
-    # (I'll include a few key ones, but in practice you'd copy all from original)
-    
     def _extract_bic_info(self, payment: Dict) -> Dict:
+        """Extract BIC-related features (15 features)"""
         bic_fields = self._find_all_values(payment, 'bic')
         has_bic = len(bic_fields) > 0
         bic_value = bic_fields[0] if bic_fields else None
@@ -305,11 +304,8 @@ class PaymentFeatureExtractor:
             'format_xxxxxxxxxxx': float(bic_value and len(str(bic_value)) == 11) if bic_value else 0.0
         }
     
-    # Copy all other _extract_* methods from original script
-    # For brevity, I'm showing structure - you'd include all methods
-    
     def _extract_iban_info(self, payment: Dict) -> Dict:
-        # Copy from original
+        """Extract IBAN-related features (10 features)"""
         iban_fields = self._find_all_values(payment, 'iban')
         has_iban = len(iban_fields) > 0
         iban_value = str(iban_fields[0]) if iban_fields else None
@@ -328,6 +324,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_clearing_info(self, payment: Dict) -> Dict:
+        """Extract clearing system features (12 features)"""
         clearing_fields = self._find_all_values(payment, 'mmbid')
         clearing_sys = self._find_all_values(payment, 'clrsysid')
         clearing_cd = self._find_all_values(payment, 'cd')
@@ -358,10 +355,8 @@ class PaymentFeatureExtractor:
             'has_system_code': float(len(clearing_sys) > 0 or len(clearing_cd) > 0)
         }
     
-    # Continue with all other extraction methods...
-    # (Copy from original script - too long to include all here)
-    
     def _extract_name_info(self, payment: Dict) -> Dict:
+        """Extract name-related features (18 features)"""
         bank_names = self._find_all_values(payment, 'nm')
         all_names = bank_names.copy()
         has_bank_name = len(bank_names) > 0
@@ -392,6 +387,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_address_info(self, payment: Dict) -> Dict:
+        """Extract address-related features (20 features)"""
         addresses = self._find_all_values(payment, 'adrline')
         postal_addr = self._find_all_values(payment, 'pstladr')
         has_address = len(addresses) > 0
@@ -422,6 +418,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_country_info(self, payment: Dict) -> Dict:
+        """Extract country-related features (15 features)"""
         countries = self._find_all_values(payment, 'ctryofres')
         countries.extend(self._find_all_values(payment, 'ctry'))
         has_country = len(countries) > 0
@@ -448,6 +445,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_account_info(self, payment: Dict) -> Dict:
+        """Extract account-related features (12 features)"""
         has_cdtr_acct = 'cdtracct' in payment
         has_dbtr_acct = 'dbtracct' in payment
         acct_ids = self._find_all_values(payment, 'id')
@@ -472,6 +470,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_entity_info(self, payment: Dict) -> Dict:
+        """Extract entity presence features (15 features)"""
         entities = {
             'cdtr': 'cdtr' in payment,
             'dbtr': 'dbtr' in payment,
@@ -510,6 +509,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_fininstn_info(self, payment: Dict) -> Dict:
+        """Extract financial institution ID features (10 features)"""
         fininstn_fields = self._find_all_values(payment, 'fininstnid')
         has_fininstn = len(fininstn_fields) > 0
         fininstn_entities = []
@@ -532,6 +532,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_remittance_info(self, payment: Dict) -> Dict:
+        """Extract remittance information features (12 features)"""
         rmt_fields = self._find_all_values(payment, 'ustrd')
         strd_fields = self._find_all_values(payment, 'strd')
         has_rmt = len(rmt_fields) > 0 or len(strd_fields) > 0
@@ -569,6 +570,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_flags_info(self, payment: Dict) -> Dict:
+        """Extract flags features (10 features)"""
         flags = payment.get('flags', {})
         flag_count = sum(1 for v in flags.values() if v) if flags else 0
         
@@ -586,6 +588,7 @@ class PaymentFeatureExtractor:
         }
     
     def _extract_structural_info(self, payment: Dict) -> Dict:
+        """Extract structural features (15 features)"""
         total_fields = self._count_all_fields(payment)
         total_entities = sum(1 for k in payment.keys() if isinstance(payment.get(k), dict))
         total_leaf = self._count_leaf_values(payment)
@@ -1037,7 +1040,7 @@ def compute_class_weights(y_train: np.ndarray, max_weight: float = 10.0) -> torc
 
 
 # ============================================================================
-# ML MODELS (Same as original)
+# ML MODELS
 # ============================================================================
 
 class RepairPredictor(nn.Module):
@@ -1084,7 +1087,7 @@ class RepairDataset(Dataset):
 
 
 # ============================================================================
-# DATA PROCESSOR (Same as original)
+# DATA PROCESSOR
 # ============================================================================
 
 class DataProcessor:
@@ -1102,6 +1105,7 @@ class DataProcessor:
         with open(json_file, 'r') as f:
             raw_data = json.load(f)
         
+        # Parse input format - FIXED to merge all dicts
         if isinstance(raw_data, list):
             if len(raw_data) == 0:
                 raise ValueError(f"Empty array in {json_file}")
@@ -1109,14 +1113,20 @@ class DataProcessor:
             if isinstance(raw_data[0], dict):
                 first_item = raw_data[0]
                 
+                # Check if values are dicts (transaction objects)
                 if all(isinstance(v, dict) for v in first_item.values()):
-                    data = first_item
-                    logger.info(f"Detected format: Array containing dict of {len(data)} transactions")
+                    # Merge all dicts in the array
+                    data = {}
+                    for item in raw_data:
+                        if isinstance(item, dict):
+                            data.update(item)
+                    logger.info(f"Detected format: Array of {len(raw_data)} dicts merged into {len(data)} transactions")
                 else:
                     data = {f"txn_{i:06d}": txn for i, txn in enumerate(raw_data)}
                     logger.info(f"Detected format: Array of {len(data)} transaction objects")
             else:
                 raise ValueError(f"Unexpected array format in {json_file}")
+                
         elif isinstance(raw_data, dict):
             data = raw_data
             logger.info(f"Detected format: Dict of {len(data)} transactions")
@@ -1161,6 +1171,10 @@ class DataProcessor:
                 all_payments.append(txn_data)
                 processed_count += 1
                 
+                # Progress logging for large datasets
+                if processed_count % 1000 == 0:
+                    logger.info(f"Progress: {processed_count}/{len(data)} transactions processed...")
+                
             except Exception as e:
                 logger.warning(f"Error processing transaction {txn_id}: {e}")
                 continue
@@ -1184,6 +1198,7 @@ class DataProcessor:
         return features_array, labels_array, all_payments
     
     def _has_after_state(self, txn_data: Dict) -> bool:
+        """Check if transaction has 'after' state in any entity"""
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1200,12 +1215,15 @@ class DataProcessor:
         return False
     
     def _extract_before_state(self, txn_data: Dict) -> Dict:
+        """Extract 'before' state from transaction for feature extraction"""
         payment = {}
         
+        # Copy metadata fields
         for key in ['source', 'clearing', 'flags', 'parties']:
             if key in txn_data:
                 payment[key] = txn_data[key]
         
+        # Extract 'before' state from entities
         possible_entities = [
             'cdtr', 'dbtr', 'cdtrAgt', 'dbtrAgt', 
             'cdtrAcct', 'dbtrAcct', 'instgAgt', 'instdAgt',
@@ -1227,6 +1245,7 @@ class DataProcessor:
         return payment
     
     def _build_repair_vocabulary(self, data: Dict):
+        """Build vocabulary of all unique repair codes"""
         all_repairs = set()
         
         for txn_data in data.values():
@@ -1241,6 +1260,7 @@ class DataProcessor:
         logger.info(f"Built vocabulary with {len(self.repair_vocabulary)} repairs: {sorted_repairs}")
     
     def _repairs_to_labels(self, repairs: List[str]) -> np.ndarray:
+        """Convert repair IDs to binary label vector"""
         labels = np.zeros(len(self.repair_vocabulary))
         
         for repair_id in repairs:
@@ -1251,6 +1271,7 @@ class DataProcessor:
         return labels
     
     def labels_to_repairs(self, labels: np.ndarray, threshold: float = 0.5) -> List[str]:
+        """Convert binary label vector to repair IDs"""
         repairs = []
         
         for idx, prob in enumerate(labels):
@@ -1383,7 +1404,6 @@ class EnhancedHybridPredictor:
         
         # Use weighted loss if class weights available
         if self.class_weights is not None and self.config.use_class_weights:
-            # Expand weights to match batch size
             criterion = nn.BCELoss(reduction='none')
         else:
             criterion = nn.BCELoss()
@@ -1556,13 +1576,12 @@ class EnhancedHybridPredictor:
         """Save all models and metadata"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
-        # Save model architecture info - more robust detection
-        # Count BatchNorm layers to determine if it was used
+        # Save model architecture info
         has_batchnorm = any(isinstance(layer, nn.BatchNorm1d) for layer in self.ml_model.network)
         
         model_info = {
             'num_features': self.ml_model.network[0].in_features,
-            'num_repairs': self.ml_model.network[-2].out_features,  # -2 because -1 is Sigmoid
+            'num_repairs': self.ml_model.network[-2].out_features,
             'hidden_dim': self.ml_model.network[0].out_features,
             'use_batchnorm': has_batchnorm
         }
@@ -1571,7 +1590,7 @@ class EnhancedHybridPredictor:
             json.dump(model_info, f, indent=2)
         
         torch.save(self.ml_model.state_dict(), 
-                os.path.join(self.config.model_dir, 'neural_model.pt'))
+                  os.path.join(self.config.model_dir, 'neural_model.pt'))
         
         with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
             pickle.dump(self.rf_model, f)
@@ -1593,7 +1612,6 @@ class EnhancedHybridPredictor:
         logger.info(f"Architecture: {model_info['num_features']} -> {model_info['hidden_dim']} -> "
                     f"{model_info['hidden_dim']//2} -> {model_info['num_repairs']}")
         logger.info(f"BatchNorm: {model_info['use_batchnorm']}")
-
 
     def load_models(self, model_dir: str):
         """Load saved models from disk"""
@@ -1646,7 +1664,7 @@ class EnhancedHybridPredictor:
         
         self.ml_model.load_state_dict(
             torch.load(os.path.join(model_dir, 'neural_model.pt'), 
-                    map_location=self.device)
+                      map_location=self.device)
         )
         self.ml_model.eval()
         
@@ -1735,7 +1753,7 @@ def evaluate_command(args):
         metrics = predictor.evaluate_detailed(features, labels)
     else:
         # Quick evaluation
-        self.ml_model.eval()
+        predictor.ml_model.eval()
         dataset = RepairDataset(features, labels)
         loader = DataLoader(dataset, batch_size=predictor.config.batch_size)
         
@@ -1798,11 +1816,10 @@ def main():
     elif args.command == 'predict':
         predict_command(args)
     elif args.command == 'evaluate':
-        eval_parser(args)
+        evaluate_command(args)
     else:
         parser.print_help()
 
 
 if __name__ == "__main__":
     main()
-
