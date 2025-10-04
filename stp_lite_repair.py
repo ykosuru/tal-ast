@@ -3,27 +3,27 @@ stp_lite_repair.py
 Author: Yekesa Kosuru
 ========================
 
-ACE Payment Repair Predictor using Rule-Based + LightGBM Hybrid Approach
+ACE Payment Repair Predictor using Rule-Based + XGBoost Hybrid Approach
 
-Key improvements over neural network version:
-- LightGBM handles small datasets (3,000 samples) better than neural nets
-- Built-in class balancing for imbalanced repairs
-- 10-100x faster training
+Key features:
+- XGBoost handles small datasets (3,000 samples) well
+- Built-in regularization prevents overfitting
+- 10-100x faster than neural networks
 - Interpretable feature importance
-- No overfitting on small data
+- Ensemble with Random Forest for diversity
 
 Architecture:
 1. Deterministic Rules (100% confidence) - applied first
-2. LightGBM (primary ML model) - gradient boosting
+2. XGBoost (primary ML model) - gradient boosting
 3. Random Forest (ensemble member) - for diversity
 4. Ensemble voting for final prediction
 
 Usage:
-    # Train on directory of JSON files
-    python stp_lite_repair.py train --input ./data_directory --epochs 500
-    
-    # Analyze repair distribution in your data
+    # Analyze repair distribution first (CRITICAL!)
     python stp_lite_repair.py analyze --input ./data_directory
+    
+    # Train on directory of JSON files
+    python stp_lite_repair.py train --input ./data_directory --estimators 500
     
     # Predict repairs for single payment
     python stp_lite_repair.py predict --input payment.json --output result.json
@@ -48,7 +48,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
-from lightgbm import LGBMClassifier
+from xgboost import XGBClassifier
 
 # Configure logging
 logging.basicConfig(
@@ -64,14 +64,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    """Configuration optimized for small datasets (3,000-10,000 samples)"""
+    """Configuration optimized for small datasets with XGBoost"""
     
-    # LightGBM settings (optimized for tabular data)
-    lgbm_n_estimators: int = 500
-    lgbm_max_depth: int = 8
-    lgbm_learning_rate: float = 0.05
-    lgbm_num_leaves: int = 31
-    lgbm_min_child_samples: int = 20
+    # XGBoost settings (optimized for tabular data)
+    xgb_n_estimators: int = 500
+    xgb_max_depth: int = 6
+    xgb_learning_rate: float = 0.05
+    xgb_min_child_weight: int = 3
+    xgb_gamma: float = 0.1  # Regularization
+    xgb_subsample: float = 0.8
+    xgb_colsample_bytree: float = 0.8
+    xgb_reg_alpha: float = 0.1  # L1 regularization
+    xgb_reg_lambda: float = 1.0  # L2 regularization
     
     # Random Forest settings (ensemble diversity)
     rf_n_estimators: int = 200
@@ -87,7 +91,7 @@ class Config:
     model_dir: str = "./models"
     
     # Prediction thresholds
-    ml_threshold: float = 0.5  # Fixed threshold (no dynamic adjustment)
+    ml_threshold: float = 0.5  # Fixed threshold
     rule_confidence: float = 1.0
     min_confidence_rare_repairs: float = 0.7  # Higher bar for rare repairs
     
@@ -108,7 +112,7 @@ class Config:
 
 
 # ============================================================================
-# FEATURE EXTRACTION
+# FEATURE EXTRACTION (Same as before - no changes needed)
 # ============================================================================
 
 class PaymentFeatureExtractor:
@@ -309,9 +313,6 @@ class PaymentFeatureExtractor:
         elif isinstance(payment, list):
             return [self._normalize_payment(item) for item in payment]
         return payment
-    
-    # All extraction methods from previous version
-    # (Copying only signatures to save space - use full implementation from previous version)
     
     def _extract_bic_info(self, payment: Dict) -> Dict:
         bic_fields = self._find_all_values(payment, 'bic')
@@ -779,7 +780,7 @@ class DeterministicRules:
             logger.info(f"Loaded {len(self.discovered_rules)} discovered rules")
     
     def predict_repairs(self, payment: Dict, features: np.ndarray) -> Tuple[List[str], List[float]]:
-        """Apply deterministic rules"""
+        """Apply deterministic rules and return repairs with confidences"""
         repairs = []
         confidences = []
         payment = self._normalize(payment)
@@ -815,13 +816,15 @@ class DeterministicRules:
             if self.debug_mode:
                 logger.info("✓ Rule: 6036 (Name from BIC)")
         
-        # Apply discovered rules
+        # Apply discovered rules with high confidence
         for rule in self.discovered_rules:
             if rule['confidence'] >= 0.95 and rule['repair_id'] not in repairs:
                 if self._check_rule_condition(payment, features, rule):
                     repairs.append(rule['repair_id'])
                     confidences.append(rule['confidence'])
                     self.rule_stats[f"{rule['repair_id']}_discovered"] += 1
+                    if self.debug_mode:
+                        logger.info(f"✓ Rule: {rule['repair_id']} (Discovered)")
         
         if self.debug_mode:
             logger.info(f"Total rule predictions: {len(repairs)}")
@@ -830,6 +833,7 @@ class DeterministicRules:
         return repairs, confidences
     
     def _normalize(self, payment: Dict) -> Dict:
+        """Recursively normalize payment keys to lowercase"""
         if isinstance(payment, dict):
             return {k.lower() if isinstance(k, str) else k: self._normalize(v) 
                    for k, v in payment.items()}
@@ -838,15 +842,19 @@ class DeterministicRules:
         return payment
     
     def _needs_country_from_bic(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if country should be derived from BIC"""
         return features[0] > 0.5 and features[75] < 0.5  # has_bic and not has_country
     
     def _needs_bic_from_clearing(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if BIC should be looked up from clearing ID"""
         return features[25] > 0.5 and features[0] < 0.5  # has_clearing and not has_bic
     
     def _needs_bank_name_from_bic(self, payment: Dict, features: np.ndarray) -> bool:
+        """Check if bank name should be looked up from BIC"""
         return features[0] > 0.5 and features[37] < 0.5  # has_bic and not has_name
     
     def _check_rule_condition(self, payment: Dict, features: np.ndarray, rule: Dict) -> bool:
+        """Evaluate rule condition from discovered rules"""
         condition = rule.get('condition', '')
         if 'AND' in condition:
             parts = [p.strip() for p in condition.split('AND')]
@@ -854,6 +862,7 @@ class DeterministicRules:
         return self._eval_condition_part(payment, features, condition)
     
     def _eval_condition_part(self, payment: Dict, features: np.ndarray, condition: str) -> bool:
+        """Evaluate a single condition part"""
         condition = condition.lower()
         if 'not has_bic' in condition:
             return features[0] < 0.5
@@ -868,9 +877,11 @@ class DeterministicRules:
         return False
     
     def print_stats(self):
+        """Print rule firing statistics"""
         logger.info("\nRule Statistics:")
         for rule, count in self.rule_stats.most_common():
             logger.info(f"  {rule}: {count}")
+
 
 # ============================================================================
 # PER-REPAIR METRICS
@@ -993,9 +1004,9 @@ class DataProcessor:
     Load and process payment data from files or directories.
     
     Supports:
-    - Single JSON file
-    - Directory of JSON files
-    - Format: {"txn_id": {...}, "txn_id2": {...}}
+    - Single JSON file: {"txn_id": {...}, ...}
+    - Directory of JSON files: each file contains {"txn_id": {...}, ...}
+    - Automatic transaction merging from multiple files
     """
     
     def __init__(self):
@@ -1112,7 +1123,7 @@ class DataProcessor:
     def analyze_repair_distribution(self, path: str) -> Dict:
         """
         Analyze repair distribution in dataset.
-        Critical for understanding what model can/cannot learn.
+        CRITICAL for understanding what model can/cannot learn.
         
         Returns:
             Dictionary with repair statistics
@@ -1283,32 +1294,32 @@ class DataProcessor:
 
 
 # ============================================================================
-# HYBRID PREDICTOR (RULES + LIGHTGBM + RANDOM FOREST)
+# HYBRID PREDICTOR (RULES + XGBOOST + RANDOM FOREST)
 # ============================================================================
 
 class HybridPredictor:
     """
-    Hybrid predictor optimized for small datasets (3,000-10,000 samples).
+    Hybrid predictor optimized for small datasets using XGBoost.
     
     Architecture:
     1. Deterministic Rules (100% confidence) - applied first
-    2. LightGBM (primary ML model) - gradient boosting
+    2. XGBoost (primary ML model) - gradient boosting
     3. Random Forest (ensemble diversity)
     4. Ensemble voting for final prediction
     
-    Why LightGBM over Neural Network:
-    - Better for tabular data (proven in research)
-    - Handles small datasets well
-    - Built-in class balancing
-    - 10-100x faster training
-    - Interpretable (feature importance)
+    Why XGBoost:
+    - Excellent for tabular data
+    - Handles small datasets well (3,000 samples)
+    - Built-in regularization prevents overfitting
+    - Fast training
+    - Interpretable feature importance
     """
     
     def __init__(self, config: Config, analysis: Optional[Dict] = None):
         self.config = config
         self.feature_extractor = PaymentFeatureExtractor()
         self.rules = DeterministicRules(analysis)
-        self.lgbm_model = None
+        self.xgb_model = None
         self.rf_model = None
         self.processor = DataProcessor()
         self.analysis = analysis
@@ -1321,12 +1332,12 @@ class HybridPredictor:
         Process:
         1. Load and analyze data
         2. Split train/val/test
-        3. Train LightGBM (primary)
+        3. Train XGBoost (primary)
         4. Train Random Forest (diversity)
         5. Evaluate and save
         """
         logger.info("="*70)
-        logger.info("TRAINING HYBRID PREDICTOR (LIGHTGBM + RULES)")
+        logger.info("TRAINING HYBRID PREDICTOR (XGBOOST + RULES)")
         logger.info("="*70)
         
         # Load data
@@ -1334,7 +1345,7 @@ class HybridPredictor:
         
         n = len(features)
         
-        # Analyze repair distribution first
+        # Analyze repair distribution
         logger.info("\nAnalyzing repair distribution...")
         self._analyze_repair_support(labels)
         
@@ -1358,35 +1369,68 @@ class HybridPredictor:
         
         logger.info(f"\nData split: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
         
-        # Train LightGBM (primary model)
+        # Compute scale_pos_weight for each repair (handles class imbalance)
+        scale_pos_weights = {}
+        for idx in range(y_train.shape[1]):
+            pos_count = y_train[:, idx].sum()
+            neg_count = len(y_train) - pos_count
+            if pos_count > 0:
+                scale_pos_weights[idx] = neg_count / pos_count
+            else:
+                scale_pos_weights[idx] = 1.0
+        
+        # Train XGBoost (primary model)
         logger.info("\n" + "="*70)
-        logger.info("TRAINING LIGHTGBM (Primary Model)")
+        logger.info("TRAINING XGBOOST (Primary Model)")
         logger.info("="*70)
         
-        self.lgbm_model = MultiOutputClassifier(
-            LGBMClassifier(
-                n_estimators=self.config.lgbm_n_estimators,
-                max_depth=self.config.lgbm_max_depth,
-                learning_rate=self.config.lgbm_learning_rate,
-                num_leaves=self.config.lgbm_num_leaves,
-                min_child_samples=self.config.lgbm_min_child_samples,
-                class_weight='balanced',  # Automatic class balancing
+        xgb_estimators = []
+        for idx in range(labels.shape[1]):
+            repair_id = self.processor.idx_to_repair[idx]
+            
+            xgb = XGBClassifier(
+                n_estimators=self.config.xgb_n_estimators,
+                max_depth=self.config.xgb_max_depth,
+                learning_rate=self.config.xgb_learning_rate,
+                min_child_weight=self.config.xgb_min_child_weight,
+                gamma=self.config.xgb_gamma,
+                subsample=self.config.xgb_subsample,
+                colsample_bytree=self.config.xgb_colsample_bytree,
+                reg_alpha=self.config.xgb_reg_alpha,
+                reg_lambda=self.config.xgb_reg_lambda,
+                scale_pos_weight=scale_pos_weights[idx],  # Handle imbalance
                 random_state=42,
-                verbose=-1  # Suppress output
+                eval_metric='logloss',
+                early_stopping_rounds=50,
+                verbosity=0
             )
-        )
+            
+            # Train with validation set for early stopping
+            if len(X_val) > 0:
+                xgb.fit(
+                    X_train, y_train[:, idx],
+                    eval_set=[(X_val, y_val[:, idx])],
+                    verbose=False
+                )
+            else:
+                xgb.fit(X_train, y_train[:, idx])
+            
+            xgb_estimators.append(xgb)
+            
+            if (idx + 1) % 5 == 0:
+                logger.info(f"  Trained {idx + 1}/{labels.shape[1]} XGBoost models...")
         
-        logger.info("Training LightGBM...")
-        self.lgbm_model.fit(X_train, y_train)
-        logger.info("✓ LightGBM training complete")
+        self.xgb_model = xgb_estimators
+        logger.info("✓ XGBoost training complete")
         
-        # Evaluate LightGBM on validation set
-        lgbm_val_pred = self._predict_ml(X_val, use_lgbm=True, use_rf=False)
-        lgbm_val_pred_binary = (lgbm_val_pred > 0.5).astype(int)
-        lgbm_exact_match = np.mean(np.all(lgbm_val_pred_binary == y_val, axis=1))
-        lgbm_hamming = np.mean(lgbm_val_pred_binary == y_val)
-        
-        logger.info(f"LightGBM validation - Exact Match: {lgbm_exact_match:.1%}, Hamming: {lgbm_hamming:.1%}")
+        # Evaluate XGBoost on validation set
+        if len(X_val) > 0:
+            xgb_val_pred = self._predict_ml(X_val, use_xgb=True, use_rf=False)
+            xgb_val_pred_binary = (xgb_val_pred > 0.5).astype(int)
+            xgb_exact_match = np.mean(np.all(xgb_val_pred_binary == y_val, axis=1))
+            xgb_hamming = np.mean(xgb_val_pred_binary == y_val)
+            
+            logger.info(f"XGBoost validation - Exact Match: {xgb_exact_match:.1%}, Hamming: {xgb_hamming:.1%}")
         
         # Train Random Forest (ensemble diversity)
         logger.info("\n" + "="*70)
@@ -1410,20 +1454,22 @@ class HybridPredictor:
         logger.info("✓ Random Forest training complete")
         
         # Evaluate Random Forest
-        rf_val_pred = self._predict_ml(X_val, use_lgbm=False, use_rf=True)
-        rf_val_pred_binary = (rf_val_pred > 0.5).astype(int)
-        rf_exact_match = np.mean(np.all(rf_val_pred_binary == y_val, axis=1))
-        rf_hamming = np.mean(rf_val_pred_binary == y_val)
-        
-        logger.info(f"Random Forest validation - Exact Match: {rf_exact_match:.1%}, Hamming: {rf_hamming:.1%}")
+        if len(X_val) > 0:
+            rf_val_pred = self._predict_ml(X_val, use_xgb=False, use_rf=True)
+            rf_val_pred_binary = (rf_val_pred > 0.5).astype(int)
+            rf_exact_match = np.mean(np.all(rf_val_pred_binary == y_val, axis=1))
+            rf_hamming = np.mean(rf_val_pred_binary == y_val)
+            
+            logger.info(f"Random Forest validation - Exact Match: {rf_exact_match:.1%}, Hamming: {rf_hamming:.1%}")
         
         # Evaluate ensemble
-        ensemble_val_pred = self._predict_ml(X_val, use_lgbm=True, use_rf=True)
-        ensemble_val_pred_binary = (ensemble_val_pred > 0.5).astype(int)
-        ensemble_exact_match = np.mean(np.all(ensemble_val_pred_binary == y_val, axis=1))
-        ensemble_hamming = np.mean(ensemble_val_pred_binary == y_val)
-        
-        logger.info(f"Ensemble validation - Exact Match: {ensemble_exact_match:.1%}, Hamming: {ensemble_hamming:.1%}")
+        if len(X_val) > 0:
+            ensemble_val_pred = self._predict_ml(X_val, use_xgb=True, use_rf=True)
+            ensemble_val_pred_binary = (ensemble_val_pred > 0.5).astype(int)
+            ensemble_exact_match = np.mean(np.all(ensemble_val_pred_binary == y_val, axis=1))
+            ensemble_hamming = np.mean(ensemble_val_pred_binary == y_val)
+            
+            logger.info(f"Ensemble validation - Exact Match: {ensemble_exact_match:.1%}, Hamming: {ensemble_hamming:.1%}")
         
         # Final test evaluation
         logger.info("\n" + "="*70)
@@ -1470,13 +1516,13 @@ class HybridPredictor:
             logger.info(f"  {', '.join(rare_repairs)}")
             logger.info(f"  These will be difficult for ML to learn. Consider adding expert rules.")
     
-    def _predict_ml(self, X: np.ndarray, use_lgbm: bool = True, use_rf: bool = True) -> np.ndarray:
+    def _predict_ml(self, X: np.ndarray, use_xgb: bool = True, use_rf: bool = True) -> np.ndarray:
         """
-        Get ML predictions (LightGBM and/or Random Forest).
+        Get ML predictions (XGBoost and/or Random Forest).
         
         Args:
             X: Features
-            use_lgbm: Use LightGBM predictions
+            use_xgb: Use XGBoost predictions
             use_rf: Use Random Forest predictions
             
         Returns:
@@ -1484,16 +1530,16 @@ class HybridPredictor:
         """
         predictions = []
         
-        if use_lgbm and self.lgbm_model is not None:
-            lgbm_probs = []
-            for estimator in self.lgbm_model.estimators_:
+        if use_xgb and self.xgb_model is not None:
+            xgb_probs = []
+            for estimator in self.xgb_model:
                 pred = estimator.predict_proba(X)
                 if pred.shape[1] == 2:
-                    lgbm_probs.append(pred[:, 1])
+                    xgb_probs.append(pred[:, 1])
                 else:
-                    lgbm_probs.append(pred[:, 0])
-            lgbm_probs = np.column_stack(lgbm_probs)
-            predictions.append(lgbm_probs)
+                    xgb_probs.append(pred[:, 0])
+            xgb_probs = np.column_stack(xgb_probs)
+            predictions.append(xgb_probs)
         
         if use_rf and self.rf_model is not None:
             rf_probs = []
@@ -1559,7 +1605,7 @@ class HybridPredictor:
                 if repair_id in repairs:
                     continue
                 
-                # Fixed threshold (more conservative than dynamic)
+                # Fixed threshold
                 threshold = self.config.ml_threshold  # 0.5
                 
                 # Higher bar for rare repairs (avoid false positives)
@@ -1596,13 +1642,65 @@ class HybridPredictor:
         
         return metrics
     
+    def get_feature_importance(self, top_n: int = 20) -> Dict:
+        """
+        Get feature importance from XGBoost models.
+        
+        Args:
+            top_n: Number of top features to return per repair
+            
+        Returns:
+            Dictionary mapping repair_id to top features
+        """
+        if self.xgb_model is None:
+            raise ValueError("Model not trained yet")
+        
+        importance_by_repair = {}
+        
+        for idx, estimator in enumerate(self.xgb_model):
+            repair_id = self.processor.idx_to_repair[idx]
+            
+            # Get feature importance
+            importance = estimator.feature_importances_
+            
+            # Get top N features
+            top_indices = np.argsort(importance)[::-1][:top_n]
+            top_features = [
+                (self.feature_extractor.feature_names[i], importance[i])
+                for i in top_indices
+            ]
+            
+            importance_by_repair[repair_id] = top_features
+        
+        return importance_by_repair
+    
+    def print_feature_importance(self, repair_id: Optional[str] = None):
+        """Print feature importance for a repair or all repairs"""
+        importance = self.get_feature_importance()
+        
+        if repair_id:
+            if repair_id not in importance:
+                logger.error(f"Repair {repair_id} not found")
+                return
+            
+            logger.info(f"\nTop Features for Repair {repair_id}:")
+            logger.info("-" * 50)
+            for feature, score in importance[repair_id]:
+                logger.info(f"  {feature:<40} {score:.4f}")
+        else:
+            for rid, features in importance.items():
+                logger.info(f"\nTop Features for Repair {rid}:")
+                logger.info("-" * 50)
+                for feature, score in features[:10]:  # Top 10 for each
+                    logger.info(f"  {feature:<40} {score:.4f}")
+    
     def save_models(self):
         """Save all models and metadata"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
-        # Save LightGBM
-        with open(os.path.join(self.config.model_dir, 'lgbm_model.pkl'), 'wb') as f:
-            pickle.dump(self.lgbm_model, f)
+        # Save XGBoost
+        with open(os.path.join(self.config.model_dir, 'xgb_model.pkl'), 'wb') as f:
+            pickle.dump(self.xgb_model, f)
         
         # Save Random Forest
         with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
@@ -1635,9 +1733,9 @@ class HybridPredictor:
         with open(os.path.join(model_dir, 'processor.pkl'), 'rb') as f:
             self.processor = pickle.load(f)
         
-        # Load LightGBM
-        with open(os.path.join(model_dir, 'lgbm_model.pkl'), 'rb') as f:
-            self.lgbm_model = pickle.load(f)
+        # Load XGBoost
+        with open(os.path.join(model_dir, 'xgb_model.pkl'), 'rb') as f:
+            self.xgb_model = pickle.load(f)
         
         # Load Random Forest
         with open(os.path.join(model_dir, 'rf_model.pkl'), 'rb') as f:
@@ -1666,7 +1764,7 @@ class HybridPredictor:
 def train_command(args):
     """Train the model"""
     config = Config()
-    config.lgbm_n_estimators = args.estimators
+    config.xgb_n_estimators = args.estimators
     
     # Load analysis if provided
     analysis = None
@@ -1688,6 +1786,13 @@ def train_command(args):
     else:
         gap = 0.90 - metrics['overall']['exact_match_accuracy']
         logger.info(f"Gap to 90%: {gap:.1%}")
+    
+    # Print feature importance for top repairs
+    if args.feature_importance:
+        logger.info("\n" + "="*70)
+        logger.info("FEATURE IMPORTANCE")
+        logger.info("="*70)
+        predictor.print_feature_importance()
 
 
 def analyze_command(args):
@@ -1767,21 +1872,24 @@ def evaluate_command(args):
 def main():
     """CLI entry point"""
     parser = argparse.ArgumentParser(
-        description='ACE Payment Repair Predictor (LightGBM + Rules)',
+        description='ACE Payment Repair Predictor (XGBoost + Rules)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Analyze your data first (IMPORTANT!)
-  python ace_repair_predictor.py analyze --input ./data
+  # Analyze your data FIRST (CRITICAL!)
+  python stp_lite_repair.py analyze --input ./data
   
   # Train on directory
-  python ace_repair_predictor.py train --input ./data --estimators 500
+  python stp_lite_repair.py train --input ./data --estimators 500
+  
+  # Train with feature importance
+  python stp_lite_repair.py train --input ./data --feature-importance
   
   # Predict for payment
-  python ace_repair_predictor.py predict --input payment.json
+  python stp_lite_repair.py predict --input payment.json
   
   # Evaluate with details
-  python ace_repair_predictor.py evaluate --input ./test_data --detailed
+  python stp_lite_repair.py evaluate --input ./test_data --detailed
         """
     )
     
@@ -1791,7 +1899,8 @@ Examples:
     train_parser = subparsers.add_parser('train', help='Train model')
     train_parser.add_argument('--input', required=True, help='Training data path')
     train_parser.add_argument('--analysis', help='Analysis JSON (optional)')
-    train_parser.add_argument('--estimators', type=int, default=500, help='LightGBM estimators')
+    train_parser.add_argument('--estimators', type=int, default=500, help='XGBoost estimators')
+    train_parser.add_argument('--feature-importance', action='store_true', help='Show feature importance')
     
     # ANALYZE
     analyze_parser = subparsers.add_parser('analyze', help='Analyze repair distribution')
