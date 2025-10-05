@@ -455,12 +455,17 @@ class DynamicMemorizationModel:
             if not isinstance(entity_data, dict):
                 continue
             
+            # Skip metadata fields
+            if entity_name in ['source', 'clearing', 'parties', 'flags', 'ace']:
+                continue
+            
+            # For prediction input, entities are direct (no 'before' wrapper)
+            # For training data, they have 'before' and 'after'
             if 'before' in entity_data:
                 current_state = entity_data['before']
-            elif 'after' not in entity_data:
-                current_state = entity_data
             else:
-                continue
+                # Direct entity data (prediction input format)
+                current_state = entity_data
             
             if not current_state:
                 continue
@@ -845,6 +850,10 @@ def main():
             if not isinstance(entity_data, dict):
                 continue
             
+            # Skip metadata fields
+            if entity_name in ['source', 'clearing', 'parties', 'flags', 'ace']:
+                continue
+            
             if 'before' in entity_data and 'after' in entity_data:
                 print(f"\n  Entity: {entity_name}")
                 
@@ -857,6 +866,12 @@ def main():
                     print(f"    Added fields: {transformation['added_fields'][:5]}")
                 if transformation['filled_fields']:
                     print(f"    Filled fields: {transformation['filled_fields'][:5]}")
+            else:
+                print(f"\n  Entity: {entity_name}")
+                print(f"    Current state only (no transformation to analyze)")
+                # Show fingerprint for current state
+                fingerprint = discovery.create_pattern_fingerprint(entity_data)
+                print(f"    Pattern fingerprint: {fingerprint}")
     
     else:
         parser.print_help()
