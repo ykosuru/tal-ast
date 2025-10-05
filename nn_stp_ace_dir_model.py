@@ -1,14 +1,11 @@
-# Print learning summary
-        self.ace_learner.print_summary()
-        
-        if processed_count == 0:
-            raise ValueError(f"No valid transactions with ACE repairs found in {path}")"""
+#!/usr/bin/env python3
+"""
 ace_repair_predictor.py
 =======================
 Production-ready ACE Payment Repair Predictor
 Learns from diffs and ACE repairs to predict which repairs should be applied
 
-Author: Production Version 4.1
+Author: Production Version 4.2 (Fixed)
 """
 
 import json
@@ -37,6 +34,45 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def safe_get_repair_id(repair_data: Any) -> str:
+    """Safely extract repair ID from potentially complex data structure"""
+    if isinstance(repair_data, str):
+        return repair_data
+    elif isinstance(repair_data, (int, float)):
+        return str(repair_data)
+    elif isinstance(repair_data, dict):
+        # Try common patterns for nested IDs
+        for key in ['id', 'value', 'repair_id', 'ID']:
+            if key in repair_data:
+                value = repair_data[key]
+                if isinstance(value, (str, int, float)):
+                    return str(value)
+                elif isinstance(value, dict):
+                    # Recursively try to extract
+                    return safe_get_repair_id(value)
+        # If no valid ID found, return string representation
+        return str(hash(frozenset(repair_data.items())))  # Create hashable representation
+    else:
+        return str(repair_data)
+
+
+def ensure_hashable(value: Any) -> str:
+    """Ensure a value is hashable by converting to string"""
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    elif isinstance(value, dict):
+        # Create a string representation of the dict
+        return str(sorted(value.items()))
+    elif isinstance(value, (list, tuple)):
+        return str(value)
+    else:
+        return str(value)
 
 
 # ============================================================================
@@ -71,7 +107,7 @@ class Config:
 
 
 # ============================================================================
-# ACE REPAIR LEARNER (Enhanced)
+# ACE REPAIR LEARNER (Enhanced with fixes for dict handling)
 # ============================================================================
 
 def _repair_pattern_factory():
@@ -85,8 +121,8 @@ def _repair_pattern_factory():
         'descriptions': [],
         'codes': Counter(),
         'fields': Counter(),
-        'co_occurring_repairs': Counter(),  # Track which repairs occur together
-        'entity_field_patterns': defaultdict(Counter)  # Detailed entity.field patterns
+        'co_occurring_repairs': Counter(),
+        'entity_field_patterns': defaultdict(Counter)
     }
 
 
@@ -95,15 +131,15 @@ class AceRepairLearner:
     
     def __init__(self):
         self.repair_patterns = defaultdict(_repair_pattern_factory)
-        self.repair_taxonomy = {}  # Complete repair info
-        self.repair_cooccurrence = defaultdict(Counter)  # Which repairs occur together
-        self.repair_to_diffs_mapping = defaultdict(list)  # Map repairs to typical diffs
-        self.entity_repair_associations = defaultdict(Counter)  # Which entities need which repairs
+        self.repair_taxonomy = {}
+        self.repair_cooccurrence = defaultdict(Counter)
+        self.repair_to_diffs_mapping = defaultdict(list)
+        self.entity_repair_associations = defaultdict(Counter)
         self.lookup_tables = {
             'bic_to_name': {},
             'bic_to_address': {},
             'country_extractions': Counter(),
-            'clearing_to_bic': {}  # Add clearing to BIC mapping
+            'clearing_to_bic': {}
         }
         
     def learn_from_transaction(self, txn_id: str, txn_data: Dict) -> Dict:
@@ -114,10 +150,18 @@ class AceRepairLearner:
         repair_details = {}
         
         for repair in txn_data.get('ace', []):
-            repair_id = repair.get('id', 'unknown')
+            # Safely extract repair ID
+            repair_id_raw = repair.get('id', 'unknown')
+            repair_id = safe_get_repair_id(repair_id_raw)
+            
             repair_code = repair.get('code', 'I')
             repair_field = repair.get('field', '')
             repair_text = repair.get('text', '')
+            
+            # Ensure all values are strings
+            repair_code = str(repair_code) if repair_code else 'I'
+            repair_field = str(repair_field) if repair_field else ''
+            repair_text = str(repair_text) if repair_text else ''
             
             repairs_in_txn.append(repair_id)
             repair_details[repair_id] = {
@@ -175,7 +219,7 @@ class AceRepairLearner:
             'has_address_changes': False,
             'has_country_changes': False,
             'has_clearing_changes': False,
-            'specific_repairs_indicated': set()  # Which repairs are likely needed
+            'specific_repairs_indicated': set()
         }
         
         entities_with_diffs = ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'instdAgt',
@@ -190,11 +234,13 @@ class AceRepairLearner:
             if not isinstance(entity_data, dict) or 'diffs' not in entity_data:
                 continue
             
-            diff_features['affected_entities'].add(entity_key.lower())
+            # Ensure entity key is hashable
+            entity_key_str = ensure_hashable(entity_key).lower()
+            diff_features['affected_entities'].add(entity_key_str)
             
             # Track which repairs are associated with this entity
             for repair_id in repairs:
-                self.entity_repair_associations[entity_key.lower()][repair_id] += 1
+                self.entity_repair_associations[entity_key_str][repair_id] += 1
             
             # Process each diff
             for diff in entity_data.get('diffs', []):
@@ -203,16 +249,19 @@ class AceRepairLearner:
                 value = diff.get('val', '')
                 desc = diff.get('desc', '')
                 
+                # Ensure field path is hashable
+                field_path_str = ensure_hashable(field_path)
+                
                 # Update counts
                 if action == 'added':
                     diff_features['num_additions'] += 1
                     # Check for specific repair indicators
-                    if 'ctry' in field_path.lower() and value and len(value) == 2:
-                        diff_features['specific_repairs_indicated'].add('6021')  # Country extraction
-                    if 'bicfi' in field_path.lower():
-                        diff_features['specific_repairs_indicated'].add('6035')  # BIC lookup
-                    if 'nm' in field_path.lower():
-                        diff_features['specific_repairs_indicated'].add('6036')  # Name lookup
+                    if 'ctry' in field_path_str.lower() and value and len(str(value)) == 2:
+                        diff_features['specific_repairs_indicated'].add('6021')
+                    if 'bicfi' in field_path_str.lower():
+                        diff_features['specific_repairs_indicated'].add('6035')
+                    if 'nm' in field_path_str.lower():
+                        diff_features['specific_repairs_indicated'].add('6036')
                         
                 elif action == 'dropped':
                     diff_features['num_drops'] += 1
@@ -220,20 +269,20 @@ class AceRepairLearner:
                     diff_features['num_transformations'] += 1
                 
                 # Track affected fields
-                field_lower = field_path.lower()
+                field_lower = field_path_str.lower()
                 diff_features['affected_fields'].add(field_lower)
                 
                 # Map this diff pattern to repairs
                 for repair_id in repairs:
                     self.repair_to_diffs_mapping[repair_id].append({
-                        'entity': entity_key.lower(),
+                        'entity': entity_key_str,
                         'field': field_lower,
                         'action': action,
                         'has_value': bool(value)
                     })
                     
                     # Track entity.field patterns for each repair
-                    pattern_key = f"{entity_key.lower()}.{field_lower}"
+                    pattern_key = f"{entity_key_str}.{field_lower}"
                     self.repair_patterns[repair_id]['entity_field_patterns'][pattern_key][action] += 1
                 
                 # Detect specific change types
@@ -245,15 +294,15 @@ class AceRepairLearner:
                     diff_features['has_address_changes'] = True
                 if 'ctry' in field_lower or 'ctryofres' in field_lower:
                     diff_features['has_country_changes'] = True
-                    if value and len(value) == 2:
-                        self.lookup_tables['country_extractions'][value] += 1
+                    if value and len(str(value)) == 2:
+                        self.lookup_tables['country_extractions'][str(value)] += 1
                 if 'clrsys' in field_lower or 'mmbid' in field_lower:
                     diff_features['has_clearing_changes'] = True
                 
                 # Update repair patterns
                 for repair_id in repairs:
                     self.repair_patterns[repair_id]['total_diffs'] += 1
-                    self.repair_patterns[repair_id]['typical_entities'][entity_key.lower()] += 1
+                    self.repair_patterns[repair_id]['typical_entities'][entity_key_str] += 1
                     
                     if action == 'added':
                         self.repair_patterns[repair_id]['fields_added'][field_lower] += 1
@@ -285,27 +334,40 @@ class AceRepairLearner:
             bic_after = self._find_value_in_dict(after, 'bicfi') or self._find_value_in_dict(after, 'bic')
             
             if clearing and bic_after and not self._find_value_in_dict(before, 'bicfi'):
-                self.lookup_tables['clearing_to_bic'][clearing] = bic_after
+                clearing_str = ensure_hashable(clearing)
+                bic_str = ensure_hashable(bic_after)
+                self.lookup_tables['clearing_to_bic'][clearing_str] = bic_str
+                
                 # This indicates repair 6035 (BIC lookup from clearing)
                 if '6035' in repair_ids:
-                    self.repair_taxonomy['6035']['typical_scenarios'].append('BIC from clearing')
+                    if 'typical_scenarios' in self.repair_taxonomy.get('6035', {}):
+                        scenario = 'BIC from clearing'
+                        if scenario not in self.repair_taxonomy['6035']['typical_scenarios']:
+                            self.repair_taxonomy['6035']['typical_scenarios'].append(scenario)
             
             # Learn name lookups from BIC
             bic = bic_after or self._find_value_in_dict(before, 'bicfi')
             if bic:
+                bic_str = ensure_hashable(bic)
                 name_after = self._find_value_in_dict(after, 'nm')
                 name_before = self._find_value_in_dict(before, 'nm')
                 
                 if name_after and name_after != name_before:
-                    self.lookup_tables['bic_to_name'][bic] = name_after
+                    name_str = ensure_hashable(name_after)
+                    self.lookup_tables['bic_to_name'][bic_str] = name_str
+                    
                     # This indicates repair 6036 (Name lookup from BIC)
                     if '6036' in repair_ids:
-                        self.repair_taxonomy['6036']['typical_scenarios'].append('Name from BIC')
+                        if 'typical_scenarios' in self.repair_taxonomy.get('6036', {}):
+                            scenario = 'Name from BIC'
+                            if scenario not in self.repair_taxonomy['6036']['typical_scenarios']:
+                                self.repair_taxonomy['6036']['typical_scenarios'].append(scenario)
                 
                 # Learn address lookups
                 addr_after = self._find_value_in_dict(after, 'adrline')
                 if addr_after:
-                    self.lookup_tables['bic_to_address'][bic] = addr_after
+                    addr_str = ensure_hashable(addr_after)
+                    self.lookup_tables['bic_to_address'][bic_str] = addr_str
     
     def _learn_repair_code_patterns(self, repair_details: Dict, txn_data: Dict):
         """Learn patterns specific to repair codes (I/W/E/R)"""
@@ -316,19 +378,12 @@ class AceRepairLearner:
             
             # Learn patterns based on repair code type
             if code == 'I':  # Information added
-                # These repairs typically add missing information
                 self.repair_patterns[repair_id]['typical_action'] = 'add'
-                
             elif code == 'W':  # Warning
-                # These repairs indicate potential issues but don't change data
                 self.repair_patterns[repair_id]['typical_action'] = 'warn'
-                
             elif code == 'E':  # Error that was fixed
-                # These repairs fix errors in the data
                 self.repair_patterns[repair_id]['typical_action'] = 'fix'
-                
             elif code == 'R':  # Rejected/removed
-                # These repairs remove invalid data
                 self.repair_patterns[repair_id]['typical_action'] = 'remove'
     
     def _find_value_in_dict(self, d: Dict, key_pattern: str) -> Optional[Any]:
@@ -431,15 +486,11 @@ class FeatureExtractor:
             'diff_affects_dbtragt', 'diff_affects_instgagt'
         ])
         
-        # ACE-specific features (new)
+        # ACE-specific features
         self.feature_names.extend([
-            'needs_country_extraction',  # Missing country but has other location info
-            'needs_bic_lookup',  # Has clearing but no BIC
-            'needs_name_lookup',  # Has BIC but no name
-            'needs_address_enrichment',  # Has partial address info
-            'multiple_agents_incomplete',  # Multiple agents with missing info
-            'clearing_system_present',  # Has clearing system info
-            'partial_bank_info'  # Has some but not all bank info
+            'needs_country_extraction', 'needs_bic_lookup', 'needs_name_lookup',
+            'needs_address_enrichment', 'multiple_agents_incomplete',
+            'clearing_system_present', 'partial_bank_info'
         ])
     
     def extract_features(self, payment: Dict, diff_features: Optional[Dict] = None) -> np.ndarray:
@@ -509,17 +560,11 @@ class FeatureExtractor:
                 features[idx] = 0.0; idx += 1
         
         # ACE-specific features
-        # Check if needs country extraction
         has_location_info = has_address or self._has_field(payment, 'townname')
         features[idx] = float(not has_country and has_location_info); idx += 1
-        
-        # Check if needs BIC lookup
         features[idx] = float(has_clearing and not has_bic); idx += 1
-        
-        # Check if needs name lookup
         features[idx] = float(has_bic and not has_name); idx += 1
         
-        # Check if needs address enrichment
         has_partial_address = self._has_field(payment, 'townname') or self._has_field(payment, 'pstlcd')
         features[idx] = float(has_partial_address and not has_address); idx += 1
         
@@ -536,10 +581,8 @@ class FeatureExtractor:
                         incomplete_agents += 1
         features[idx] = min(incomplete_agents / 3, 1.0); idx += 1
         
-        # Has clearing system info
         features[idx] = float(has_clearing or self._has_field(payment, 'clrsys')); idx += 1
         
-        # Has partial bank info
         has_some_bank_info = has_bic or has_name or has_clearing
         has_complete_bank_info = has_bic and has_name
         features[idx] = float(has_some_bank_info and not has_complete_bank_info); idx += 1
@@ -591,7 +634,7 @@ class FeatureExtractor:
 
 
 # ============================================================================
-# DATA PROCESSOR (Enhanced with Directory Support)
+# DATA PROCESSOR (Enhanced with Directory Support and fixes)
 # ============================================================================
 
 class DataProcessor:
@@ -631,18 +674,22 @@ class DataProcessor:
             
             # Handle different file formats
             if isinstance(data, dict):
-                # Format: {txnid1: {...}, txnid2: {...}}
                 for txn_id, txn_data in data.items():
                     if isinstance(txn_data, dict):
-                        transactions[txn_id] = txn_data
+                        transactions[ensure_hashable(txn_id)] = txn_data
                     else:
                         logger.warning(f"Skipping non-dict transaction {txn_id} in {filepath}")
                         
             elif isinstance(data, list):
-                # Format: [{txnid: {...}}, {txnid2: {...}}]
-                for item in data:
+                for idx, item in enumerate(data):
                     if isinstance(item, dict):
-                        transactions.update(item)
+                        # If it's a dict with a single key, use that as the txn_id
+                        if len(item) == 1:
+                            txn_id = list(item.keys())[0]
+                            transactions[ensure_hashable(txn_id)] = item[txn_id]
+                        else:
+                            # Otherwise use index as ID
+                            transactions[f"txn_{idx}"] = item
                     else:
                         logger.warning(f"Skipping non-dict item in list from {filepath}")
             else:
@@ -745,7 +792,8 @@ class DataProcessor:
             # Track repair statistics
             for repair in txn_data['ace']:
                 if isinstance(repair, dict) and 'id' in repair:
-                    repair_stats[repair['id']] += 1
+                    repair_id = safe_get_repair_id(repair.get('id'))
+                    repair_stats[repair_id] += 1
             
             # Learn from transaction
             try:
@@ -777,8 +825,12 @@ class DataProcessor:
                 continue
             
             try:
-                # Get repairs
-                repairs = [r['id'] for r in txn_data.get('ace', [])]
+                # Get repairs with safe extraction
+                repairs = []
+                for r in txn_data.get('ace', []):
+                    if isinstance(r, dict) and 'id' in r:
+                        repair_id = safe_get_repair_id(r.get('id'))
+                        repairs.append(repair_id)
                 
                 # Extract before state for features
                 payment = self._extract_before_state(txn_data)
@@ -854,7 +906,9 @@ class DataProcessor:
             if not isinstance(txn_data, dict):
                 continue
             for repair in txn_data.get('ace', []):
-                all_repairs.add(repair['id'])
+                if isinstance(repair, dict) and 'id' in repair:
+                    repair_id = safe_get_repair_id(repair.get('id'))
+                    all_repairs.add(repair_id)
         
         sorted_repairs = sorted(all_repairs)
         self.repair_vocabulary = {repair_id: idx for idx, repair_id in enumerate(sorted_repairs)}
@@ -892,14 +946,6 @@ class RepairNN(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Attention layer for feature importance
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.Tanh(),
-            nn.Linear(hidden_dim // 2, 1),
-            nn.Softmax(dim=1)
-        )
-        
         # Main prediction network
         self.prediction_network = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -919,9 +965,6 @@ class RepairNN(nn.Module):
     def forward(self, x):
         # Encode features
         encoded = self.feature_encoder(x)
-        
-        # Apply attention (simplified for batch processing)
-        # In a more complex model, you could use multi-head attention
         
         # Make predictions
         output = self.prediction_network(encoded)
@@ -997,7 +1040,7 @@ class ModelTrainer:
         logger.info("\nTraining Random Forest...")
         self.rf_model = MultiOutputClassifier(
             RandomForestClassifier(
-                n_estimators=150,  # Increased for better performance
+                n_estimators=150,
                 max_depth=20,
                 min_samples_split=5,
                 min_samples_leaf=2,
@@ -1141,6 +1184,8 @@ class ModelTrainer:
             if val_loss < best_val_loss - 0.001:
                 best_val_loss = val_loss
                 patience_counter = 0
+                # Create model directory if it doesn't exist
+                os.makedirs(self.config.model_dir, exist_ok=True)
                 torch.save(self.model.state_dict(), 
                           os.path.join(self.config.model_dir, 'best_model.pt'))
             else:
@@ -1314,7 +1359,7 @@ class RepairPredictor:
         
         # Ensemble or single model
         if use_ensemble:
-            # Weighted ensemble (NN gets slightly more weight due to better performance)
+            # Weighted ensemble
             ensemble_probs = (nn_probs * 0.6 + rf_probs * 0.4)
         else:
             ensemble_probs = nn_probs
@@ -1324,7 +1369,7 @@ class RepairPredictor:
         
         # Get predicted repairs
         predicted_repairs = []
-        ace_predictions = []  # Full ACE array format
+        ace_predictions = []
         
         for idx, prob in enumerate(boosted_probs):
             if prob > threshold:
@@ -1338,7 +1383,7 @@ class RepairPredictor:
                     'confidence': float(prob),
                     'nn_prob': float(nn_probs[idx]),
                     'rf_prob': float(rf_probs[idx]),
-                    'boosted': prob != ensemble_probs[idx]  # Was this boosted?
+                    'boosted': prob != ensemble_probs[idx]
                 })
                 
                 # Build ACE format entry
@@ -1355,7 +1400,7 @@ class RepairPredictor:
         # Sort ACE predictions by repair ID for consistency
         ace_predictions.sort(key=lambda x: x['id'])
         
-        # Analyze what needs to be repaired based on features
+        # Analyze what needs to be repaired
         repair_analysis = self._analyze_repair_needs(payment, features, predicted_repairs)
         
         # Get repair signatures for predicted repairs
@@ -1368,10 +1413,10 @@ class RepairPredictor:
         return {
             'predicted_repairs': predicted_repairs,
             'repair_ids': [r['repair_id'] for r in predicted_repairs],
-            'ace': ace_predictions,  # Full ACE array with messages
+            'ace': ace_predictions,
             'repair_analysis': repair_analysis,
             'feature_analysis': self._get_feature_analysis(features),
-            'repair_signatures': repair_signatures,  # Learned patterns for each repair
+            'repair_signatures': repair_signatures,
             'confidence_summary': {
                 'high_confidence': [r for r in predicted_repairs if r['confidence'] > 0.8],
                 'medium_confidence': [r for r in predicted_repairs if 0.5 < r['confidence'] <= 0.8],
@@ -1399,7 +1444,7 @@ class RepairPredictor:
                     if co_repair in self.processor.repair_vocabulary:
                         co_idx = self.processor.repair_vocabulary[co_repair]
                         # Small boost based on co-occurrence strength
-                        boost = min(0.1, count / 100)  # Max 10% boost
+                        boost = min(0.1, count / 100)
                         boosted_probs[co_idx] = min(1.0, boosted_probs[co_idx] + boost)
         
         return boosted_probs
@@ -1616,7 +1661,7 @@ class RepairPredictor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='ACE Payment Repair Predictor - Enhanced with Deep ACE Learning and Directory Support',
+        description='ACE Payment Repair Predictor - Enhanced with Deep ACE Learning',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
@@ -1643,11 +1688,11 @@ Examples:
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     
     # Train command
-    train_parser = subparsers.add_parser('train', help='Train the model from file or directory')
+    train_parser = subparsers.add_parser('train', help='Train the model')
     train_parser.add_argument('--input', required=True, 
-                             help='Training data file or directory containing JSON files')
+                             help='Training data file or directory')
     train_parser.add_argument('--max_txns', type=int, 
-                             help='Maximum number of transactions to use (for testing)')
+                             help='Maximum number of transactions to use')
     train_parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     train_parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     train_parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension')
@@ -1657,25 +1702,18 @@ Examples:
     
     # Predict command
     predict_parser = subparsers.add_parser('predict', help='Predict repairs')
-    predict_parser.add_argument('--input', required=True, 
-                               help='Input payment file or directory')
+    predict_parser.add_argument('--input', required=True, help='Input payment file or directory')
     predict_parser.add_argument('--model', default='./models', help='Model directory')
-    predict_parser.add_argument('--threshold', type=float, default=0.5, 
-                               help='Confidence threshold for predictions')
-    predict_parser.add_argument('--output', help='Output file or directory for results')
-    predict_parser.add_argument('--no-ensemble', action='store_true', 
-                               help='Use only neural network (no ensemble)')
-    predict_parser.add_argument('--batch', action='store_true',
-                               help='Process directory in batch mode (minimal output)')
+    predict_parser.add_argument('--threshold', type=float, default=0.5, help='Confidence threshold')
+    predict_parser.add_argument('--output', help='Output file or directory')
+    predict_parser.add_argument('--no-ensemble', action='store_true', help='Use only neural network')
+    predict_parser.add_argument('--batch', action='store_true', help='Process directory in batch mode')
     
-    # Analyze command (new)
-    analyze_parser = subparsers.add_parser('analyze', 
-                                          help='Analyze ACE repairs in data without training')
-    analyze_parser.add_argument('--input', required=True, 
-                               help='Data file or directory to analyze')
+    # Analyze command
+    analyze_parser = subparsers.add_parser('analyze', help='Analyze ACE repairs in data')
+    analyze_parser.add_argument('--input', required=True, help='Data file or directory')
     analyze_parser.add_argument('--output', help='Output file for analysis report')
-    analyze_parser.add_argument('--max_txns', type=int, 
-                               help='Maximum number of transactions to analyze')
+    analyze_parser.add_argument('--max_txns', type=int, help='Maximum number of transactions')
     
     args = parser.parse_args()
     
@@ -1724,7 +1762,7 @@ Examples:
                 use_ensemble=not args.no_ensemble
             )
             
-            # Display results (unless in batch mode)
+            # Display results
             if not args.batch:
                 display_prediction_results(results)
             
@@ -1827,18 +1865,21 @@ Examples:
             repair_ids = []
             for repair in ace_repairs:
                 if isinstance(repair, dict):
-                    repair_id = repair.get('id', 'unknown')
+                    repair_id = safe_get_repair_id(repair.get('id', 'unknown'))
+                    
                     repair_code = repair.get('code', 'I')
                     repair_ids.append(repair_id)
                     repair_frequency[repair_id] += 1
-                    repair_codes[repair_code] += 1
+                    repair_codes[str(repair_code)] += 1
                     
                     # Learn from diffs if available
                     analyzer.ace_learner.learn_from_transaction(txn_id, txn_data)
             
             # Track combinations
             if len(repair_ids) > 1:
-                repair_combinations[tuple(sorted(repair_ids))] += 1
+                # Ensure all IDs are strings before sorting
+                repair_ids_str = [str(rid) for rid in repair_ids]
+                repair_combinations[tuple(sorted(repair_ids_str))] += 1
         
         # Print analysis results
         analyzer.ace_learner.print_summary()
