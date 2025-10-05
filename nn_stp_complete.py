@@ -669,28 +669,91 @@ class IncrementalDataProcessor:
         
         logger.info(f"Saved checkpoint {self.checkpoint_count} ({self.transaction_count} transactions)")
     
-    def load_checkpoint(self, checkpoint_path: str):
-        """Load from checkpoint"""
-        with open(checkpoint_path, 'rb') as f:
-            checkpoint_data = pickle.load(f)
+    def print_analysis_summary(self):
+        """Print summary of learned patterns"""
+        logger.info("\n" + "="*70)
+        logger.info("PATTERN ANALYSIS SUMMARY")
+        logger.info("="*70)
         
-        self.transaction_count = checkpoint_data['transaction_count']
-        self.repair_vocabulary = checkpoint_data['repair_vocabulary']
+        logger.info(f"Total transactions processed: {self.transaction_count}")
+        logger.info(f"Unique repairs found: {len(self.repair_vocabulary)}")
         
-        # Properly reconstruct defaultdicts
-        self.repair_patterns = defaultdict(create_counter_dict)
-        for key, value_dict in checkpoint_data['repair_patterns'].items():
-            self.repair_patterns[key] = defaultdict(int, value_dict)
+        # Source/Clearing patterns
+        if self.structural_detector.source_clearing_patterns:
+            logger.info("\nSource/Clearing Patterns:")
+            for pattern, repairs in list(self.structural_detector.source_clearing_patterns.items())[:10]:
+                logger.info(f"  {pattern}: {len(repairs)} repair types - {list(repairs)[:5]}")
         
-        self.structural_detector.source_clearing_patterns = defaultdict(set, checkpoint_data['source_clearing_patterns'])
-        self.structural_detector.database_lookup_patterns = defaultdict(list, checkpoint_data['database_lookup_patterns'])
+        # Database lookup patterns
+        if self.structural_detector.database_lookup_patterns:
+            logger.info("\nDatabase Lookup Patterns:")
+            for lookup_type, examples in self.structural_detector.database_lookup_patterns.items():
+                logger.info(f"  {lookup_type}: {len(examples)} examples")
         
-        logger.info(f"Loaded checkpoint with {self.transaction_count} transactions")
+        # Top repair patterns
+        if self.repair_patterns:
+            logger.info("\nTop Repair Patterns:")
+            sorted_repairs = sorted(self.repair_patterns.items(), 
+                                   key=lambda x: sum(x[1].values()), 
+                                   reverse=True)
+            for repair_id, patterns in sorted_repairs[:5]:
+                logger.info(f"  Repair {repair_id}:")
+                top_patterns = sorted(patterns.items(), key=lambda x: x[1], reverse=True)[:3]
+                for pattern, count in top_patterns:
+                    logger.info(f"    {pattern}: {count} occurrences")
 
 
 # ============================================================================
-# ENHANCED TRAINING PIPELINE
+# NEURAL NETWORK MODEL
 # ============================================================================
+
+class RepairNN(nn.Module):
+    """Neural network for repair prediction"""
+    
+    def __init__(self, num_features: int, num_repairs: int, 
+                 hidden_dim: int = 256, dropout: float = 0.3):
+        super().__init__()
+        
+        self.feature_encoder = nn.Sequential(
+            nn.Linear(num_features, hidden_dim),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(dropout)
+        )
+        
+        self.prediction_network = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim // 2),
+            nn.Dropout(dropout),
+            
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim // 4),
+            nn.Dropout(dropout / 2),
+            
+            nn.Linear(hidden_dim // 4, num_repairs),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        encoded = self.feature_encoder(x)
+        output = self.prediction_network(encoded)
+        return output
+
+
+class RepairDataset(Dataset):
+    """PyTorch dataset for repairs"""
+    
+    def __init__(self, features: np.ndarray, labels: np.ndarray):
+        self.features = torch.FloatTensor(features)
+        self.labels = torch.FloatTensor(labels)
+    
+    def __len__(self):
+        return len(self.features)
+    
+    def __getitem__(self, idx):
+        return self.features[idx], self.labels[idx]
 
 class EnhancedTrainer:
     """Enhanced trainer with incremental processing support"""
@@ -814,7 +877,7 @@ class EnhancedTrainer:
                 logger.info(f"    {pattern}: {count} occurrences")
     
     def _train_model(self, X: np.ndarray, y: np.ndarray):
-        """Train the model"""
+        """Train both Random Forest and Neural Network models"""
         # Split data
         n = len(X)
         indices = np.random.permutation(n)
@@ -850,20 +913,123 @@ class EnhancedTrainer:
         )
         rf_model.fit(X_train, y_train)
         
-        # Evaluate
+        # Train Neural Network
+        logger.info("\nTraining Neural Network...")
+        nn_model = self._train_neural_network(X_train, y_train, X_val, y_val)
+        
+        # Evaluate both models
+        logger.info("\nEvaluating models on test set...")
+        
+        # RF evaluation
         rf_preds = rf_model.predict(X_test)
-        exact_match = np.mean(np.all(rf_preds == y_test, axis=1))
-        hamming = np.mean(rf_preds == y_test)
+        rf_exact_match = np.mean(np.all(rf_preds == y_test, axis=1))
+        rf_hamming = np.mean(rf_preds == y_test)
+        
+        # NN evaluation
+        nn_model.eval()
+        test_dataset = RepairDataset(X_test, y_test)
+        test_loader = DataLoader(test_dataset, batch_size=self.config.batch_size)
+        
+        all_nn_preds = []
+        with torch.no_grad():
+            for features, _ in test_loader:
+                features = features.to(self.device)
+                outputs = nn_model(features)
+                all_nn_preds.append(outputs.cpu().numpy())
+        
+        nn_preds = np.vstack(all_nn_preds)
+        nn_preds_binary = (nn_preds > 0.5).astype(int)
+        nn_exact_match = np.mean(np.all(nn_preds_binary == y_test, axis=1))
+        nn_hamming = np.mean(nn_preds_binary == y_test)
         
         logger.info(f"\nModel Performance:")
-        logger.info(f"  Exact Match: {exact_match:.2%}")
-        logger.info(f"  Hamming Accuracy: {hamming:.2%}")
+        logger.info(f"  Random Forest:")
+        logger.info(f"    Exact Match: {rf_exact_match:.2%}")
+        logger.info(f"    Hamming Accuracy: {rf_hamming:.2%}")
+        logger.info(f"  Neural Network:")
+        logger.info(f"    Exact Match: {nn_exact_match:.2%}")
+        logger.info(f"    Hamming Accuracy: {nn_hamming:.2%}")
         
-        # Save model
-        self._save_model(rf_model)
+        # Save both models
+        self._save_models(rf_model, nn_model)
     
-    def _save_model(self, model):
-        """Save trained model and processor"""
+    def _train_neural_network(self, X_train, y_train, X_val, y_val):
+        """Train neural network model"""
+        num_features = X_train.shape[1]
+        num_repairs = y_train.shape[1]
+        
+        model = RepairNN(
+            num_features=num_features,
+            num_repairs=num_repairs,
+            hidden_dim=self.config.hidden_dim,
+            dropout=self.config.dropout
+        ).to(self.device)
+        
+        train_dataset = RepairDataset(X_train, y_train)
+        val_dataset = RepairDataset(X_val, y_val)
+        
+        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size)
+        
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.config.learning_rate, weight_decay=0.01)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        criterion = nn.BCELoss()
+        
+        best_val_loss = float('inf')
+        patience_counter = 0
+        
+        for epoch in range(1, self.config.num_epochs + 1):
+            # Training
+            model.train()
+            train_loss = 0.0
+            
+            for features, labels in train_loader:
+                features = features.to(self.device)
+                labels = labels.to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = model(features)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                
+                train_loss += loss.item()
+            
+            train_loss /= len(train_loader)
+            
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            
+            with torch.no_grad():
+                for features, labels in val_loader:
+                    features = features.to(self.device)
+                    labels = labels.to(self.device)
+                    outputs = model(features)
+                    loss = criterion(outputs, labels)
+                    val_loss += loss.item()
+            
+            val_loss /= len(val_loader)
+            scheduler.step(val_loss)
+            
+            if epoch % 10 == 0 or epoch == 1:
+                logger.info(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}")
+            
+            # Early stopping
+            if val_loss < best_val_loss - 0.001:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= 15:
+                    logger.info(f"Early stopping at epoch {epoch}")
+                    break
+        
+        return model
+    
+    def _save_models(self, rf_model, nn_model):
+        """Save both trained models and processor"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
         # Save config
@@ -873,11 +1039,266 @@ class EnhancedTrainer:
         with open(os.path.join(self.config.model_dir, 'processor.pkl'), 'wb') as f:
             pickle.dump(self.processor, f)
         
-        # Save model
-        with open(os.path.join(self.config.model_dir, 'model.pkl'), 'wb') as f:
-            pickle.dump(model, f)
+        # Save RF model
+        with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
+            pickle.dump(rf_model, f)
         
-        logger.info(f"\nModel saved to {self.config.model_dir}")
+        # Save NN model
+        torch.save(nn_model.state_dict(), os.path.join(self.config.model_dir, 'nn_model.pt'))
+        
+        # Save model info
+        model_info = {
+            'num_features': nn_model.feature_encoder[0].in_features,
+            'num_repairs': nn_model.prediction_network[-2].out_features,
+            'hidden_dim': self.config.hidden_dim,
+            'dropout': self.config.dropout
+        }
+        with open(os.path.join(self.config.model_dir, 'model_info.json'), 'w') as f:
+            json.dump(model_info, f, indent=2)
+        
+        logger.info(f"\nModels saved to {self.config.model_dir}")
+
+
+# ============================================================================
+# ENHANCED PREDICTOR WITH DUAL MODEL SUPPORT
+# ============================================================================
+
+class EnhancedPredictor:
+    """Predictor that provides individual model predictions with confidence scores"""
+    
+    def __init__(self, model_dir: str = './models'):
+        self.model_dir = model_dir
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        logger.info(f"Loading models from {model_dir}")
+        
+        # Load config
+        self.config = EnhancedConfig.load(os.path.join(model_dir, 'config.json'))
+        
+        # Load processor
+        with open(os.path.join(model_dir, 'processor.pkl'), 'rb') as f:
+            self.processor = pickle.load(f)
+        
+        # Load Random Forest
+        with open(os.path.join(model_dir, 'rf_model.pkl'), 'rb') as f:
+            self.rf_model = pickle.load(f)
+        
+        # Load Neural Network
+        with open(os.path.join(model_dir, 'model_info.json'), 'r') as f:
+            model_info = json.load(f)
+        
+        self.nn_model = RepairNN(
+            num_features=model_info['num_features'],
+            num_repairs=model_info['num_repairs'],
+            hidden_dim=model_info['hidden_dim'],
+            dropout=model_info['dropout']
+        ).to(self.device)
+        
+        self.nn_model.load_state_dict(
+            torch.load(os.path.join(model_dir, 'nn_model.pt'), 
+                      map_location=self.device)
+        )
+        self.nn_model.eval()
+        
+        # Create reverse mapping for repair IDs
+        self.idx_to_repair = {idx: repair_id for repair_id, idx in self.processor.repair_vocabulary.items()}
+        
+        logger.info(f"Models loaded successfully")
+        logger.info(f"Vocabulary contains {len(self.processor.repair_vocabulary)} repair types")
+    
+    def predict(self, payment_file: str, threshold: float = 0.5) -> Dict:
+        """
+        Predict ACE repairs with individual model confidence scores
+        
+        Returns predictions from both Neural Network and Random Forest models
+        with confidence levels for each predicted repair ID
+        """
+        
+        # Load payment
+        with open(payment_file, 'r') as f:
+            data = json.load(f)
+        
+        # Extract transaction
+        if isinstance(data, dict) and len(data) == 1:
+            txn_id = list(data.keys())[0]
+            txn_data = data[txn_id]
+            logger.info(f"Processing transaction: {txn_id}")
+        else:
+            txn_data = data
+            txn_id = "unknown"
+        
+        # Analyze transaction structure
+        analysis = self.processor.structural_detector.analyze_transaction(txn_id, txn_data)
+        
+        # Extract features
+        features = self.processor._extract_features(txn_data, analysis)
+        
+        # Get Neural Network predictions
+        features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            nn_probs = self.nn_model(features_tensor)[0].cpu().numpy()
+        
+        # Get Random Forest predictions
+        rf_probs_raw = self.rf_model.predict_proba(features.reshape(1, -1))
+        rf_probs = np.array([
+            p[0, 1] if p.shape[1] > 1 else p[0, 0] 
+            for p in rf_probs_raw
+        ])
+        
+        # Prepare results
+        predictions = {
+            'transaction_id': txn_id,
+            'source': txn_data.get('source', 'unknown'),
+            'clearing': txn_data.get('clearing', 'unknown'),
+            'structural_analysis': {
+                'affected_entities': list(analysis['affected_entities']),
+                'change_complexity': analysis['change_complexity'],
+                'database_lookups_detected': len(analysis['database_lookups']),
+                'structural_changes_detected': len(analysis['structural_changes'])
+            },
+            'neural_network_predictions': [],
+            'random_forest_predictions': [],
+            'consensus_predictions': [],
+            'ace': []  # Final ACE repair array
+        }
+        
+        # Process Neural Network predictions
+        nn_predictions = []
+        for idx, prob in enumerate(nn_probs):
+            if prob > threshold:
+                repair_id = self.idx_to_repair.get(idx, f"unknown_{idx}")
+                nn_predictions.append({
+                    'repair_id': repair_id,
+                    'confidence': float(prob),
+                    'confidence_level': self._get_confidence_level(prob)
+                })
+        
+        # Process Random Forest predictions
+        rf_predictions = []
+        for idx, prob in enumerate(rf_probs):
+            if prob > threshold:
+                repair_id = self.idx_to_repair.get(idx, f"unknown_{idx}")
+                rf_predictions.append({
+                    'repair_id': repair_id,
+                    'confidence': float(prob),
+                    'confidence_level': self._get_confidence_level(prob)
+                })
+        
+        # Find consensus predictions (predicted by both models)
+        nn_repair_ids = {p['repair_id'] for p in nn_predictions}
+        rf_repair_ids = {p['repair_id'] for p in rf_predictions}
+        consensus_ids = nn_repair_ids & rf_repair_ids
+        
+        consensus_predictions = []
+        for repair_id in consensus_ids:
+            nn_conf = next(p['confidence'] for p in nn_predictions if p['repair_id'] == repair_id)
+            rf_conf = next(p['confidence'] for p in rf_predictions if p['repair_id'] == repair_id)
+            avg_conf = (nn_conf + rf_conf) / 2
+            
+            consensus_predictions.append({
+                'repair_id': repair_id,
+                'nn_confidence': float(nn_conf),
+                'rf_confidence': float(rf_conf),
+                'average_confidence': float(avg_conf),
+                'confidence_level': self._get_confidence_level(avg_conf)
+            })
+        
+        # Sort predictions by confidence
+        nn_predictions.sort(key=lambda x: x['confidence'], reverse=True)
+        rf_predictions.sort(key=lambda x: x['confidence'], reverse=True)
+        consensus_predictions.sort(key=lambda x: x['average_confidence'], reverse=True)
+        
+        predictions['neural_network_predictions'] = nn_predictions
+        predictions['random_forest_predictions'] = rf_predictions
+        predictions['consensus_predictions'] = consensus_predictions
+        
+        # Create ACE array with repair details (using consensus or highest confidence)
+        ace_repairs = []
+        used_repairs = set()
+        
+        # First add consensus predictions
+        for pred in consensus_predictions:
+            repair_id = pred['repair_id']
+            if repair_id not in used_repairs:
+                ace_repairs.append({
+                    'id': repair_id,
+                    'code': 'I',  # Default code, would need mapping from training data
+                    'field': self._get_repair_field(repair_id),
+                    'text': self._get_repair_text(repair_id),
+                    'confidence': pred['average_confidence'],
+                    'predicted_by': 'both_models'
+                })
+                used_repairs.add(repair_id)
+        
+        # Add high-confidence single-model predictions
+        for pred in nn_predictions:
+            if pred['repair_id'] not in used_repairs and pred['confidence'] > 0.7:
+                ace_repairs.append({
+                    'id': pred['repair_id'],
+                    'code': 'I',
+                    'field': self._get_repair_field(pred['repair_id']),
+                    'text': self._get_repair_text(pred['repair_id']),
+                    'confidence': pred['confidence'],
+                    'predicted_by': 'neural_network'
+                })
+                used_repairs.add(pred['repair_id'])
+        
+        for pred in rf_predictions:
+            if pred['repair_id'] not in used_repairs and pred['confidence'] > 0.7:
+                ace_repairs.append({
+                    'id': pred['repair_id'],
+                    'code': 'I',
+                    'field': self._get_repair_field(pred['repair_id']),
+                    'text': self._get_repair_text(pred['repair_id']),
+                    'confidence': pred['confidence'],
+                    'predicted_by': 'random_forest'
+                })
+                used_repairs.add(pred['repair_id'])
+        
+        predictions['ace'] = ace_repairs
+        
+        # Summary statistics
+        predictions['summary'] = {
+            'total_nn_predictions': len(nn_predictions),
+            'total_rf_predictions': len(rf_predictions),
+            'consensus_predictions': len(consensus_predictions),
+            'total_unique_predictions': len(nn_repair_ids | rf_repair_ids),
+            'high_confidence_predictions': len([p for p in ace_repairs if p['confidence'] > 0.8]),
+            'threshold_used': threshold
+        }
+        
+        return predictions
+    
+    def _get_confidence_level(self, confidence: float) -> str:
+        """Categorize confidence level"""
+        if confidence > 0.9:
+            return 'very_high'
+        elif confidence > 0.8:
+            return 'high'
+        elif confidence > 0.6:
+            return 'medium'
+        else:
+            return 'low'
+    
+    def _get_repair_field(self, repair_id: str) -> str:
+        """Get field associated with repair (would need mapping from training data)"""
+        # This would ideally come from learned patterns
+        field_mappings = {
+            '6021': 'CDTPTY',
+            '8852': 'DBTRAGT',
+            # Add more mappings based on training data
+        }
+        return field_mappings.get(repair_id, 'UNKNOWN')
+    
+    def _get_repair_text(self, repair_id: str) -> str:
+        """Get repair description text"""
+        # This would ideally come from learned patterns
+        text_mappings = {
+            '6021': 'ISO Country Code extracted from Field',
+            '8852': 'Bank Identifier Code Added',
+            # Add more mappings based on training data
+        }
+        return text_mappings.get(repair_id, f'Repair {repair_id} applied')
 
 
 # ============================================================================
@@ -897,7 +1318,15 @@ def main():
     train_parser.add_argument('--model_dir', default='./models')
     train_parser.add_argument('--checkpoint_dir', default='./checkpoints')
     train_parser.add_argument('--batch_size', type=int, default=100)
+    train_parser.add_argument('--epochs', type=int, default=50)
     train_parser.add_argument('--incremental', action='store_true', help='Use incremental processing')
+    
+    # Predict command
+    predict_parser = subparsers.add_parser('predict', help='Predict repairs for a payment')
+    predict_parser.add_argument('--input', required=True, help='Input payment JSON file')
+    predict_parser.add_argument('--model_dir', default='./models')
+    predict_parser.add_argument('--threshold', type=float, default=0.5)
+    predict_parser.add_argument('--output', help='Output file for predictions')
     
     # Analyze command
     analyze_parser = subparsers.add_parser('analyze', help='Analyze patterns in data')
@@ -911,6 +1340,7 @@ def main():
             model_dir=args.model_dir,
             checkpoint_dir=args.checkpoint_dir,
             max_files_in_memory=args.batch_size,
+            num_epochs=args.epochs,
             enable_incremental=args.incremental
         )
         
@@ -920,6 +1350,37 @@ def main():
         logger.info("\nTraining complete!")
         logger.info("Check detailed_analysis.log for comprehensive analysis")
         
+    elif args.command == 'predict':
+        predictor = EnhancedPredictor(args.model_dir)
+        results = predictor.predict(args.input, args.threshold)
+        
+        logger.info(f"\n{'='*70}")
+        logger.info(f"PREDICTION RESULTS")
+        logger.info(f"{'='*70}")
+        logger.info(f"Transaction: {results['transaction_id']}")
+        logger.info(f"Source: {results['source']}, Clearing: {results['clearing']}")
+        
+        logger.info(f"\nNeural Network Predictions ({len(results['neural_network_predictions'])}):")
+        for pred in results['neural_network_predictions'][:5]:
+            logger.info(f"  {pred['repair_id']}: {pred['confidence']:.2%} ({pred['confidence_level']})")
+        
+        logger.info(f"\nRandom Forest Predictions ({len(results['random_forest_predictions'])}):")
+        for pred in results['random_forest_predictions'][:5]:
+            logger.info(f"  {pred['repair_id']}: {pred['confidence']:.2%} ({pred['confidence_level']})")
+        
+        logger.info(f"\nConsensus Predictions ({len(results['consensus_predictions'])}):")
+        for pred in results['consensus_predictions']:
+            logger.info(f"  {pred['repair_id']}: NN={pred['nn_confidence']:.2%}, RF={pred['rf_confidence']:.2%}")
+        
+        logger.info(f"\nFinal ACE Repairs ({len(results['ace'])}):")
+        for repair in results['ace']:
+            logger.info(f"  ID: {repair['id']}, Confidence: {repair['confidence']:.2%}, Predicted by: {repair['predicted_by']}")
+        
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump(results, f, indent=2, default=str)
+            logger.info(f"\nResults saved to {args.output}")
+    
     elif args.command == 'analyze':
         config = EnhancedConfig()
         processor = IncrementalDataProcessor(config)
@@ -935,7 +1396,7 @@ def main():
             logger.info(f"Analysis saved to {args.output}")
         
         # Print summary
-        processor._print_analysis_summary()
+        processor.print_analysis_summary()
     
     else:
         parser.print_help()
