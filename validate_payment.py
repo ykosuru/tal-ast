@@ -2,7 +2,7 @@
 """
 ISO 20022 Comprehensive Entity Validator
 Shows spec, validates structure, checks every field
-Version 4
+Version 5
 """
 
 import json
@@ -457,19 +457,37 @@ class ISO20022Validator:
         # Check required fields
         for req_field in spec['required']:
             key = self._find_key(party, [req_field, req_field[0].lower() + req_field[1:]])
+            
             if not key:
-                self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
-            else:
-                field_spec = spec['fields'].get(req_field, {})
-                if field_spec.get('type') == 'string':
-                    self.check_string(entity_key, key, party[key], 
-                                    field_spec.get('min', 1), field_spec.get('max', 140))
-                elif field_spec.get('type') == 'CountryCode':
-                    self.check_country(entity_key, key, party[key])
+                # Try case-insensitive search
+                key_insensitive = self._find_key_case_insensitive(party, req_field)
+                if key_insensitive:
+                    self.add_result(entity_key, ValidationLevel.WARNING, req_field, 
+                                  f"Found as '{key_insensitive}' - case mismatch (expected '{req_field}')")
+                    key = key_insensitive
+                else:
+                    self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
+                    continue
+            
+            # Validate the field
+            field_spec = spec['fields'].get(req_field, {})
+            if field_spec.get('type') == 'string':
+                self.check_string(entity_key, key, party[key], 
+                                field_spec.get('min', 1), field_spec.get('max', 140))
+            elif field_spec.get('type') == 'CountryCode':
+                self.check_country(entity_key, key, party[key])
         
         # Check optional fields if present
         for opt_field in spec['optional']:
             key = self._find_key(party, [opt_field, opt_field[0].lower() + opt_field[1:]])
+            
+            if not key:
+                # Try case-insensitive
+                key = self._find_key_case_insensitive(party, opt_field)
+                if key:
+                    self.add_result(entity_key, ValidationLevel.WARNING, opt_field,
+                                  f"Found as '{key}' - case mismatch (expected '{opt_field}')")
+            
             if key:
                 if opt_field == 'PstlAdr' or opt_field == 'pstlAdr':
                     self.validate_postal_address(entity_key, key, party[key])
