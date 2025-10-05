@@ -2,7 +2,7 @@
 """
 ISO 20022 Comprehensive Entity Validator
 Shows spec, validates structure, checks every field
-Version 3
+Version 4
 """
 
 import json
@@ -196,45 +196,121 @@ class ISO20022Validator:
     """Comprehensive ISO 20022 validator with entity-by-entity output"""
     
     def __init__(self, discovered_spec_path: Optional[str] = None, 
-                 use_discovered: bool = False, merge_specs: bool = False):
+                 context_spec_path: Optional[str] = None,
+                 use_discovered: bool = False, 
+                 use_context: bool = False,
+                 merge_specs: bool = False):
         self.results: List[ValidationResult] = []
         self.entity_results: Dict[str, List[ValidationResult]] = {}
         self.discovered_spec = {}
+        self.context_specs = {}
         self.use_discovered = use_discovered
+        self.use_context = use_context
         self.merge_specs = merge_specs
         self.active_spec = ISO20022_SPECS.copy()
+        self.matched_context = None
         
         # Load discovered spec if provided
         if discovered_spec_path and Path(discovered_spec_path).exists():
             self.load_discovered_spec(discovered_spec_path)
+        
+        # Load context-aware spec if provided
+        if context_spec_path and Path(context_spec_path).exists():
+            self.load_context_spec(context_spec_path)
     
     def load_discovered_spec(self, spec_path: str):
         """Load discovered specification from JSON"""
         with open(spec_path, 'r') as f:
             self.discovered_spec = json.load(f)
         
-        if self.use_discovered:
+        if self.use_discovered and not self.use_context:
             # Replace ISO spec with discovered spec
             for entity_name, disc_spec in self.discovered_spec.items():
                 if entity_name in self.active_spec:
                     self.active_spec[entity_name]['required'] = disc_spec.get('required', [])
                     self.active_spec[entity_name]['optional'] = disc_spec.get('optional', [])
         
-        elif self.merge_specs:
+        elif self.merge_specs and not self.use_context:
             # Merge: use discovered required fields, but keep ISO optional
             for entity_name, disc_spec in self.discovered_spec.items():
                 if entity_name in self.active_spec:
-                    # Required = discovered required + ISO required (union)
                     iso_req = set(self.active_spec[entity_name]['required'])
                     disc_req = set(disc_spec.get('required', []))
                     self.active_spec[entity_name]['required'] = sorted(iso_req | disc_req)
                     
-                    # Optional = all other fields
                     iso_opt = set(self.active_spec[entity_name]['optional'])
                     disc_opt = set(disc_spec.get('optional', []))
                     all_req = iso_req | disc_req
                     all_fields = iso_opt | disc_opt
                     self.active_spec[entity_name]['optional'] = sorted(all_fields - all_req)
+    
+    def load_context_spec(self, spec_path: str):
+        """Load context-aware specifications from JSON"""
+        with open(spec_path, 'r') as f:
+            self.context_specs = json.load(f)
+    
+    def match_context(self, payment: Dict) -> Optional[str]:
+        """Match payment to a context specification"""
+        if not self.context_specs:
+            return None
+        
+        # Extract payment context
+        source = payment.get('source', 'UNKNOWN')
+        clearing = payment.get('clearing', 'UNKNOWN')
+        parties = payment.get('parties', {})
+        
+        # Get active parties
+        active_parties = sorted([k for k, v in parties.items() if v])
+        parties_str = ','.join(active_parties) if active_parties else 'none'
+        
+        # Try exact match
+        context_key = f"{source}|{clearing}|{parties_str}"
+        if context_key in self.context_specs:
+            return context_key
+        
+        # Try fuzzy match (same source+clearing, subset of parties)
+        for spec_key, spec in self.context_specs.items():
+            parts = spec_key.split('|')
+            spec_source = parts[0] if len(parts) > 0 else ''
+            spec_clearing = parts[1] if len(parts) > 1 else ''
+            spec_parties_str = parts[2] if len(parts) > 2 else ''
+            spec_parties = set(spec_parties_str.split(',')) if spec_parties_str else set()
+            
+            # Match if source+clearing match and parties are compatible
+            if source == spec_source and clearing == spec_clearing:
+                # Check if payment parties are subset or superset
+                payment_parties = set(active_parties)
+                if payment_parties == spec_parties or payment_parties.issubset(spec_parties):
+                    return spec_key
+        
+        return None
+    
+    def apply_context_spec(self, context_key: str):
+        """Apply context-specific requirements to active spec"""
+        if context_key not in self.context_specs:
+            return
+        
+        context_spec = self.context_specs[context_key]
+        self.matched_context = {
+            'key': context_key,
+            'source': context_spec['source'],
+            'clearing': context_spec['clearing'],
+            'parties': context_spec['parties'],
+            'payment_count': context_spec.get('payment_count', 'N/A')
+        }
+        
+        # Update active spec with context-specific requirements
+        for entity_name, entity_spec in context_spec.get('entities', {}).items():
+            if entity_name in self.active_spec:
+                if self.merge_specs:
+                    # Merge ISO + context requirements
+                    iso_req = set(self.active_spec[entity_name]['required'])
+                    ctx_req = set(entity_spec.get('required', []))
+                    self.active_spec[entity_name]['required'] = sorted(iso_req | ctx_req)
+                else:
+                    # Use context requirements only
+                    self.active_spec[entity_name]['required'] = entity_spec.get('required', [])
+                    self.active_spec[entity_name]['optional'] = entity_spec.get('optional', [])
     
     def add_result(self, entity: str, level: ValidationLevel, field: str, message: str, value: Any = None):
         result = ValidationResult(level, field, message, value)
@@ -541,6 +617,15 @@ class ISO20022Validator:
         """Validate entire payment"""
         self.clear()
         
+        # Match context if using context-aware validation
+        if self.use_context and self.context_specs:
+            context_key = self.match_context(payment)
+            if context_key:
+                self.apply_context_spec(context_key)
+            else:
+                self.add_result('_system', ValidationLevel.WARNING, 'context', 
+                              'No matching context found, using default spec')
+        
         entities = [
             ('cdtr', 'Cdtr', self.validate_party),
             ('dbtr', 'Dbtr', self.validate_party),
@@ -556,8 +641,8 @@ class ISO20022Validator:
         ]
         
         for camel, pascal, validator in entities:
-            if camel in ISO20022_SPECS:
-                spec = ISO20022_SPECS[camel]
+            if camel in self.active_spec:
+                spec = self.active_spec[camel]
                 key = self._find_key(payment, [camel, pascal])
                 
                 if key:
@@ -570,18 +655,38 @@ class ISO20022Validator:
     def print_entity_validation(self, payment: Dict):
         """Print detailed entity-by-entity validation"""
         print("\n" + "="*80)
-        spec_mode = "DISCOVERED SPEC" if self.use_discovered else "MERGED SPEC" if self.merge_specs else "ISO 20022 SPEC"
+        
+        # Determine spec mode
+        if self.use_context:
+            spec_mode = "CONTEXT-AWARE SPEC"
+        elif self.use_discovered:
+            spec_mode = "DISCOVERED SPEC"
+        elif self.merge_specs:
+            spec_mode = "MERGED SPEC"
+        else:
+            spec_mode = "ISO 20022 SPEC"
+        
         print(f"ENTITY-BY-ENTITY VALIDATION REPORT ({spec_mode})")
         print("="*80)
         
-        if self.discovered_spec:
+        # Show matched context
+        if self.matched_context:
+            print(f"\nMATCHED CONTEXT:")
+            print(f"  Source: {self.matched_context['source']}")
+            print(f"  Clearing: {self.matched_context['clearing']}")
+            print(f"  Parties: {', '.join(self.matched_context['parties'])}")
+            print(f"  Based on {self.matched_context['payment_count']} training payments")
+            print(f"  → Using context-specific requirements for this network/party combination")
+        
+        if self.discovered_spec and not self.use_context:
             print(f"\nDiscovered spec loaded with {len(self.discovered_spec)} entities")
             if self.use_discovered:
                 print("Mode: Using DISCOVERED requirements (from actual data)")
             elif self.merge_specs:
                 print("Mode: Using MERGED requirements (ISO + Discovered)")
-            else:
-                print("Mode: Using ISO 20022 standard (discovered spec available but not active)")
+        
+        if self.context_specs and not self.use_context:
+            print(f"\nContext specs loaded with {len(self.context_specs)} contexts (not active)")
         
         for entity_name, spec in self.active_spec.items():
             print(f"\n{'='*80}")
@@ -591,7 +696,9 @@ class ISO20022Validator:
             
             # Show which spec is being used
             spec_source = ""
-            if entity_name in self.discovered_spec:
+            if self.matched_context:
+                spec_source = f" [CONTEXT: {self.matched_context['source']}|{self.matched_context['clearing']}]"
+            elif entity_name in self.discovered_spec:
                 if self.use_discovered:
                     spec_source = " [DISCOVERED FROM DATA]"
                 elif self.merge_specs:
@@ -602,16 +709,20 @@ class ISO20022Validator:
             print(f"  Required fields: {', '.join(spec['required']) if spec['required'] else 'None'}")
             print(f"  Optional fields: {', '.join(spec['optional']) if spec['optional'] else 'None'}")
             
-            # Show discovered spec details if available
-            if entity_name in self.discovered_spec and not self.use_discovered:
-                disc = self.discovered_spec[entity_name]
-                print(f"\n  DISCOVERED DATA PATTERN:")
-                print(f"    Present in data: {disc.get('presence_in_data', 'N/A')}")
-                print(f"    Required in data: {', '.join(disc['required']) if disc['required'] else 'None'}")
-                if set(disc['required']) != set(spec['required']):
-                    diff = set(disc['required']) - set(spec['required'])
-                    if diff:
-                        print(f"    ⚠ Additional required in data: {', '.join(diff)}")
+            # Compare with ISO if using context/discovered
+            if (self.use_context or self.use_discovered) and entity_name in ISO20022_SPECS:
+                iso_required = set(ISO20022_SPECS[entity_name]['required'])
+                active_required = set(spec['required'])
+                
+                added = active_required - iso_required
+                removed = iso_required - active_required
+                
+                if added or removed:
+                    print(f"\n  DIFFERENCES FROM ISO 20022:")
+                    if added:
+                        print(f"    + Additional required: {', '.join(sorted(added))}")
+                    if removed:
+                        print(f"    - Removed required: {', '.join(sorted(removed))}")
             
             # Show field details
             print(f"\n  Field Details:")
@@ -709,16 +820,25 @@ def main():
     parser = argparse.ArgumentParser(description='ISO 20022 Entity Validator')
     parser.add_argument('input', help='Input JSON file')
     parser.add_argument('--discovered-spec', help='Path to discovered_spec.json')
+    parser.add_argument('--context-spec', help='Path to context_specs.json (context-aware requirements)')
     parser.add_argument('--use-discovered', action='store_true', 
                        help='Use discovered spec instead of ISO 20022 (requires --discovered-spec)')
+    parser.add_argument('--use-context', action='store_true',
+                       help='Use context-aware spec (requires --context-spec)')
     parser.add_argument('--merge', action='store_true',
-                       help='Merge ISO spec with discovered spec (requires --discovered-spec)')
+                       help='Merge ISO spec with discovered/context spec')
     
     args = parser.parse_args()
     
     # Validate arguments
-    if (args.use_discovered or args.merge) and not args.discovered_spec:
-        parser.error("--use-discovered or --merge requires --discovered-spec")
+    if args.use_discovered and not args.discovered_spec:
+        parser.error("--use-discovered requires --discovered-spec")
+    
+    if args.use_context and not args.context_spec:
+        parser.error("--use-context requires --context-spec")
+    
+    if args.use_discovered and args.use_context:
+        parser.error("Cannot use both --use-discovered and --use-context (choose one)")
     
     with open(args.input, 'r') as f:
         data = json.load(f)
@@ -736,7 +856,9 @@ def main():
     # Create validator with appropriate spec
     validator = ISO20022Validator(
         discovered_spec_path=args.discovered_spec,
+        context_spec_path=args.context_spec,
         use_discovered=args.use_discovered,
+        use_context=args.use_context,
         merge_specs=args.merge
     )
     
@@ -756,7 +878,11 @@ def main():
     print(f"Errors: {summary['error_count']}")
     print(f"Warnings: {summary['warning_count']}")
     
-    if args.discovered_spec:
+    if args.use_context and validator.matched_context:
+        print(f"\nContext matched: {validator.matched_context['source']}|{validator.matched_context['clearing']}")
+    elif args.use_context and not validator.matched_context:
+        print(f"\nWarning: No matching context found, used default spec")
+    elif args.discovered_spec:
         spec_mode = "discovered" if args.use_discovered else "merged" if args.merge else "ISO (with discovered available)"
         print(f"Validation mode: {spec_mode}")
     
