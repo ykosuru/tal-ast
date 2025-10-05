@@ -2,7 +2,6 @@
 """
 ISO 20022 Comprehensive Entity Validator
 Shows spec, validates structure, checks every field
-Version 5
 """
 
 import json
@@ -631,6 +630,23 @@ class ISO20022Validator:
     # MAIN VALIDATION
     # ========================================================================
     
+    def _find_key(self, obj: Dict, candidates: List[str]) -> Optional[str]:
+        """Find first matching key from candidates"""
+        for key in candidates:
+            if key in obj:
+                return key
+        return None
+    
+    def _find_key_case_insensitive(self, obj: Dict, target: str) -> Optional[str]:
+        """Find key in object with case-insensitive matching"""
+        if not isinstance(obj, dict):
+            return None
+        target_lower = target.lower()
+        for key in obj.keys():
+            if key.lower() == target_lower:
+                return key
+        return None
+    
     def validate_payment(self, payment: Dict) -> Dict:
         """Validate entire payment"""
         self.clear()
@@ -909,4 +925,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
