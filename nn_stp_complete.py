@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-ace_repair_predictor_final.py
-==============================
-Complete ACE Payment Repair Predictor with Structural Change Detection
-Version: 6.0 - Production Ready with All Fixes
+Enhanced ACE Payment Repair Predictor with Incremental Directory Processing
+Version: 7.0 - Optimized for large-scale directory processing
 
-Features:
-- Learns from explicit diffs[] array
-- Learns from ace[] repairs  
-- Detects ALL structural changes between before/after states
-- Comprehensive logging that actually works
-- Predicts multiple repairs using structural patterns
+Key Enhancements:
+- Incremental file processing to handle large directories
+- Enhanced structural change detection with pattern learning
+- Source/Clearing combination analysis
+- Improved before/after state comparison
+- Database lookup pattern recognition
+- Memory-efficient processing
 """
 
 import json
@@ -19,12 +18,13 @@ import os
 import sys
 import pickle
 import logging
-from typing import Dict, List, Set, Tuple, Optional, Any
-from dataclasses import dataclass, asdict
+from typing import Dict, List, Set, Tuple, Optional, Any, Generator
+from dataclasses import dataclass, asdict, field
 from collections import defaultdict, Counter
 from pathlib import Path
 import glob
 from datetime import datetime
+import hashlib
 
 import numpy as np
 import torch
@@ -32,104 +32,60 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
+from tqdm import tqdm
 
 # ============================================================================
-# LOGGING CONFIGURATION WITH PROPER FLUSHING
+# ENHANCED LOGGING CONFIGURATION
 # ============================================================================
 
-# Main logger
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Create custom flushing handler
-class FlushingFileHandler(logging.FileHandler):
-    """File handler that flushes after every write"""
-    def emit(self, record):
-        super().emit(record)
-        if self.stream:
-            self.stream.flush()
-
-# Structural changes logger with guaranteed flushing
-structural_logger = logging.getLogger('structural_changes')
-structural_logger.setLevel(logging.DEBUG)
-structural_logger.propagate = False
-
-# Remove any existing handlers
-for handler in structural_logger.handlers[:]:
-    structural_logger.removeHandler(handler)
-
-# File handler with immediate flushing
-fh = FlushingFileHandler('structural_changes.log', mode='w')
-fh.setLevel(logging.DEBUG)
-fh.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-structural_logger.addHandler(fh)
-
-# Console handler for important structural messages
-ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.INFO)
-ch.setFormatter(logging.Formatter('STRUCTURAL: %(message)s'))
-structural_logger.addHandler(ch)
-
-# Write initial message to ensure file is created
-structural_logger.info("="*70)
-structural_logger.info("STRUCTURAL CHANGE DETECTION LOG")
-structural_logger.info("="*70)
-
-
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
-
-def safe_get_repair_id(repair_data: Any) -> str:
-    """Safely extract repair ID from potentially complex data structure"""
-    if isinstance(repair_data, str):
-        return repair_data
-    elif isinstance(repair_data, (int, float)):
-        return str(repair_data)
-    elif isinstance(repair_data, dict):
-        for key in ['id', 'value', 'repair_id', 'ID']:
-            if key in repair_data:
-                value = repair_data[key]
-                if isinstance(value, (str, int, float)):
-                    return str(value)
-                elif isinstance(value, dict):
-                    return safe_get_repair_id(value)
-        return str(hash(frozenset(repair_data.items())))
-    else:
-        return str(repair_data)
-
-
-def ensure_hashable(value: Any) -> str:
-    """Ensure a value is hashable by converting to string"""
-    if isinstance(value, (str, int, float)):
-        return str(value)
-    elif isinstance(value, dict):
-        return str(sorted(value.items()))
-    elif isinstance(value, (list, tuple)):
-        return str(value)
-    else:
-        return str(value)
-
+# Create detailed analysis logger
+analysis_logger = logging.getLogger('analysis')
+analysis_logger.setLevel(logging.DEBUG)
+analysis_handler = logging.FileHandler('detailed_analysis.log', mode='w')
+analysis_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+analysis_logger.addHandler(analysis_handler)
+analysis_logger.propagate = False
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
 @dataclass
-class Config:
-    """Model configuration"""
+class EnhancedConfig:
+    """Enhanced configuration with incremental processing settings"""
+    # Model parameters
     hidden_dim: int = 256
     dropout: float = 0.3
     learning_rate: float = 0.001
     batch_size: int = 32
     num_epochs: int = 50
+    
+    # Data splits
     train_split: float = 0.7
     val_split: float = 0.15
     test_split: float = 0.15
+    
+    # Processing parameters
+    max_files_in_memory: int = 100  # Process files in batches
+    checkpoint_interval: int = 500  # Save checkpoints every N transactions
+    enable_incremental: bool = True  # Enable incremental processing
+    
+    # Paths
     model_dir: str = "./models"
+    checkpoint_dir: str = "./checkpoints"
+    
+    # Analysis parameters
+    analyze_source_clearing: bool = True  # Analyze source/clearing patterns
+    track_database_lookups: bool = True   # Track database lookup patterns
+    detect_value_transformations: bool = True  # Detect value transformation patterns
+    
+    # Thresholds
     ml_threshold: float = 0.5
     use_class_weights: bool = True
     max_class_weight: float = 10.0
@@ -147,593 +103,66 @@ class Config:
 
 
 # ============================================================================
-# STRUCTURAL CHANGE DETECTION
+# ENHANCED STRUCTURAL CHANGE DETECTOR
 # ============================================================================
 
 @dataclass
-class StructuralChange:
-    """Represents a structural change in the payment data"""
+class EnhancedStructuralChange:
+    """Enhanced structural change representation"""
     entity: str
-    change_type: str  # 'added', 'removed', 'moved', 'restructured', 'type_changed', 'value_changed'
+    change_type: str  # added, removed, moved, restructured, value_changed, lookup_enriched
     field_path: str
     old_path: Optional[str] = None
     old_value: Optional[Any] = None
     new_value: Optional[Any] = None
+    transformation_type: Optional[str] = None  # lookup, formatting, enrichment
+    confidence: float = 1.0
     details: Optional[Dict] = None
 
 
-class StructuralChangeDetector:
-    """Detects ALL structural changes between before and after states"""
+class EnhancedStructuralDetector:
+    """Enhanced detector with pattern learning and database lookup detection"""
     
-    def __init__(self, verbose: bool = True):
-        self.verbose = verbose
+    def __init__(self, config: EnhancedConfig):
+        self.config = config
         self.change_patterns = defaultdict(Counter)
-        self.field_movements = defaultdict(list)
-        self.structural_patterns = defaultdict(set)
-        self.all_detected_changes = []
-        self.transaction_count = 0
+        self.source_clearing_patterns = defaultdict(set)
+        self.database_lookup_patterns = defaultdict(list)
+        self.value_transformation_patterns = defaultdict(list)
+        self.entity_change_sequences = defaultdict(list)
         
-        # Log initialization
-        structural_logger.info(f"Structural detector initialized (verbose={verbose})")
-        
-    def detect_all_changes(self, before: Dict, after: Dict, entity_name: str, 
-                          txn_id: str = None) -> List[StructuralChange]:
-        """Detect all structural changes between before and after states"""
-        
-        self.transaction_count += 1
-        changes = []
-        
-        structural_logger.info(f"\n{'='*70}")
-        structural_logger.info(f"Transaction #{self.transaction_count}: {entity_name} ({txn_id or 'unknown'})")
-        structural_logger.info(f"{'='*70}")
-        
-        # Get complete field inventories
-        before_fields = self._get_field_inventory(before)
-        after_fields = self._get_field_inventory(after)
-        
-        structural_logger.info(f"Field counts - Before: {len(before_fields)}, After: {len(after_fields)}")
-        
-        # 1. Find added fields
-        added_fields = after_fields.keys() - before_fields.keys()
-        if added_fields:
-            structural_logger.info(f"\n📌 ADDED FIELDS ({len(added_fields)}):")
-            for field_path in sorted(added_fields):
-                value = after_fields[field_path]['value']
-                structural_logger.info(f"  + {field_path}")
-                changes.append(StructuralChange(
-                    entity=entity_name,
-                    change_type='added',
-                    field_path=field_path,
-                    new_value=value
-                ))
-                
-                # Special pattern detection
-                if 'othr' in field_path.lower():
-                    structural_logger.warning(f"    ⚠️ 'othr' structure added!")
-                if 'clrsysid.mmbid' in field_path.lower():
-                    structural_logger.warning(f"    ⚠️ MmbId added inside ClrSysId!")
-        
-        # 2. Find removed fields
-        removed_fields = before_fields.keys() - after_fields.keys()
-        if removed_fields:
-            structural_logger.info(f"\n📌 REMOVED FIELDS ({len(removed_fields)}):")
-            for field_path in sorted(removed_fields):
-                value = before_fields[field_path]['value']
-                structural_logger.info(f"  - {field_path}")
-                changes.append(StructuralChange(
-                    entity=entity_name,
-                    change_type='removed',
-                    field_path=field_path,
-                    old_value=value
-                ))
-        
-        # 3. Find moved fields
-        moved_changes = self._detect_field_movements(before_fields, after_fields, entity_name)
-        if moved_changes:
-            structural_logger.info(f"\n📌 MOVED FIELDS ({len(moved_changes)}):")
-            for change in moved_changes:
-                structural_logger.info(f"  ➜ {change.old_path} -> {change.field_path}")
-                if 'mmbid' in change.old_path.lower() and 'clrsysid' in change.field_path.lower():
-                    structural_logger.warning(f"    ⚠️ MmbId moved into ClrSysId structure!")
-                changes.append(change)
-        
-        # 4. Find value changes
-        common_fields = before_fields.keys() & after_fields.keys()
-        value_changes = []
-        for field_path in common_fields:
-            before_val = before_fields[field_path]['value']
-            after_val = after_fields[field_path]['value']
-            
-            if isinstance(before_val, (str, int, float, bool)) and isinstance(after_val, (str, int, float, bool)):
-                if before_val != after_val:
-                    value_changes.append(StructuralChange(
-                        entity=entity_name,
-                        change_type='value_changed',
-                        field_path=field_path,
-                        old_value=before_val,
-                        new_value=after_val
-                    ))
-        
-        if value_changes:
-            structural_logger.info(f"\n📌 VALUE CHANGES ({len(value_changes)}):")
-            for change in value_changes[:5]:  # Show first 5
-                structural_logger.info(f"  ≠ {change.field_path}: '{change.old_value}' -> '{change.new_value}'")
-            changes.extend(value_changes)
-        
-        # 5. Detect restructuring patterns
-        restructured = self._detect_restructuring(before, after, entity_name)
-        if restructured:
-            structural_logger.info(f"\n📌 RESTRUCTURING PATTERNS ({len(restructured)}):")
-            for change in restructured:
-                if change.details:
-                    structural_logger.info(f"  ♻️ {change.details.get('pattern', 'Unknown')}")
-            changes.extend(restructured)
-        
-        # Summary
-        structural_logger.info(f"\n📊 SUMMARY for {entity_name}:")
-        structural_logger.info(f"  Total changes: {len(changes)}")
-        structural_logger.info(f"  Added: {len([c for c in changes if c.change_type == 'added'])}")
-        structural_logger.info(f"  Removed: {len([c for c in changes if c.change_type == 'removed'])}")
-        structural_logger.info(f"  Moved: {len([c for c in changes if c.change_type == 'moved'])}")
-        
-        self.all_detected_changes.extend(changes)
-        return changes
-    
-    def _get_field_inventory(self, obj: Any, path: str = "") -> Dict[str, Dict]:
-        """Get complete inventory of all fields with their paths and values"""
-        inventory = {}
-        
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                current_path = f"{path}.{key}" if path else key
-                
-                inventory[current_path] = {
-                    'value': value,
-                    'type': type(value).__name__,
-                    'depth': current_path.count('.')
-                }
-                
-                if isinstance(value, (dict, list)):
-                    nested_inventory = self._get_field_inventory(value, current_path)
-                    inventory.update(nested_inventory)
-                    
-        elif isinstance(obj, list):
-            for idx, item in enumerate(obj):
-                current_path = f"{path}[{idx}]"
-                inventory[current_path] = {
-                    'value': item,
-                    'type': type(item).__name__,
-                    'depth': path.count('.') + 1
-                }
-                
-                if isinstance(item, (dict, list)):
-                    nested_inventory = self._get_field_inventory(item, current_path)
-                    inventory.update(nested_inventory)
-        
-        return inventory
-    
-    def _detect_field_movements(self, before_fields: Dict, after_fields: Dict, 
-                                entity_name: str) -> List[StructuralChange]:
-        """Detect fields that moved to different locations"""
-        changes = []
-        
-        # Create value-to-path mappings
-        before_values = {}
-        for path, info in before_fields.items():
-            value_str = self._serialize_value(info['value'])
-            if value_str and len(value_str) > 3:
-                if value_str not in before_values:
-                    before_values[value_str] = []
-                before_values[value_str].append(path)
-        
-        after_values = {}
-        for path, info in after_fields.items():
-            value_str = self._serialize_value(info['value'])
-            if value_str and len(value_str) > 3:
-                if value_str not in after_values:
-                    after_values[value_str] = []
-                after_values[value_str].append(path)
-        
-        # Find moved values
-        for value_str, before_paths in before_values.items():
-            if value_str in after_values:
-                after_paths = after_values[value_str]
-                
-                for before_path in before_paths:
-                    for after_path in after_paths:
-                        if self._is_moved_field(before_path, after_path):
-                            changes.append(StructuralChange(
-                                entity=entity_name,
-                                change_type='moved',
-                                field_path=after_path,
-                                old_path=before_path,
-                                new_value=value_str[:100],
-                                details={
-                                    'depth_change': after_path.count('.') - before_path.count('.'),
-                                    'parent_changed': self._get_parent_path(before_path) != self._get_parent_path(after_path)
-                                }
-                            ))
-                            
-                            movement_pattern = f"{self._get_field_name(before_path)} -> {self._get_field_name(after_path)}"
-                            self.field_movements[entity_name].append(movement_pattern)
-        
-        return changes
-    
-    def _detect_restructuring(self, before: Dict, after: Dict, entity_name: str) -> List[StructuralChange]:
-        """Detect structural reorganizations"""
-        changes = []
-        
-        restructure_patterns = [
-            {
-                'name': 'MmbId_to_ClrSysId',
-                'before_check': lambda b: self._path_exists(b, 'finInstnId.mmbId') or self._path_exists(b, 'mmbId'),
-                'after_check': lambda a: self._path_exists(a, 'finInstnId.clrSysId.mmbId') or self._path_exists(a, 'clrSysId.mmbId'),
-                'description': 'MmbId moved inside ClrSysId structure'
-            },
-            {
-                'name': 'Othr_Addition',
-                'before_check': lambda b: not self._path_exists(b, 'finInstnId.othr') and not self._path_exists(b, 'othr'),
-                'after_check': lambda a: self._path_exists(a, 'finInstnId.othr') or self._path_exists(a, 'othr'),
-                'description': 'Other identifier (othr) structure added'
-            },
-            {
-                'name': 'ClrSys_Creation',
-                'before_check': lambda b: not self._path_exists(b, 'finInstnId.clrSysId') and not self._path_exists(b, 'clrSysId'),
-                'after_check': lambda a: self._path_exists(a, 'finInstnId.clrSysId') or self._path_exists(a, 'clrSysId'),
-                'description': 'Clearing System ID structure created'
-            }
-        ]
-        
-        for pattern in restructure_patterns:
-            try:
-                before_matches = pattern['before_check'](before) if before else False
-                after_matches = pattern['after_check'](after) if after else False
-                
-                if not before_matches and after_matches:
-                    changes.append(StructuralChange(
-                        entity=entity_name,
-                        change_type='restructured',
-                        field_path=entity_name,
-                        details={'pattern': pattern['description']}
-                    ))
-                    self.structural_patterns[entity_name].add(pattern['description'])
-                    
-            except Exception:
-                continue
-        
-        return changes
-    
-    def _serialize_value(self, value: Any) -> Optional[str]:
-        """Convert value to string for comparison"""
-        if value is None:
-            return None
-        if isinstance(value, (str, int, float, bool)):
-            return str(value)
-        if isinstance(value, dict):
-            if len(value) == 0:
-                return None
-            if len(value) <= 3:
-                return json.dumps(value, sort_keys=True, default=str)
-        if isinstance(value, list):
-            if len(value) == 0:
-                return None
-            if len(value) == 1:
-                return self._serialize_value(value[0])
-        return None
-    
-    def _is_moved_field(self, before_path: str, after_path: str) -> bool:
-        """Check if a field has moved to a different location"""
-        if before_path == after_path:
-            return False
-        
-        before_field = self._get_field_name(before_path)
-        after_field = self._get_field_name(after_path)
-        
-        if before_field.lower() == after_field.lower():
-            return True
-        
-        before_parent = self._get_parent_path(before_path)
-        after_parent = self._get_parent_path(after_path)
-        
-        return before_parent != after_parent and before_field.lower() in after_field.lower()
-    
-    def _get_field_name(self, path: str) -> str:
-        """Get the field name from a path"""
-        path = path.replace(']', '').replace('[', '.')
-        parts = path.split('.')
-        return parts[-1] if parts else ''
-    
-    def _get_parent_path(self, path: str) -> str:
-        """Get the parent path"""
-        path = path.replace(']', '').replace('[', '.')
-        parts = path.split('.')
-        return '.'.join(parts[:-1]) if len(parts) > 1 else ''
-    
-    def _path_exists(self, obj: Dict, path: str) -> bool:
-        """Check if a path exists in the object"""
-        if not obj:
-            return False
-        parts = path.split('.')
-        current = obj
-        for part in parts:
-            part_lower = part.lower()
-            if isinstance(current, dict):
-                found = False
-                for key in current.keys():
-                    if key.lower() == part_lower:
-                        current = current[key]
-                        found = True
-                        break
-                if not found:
-                    return False
-            else:
-                return False
-        return True
-    
-    def learn_patterns(self, changes: List[StructuralChange], repair_ids: List[str]):
-        """Learn which structural changes correlate with which repairs"""
-        for change in changes:
-            pattern_key = f"{change.change_type}:{change.field_path}"
-            for repair_id in repair_ids:
-                self.change_patterns[pattern_key][repair_id] += 1
-    
-    def get_change_signature(self, changes: List[StructuralChange]) -> Dict:
-        """Get a signature of the structural changes"""
-        return {
-            'total_changes': len(changes),
-            'additions': sum(1 for c in changes if c.change_type == 'added'),
-            'removals': sum(1 for c in changes if c.change_type == 'removed'),
-            'movements': sum(1 for c in changes if c.change_type == 'moved'),
-            'restructuring': sum(1 for c in changes if c.change_type == 'restructured'),
-            'type_changes': sum(1 for c in changes if c.change_type == 'type_changed'),
-            'value_changes': sum(1 for c in changes if c.change_type == 'value_changed')
-        }
-    
-    def print_summary(self):
-        """Print comprehensive summary of learned patterns"""
-        structural_logger.info(f"\n{'='*70}")
-        structural_logger.info("STRUCTURAL LEARNING SUMMARY")
-        structural_logger.info(f"{'='*70}")
-        structural_logger.info(f"Analyzed {self.transaction_count} entity states")
-        structural_logger.info(f"Total changes detected: {len(self.all_detected_changes)}")
-        
-        # Change type distribution
-        change_counts = Counter(c.change_type for c in self.all_detected_changes)
-        structural_logger.info("\n📊 Change Type Distribution:")
-        for change_type, count in change_counts.most_common():
-            structural_logger.info(f"  {change_type}: {count}")
-        
-        # Movement patterns
-        if self.field_movements:
-            structural_logger.info("\n➜ Field Movement Patterns:")
-            for entity, movements in list(self.field_movements.items())[:5]:
-                movement_counts = Counter(movements)
-                structural_logger.info(f"  {entity}:")
-                for pattern, count in movement_counts.most_common(3):
-                    structural_logger.info(f"    {pattern}: {count} times")
-        
-        # Top correlations
-        structural_logger.info("\n🔗 Top Change-to-Repair Correlations:")
-        top_correlations = []
-        for pattern_key, repair_counts in self.change_patterns.items():
-            for repair_id, count in repair_counts.items():
-                if count >= 2:
-                    top_correlations.append((pattern_key[:60], repair_id, count))
-        
-        top_correlations.sort(key=lambda x: x[2], reverse=True)
-        for pattern, repair, count in top_correlations[:10]:
-            structural_logger.info(f"  {pattern} -> {repair}: {count} times")
-
-
-# ============================================================================
-# REPAIR PATTERN FACTORY
-# ============================================================================
-
-def _repair_pattern_factory():
-    """Factory function for repair pattern defaultdict"""
-    return {
-        'fields_added': Counter(),
-        'fields_dropped': Counter(),
-        'fields_transformed': Counter(),
-        'typical_entities': Counter(),
-        'total_diffs': 0,
-        'descriptions': [],
-        'codes': Counter(),
-        'fields': Counter(),
-        'co_occurring_repairs': Counter(),
-        'entity_field_patterns': defaultdict(Counter),
-        'structural_changes': Counter()
-    }
-
-
-# ============================================================================
-# ACE REPAIR LEARNER
-# ============================================================================
-
-class AceRepairLearner:
-    """Learner that analyzes ACE repairs, diffs, and structural changes"""
-    
-    def __init__(self, config: Config = None):
-        self.config = config or Config()
-        self.repair_patterns = defaultdict(_repair_pattern_factory)
-        self.repair_taxonomy = {}
-        self.repair_cooccurrence = defaultdict(Counter)
-        self.repair_to_diffs_mapping = defaultdict(list)
-        self.entity_repair_associations = defaultdict(Counter)
-        self.lookup_tables = {
-            'bic_to_name': {},
-            'bic_to_address': {},
-            'country_extractions': Counter(),
-            'clearing_to_bic': {}
-        }
-        
-        # Structural detection
-        self.structural_detector = StructuralChangeDetector(verbose=self.config.verbose_logging)
-        self.repair_to_structural_patterns = defaultdict(list)
-        self.structural_features_cache = {}
-        
-    def learn_from_transaction(self, txn_id: str, txn_data: Dict) -> Dict:
-        """Learn from ACE repairs, diffs, and structural changes"""
-        
-        # Extract repair IDs
-        repairs_in_txn = []
-        repair_details = {}
-        
-        for repair in txn_data.get('ace', []):
-            repair_id = safe_get_repair_id(repair.get('id', 'unknown'))
-            repair_code = str(repair.get('code', 'I'))
-            repair_field = str(repair.get('field', ''))
-            repair_text = str(repair.get('text', ''))
-            
-            repairs_in_txn.append(repair_id)
-            repair_details[repair_id] = {
-                'code': repair_code,
-                'field': repair_field,
-                'text': repair_text
-            }
-            
-            # Update taxonomy
-            if repair_id not in self.repair_taxonomy:
-                self.repair_taxonomy[repair_id] = {
-                    'code': repair_code,
-                    'field': repair_field,
-                    'text': repair_text,
-                    'count': 0,
-                    'typical_scenarios': []
-                }
-            self.repair_taxonomy[repair_id]['count'] += 1
-            
-            # Update patterns
-            self.repair_patterns[repair_id]['codes'][repair_code] += 1
-            self.repair_patterns[repair_id]['fields'][repair_field] += 1
-            if repair_text not in self.repair_patterns[repair_id]['descriptions']:
-                self.repair_patterns[repair_id]['descriptions'].append(repair_text)
-        
-        # Learn repair co-occurrence
-        for i, repair1 in enumerate(repairs_in_txn):
-            for repair2 in repairs_in_txn[i+1:]:
-                self.repair_cooccurrence[repair1][repair2] += 1
-                self.repair_cooccurrence[repair2][repair1] += 1
-        
-        # Process diffs
-        diff_features = self._analyze_diffs(txn_data, repairs_in_txn)
-        
-        # Detect structural changes
-        structural_features = self._detect_structural_changes(txn_data, repairs_in_txn, txn_id)
-        
-        # Learn lookup patterns
-        self._learn_lookup_patterns(txn_data, repairs_in_txn)
-        
-        # Combine all features
-        combined_features = {**diff_features, **structural_features}
-        
-        return combined_features
-    
-    def _analyze_diffs(self, txn_data: Dict, repairs: List[str]) -> Dict:
-        """Analyze explicit diffs from the diffs[] array"""
-        diff_features = {
-            'num_additions': 0,
-            'num_drops': 0,
-            'num_transformations': 0,
+    def analyze_transaction(self, txn_id: str, txn_data: Dict) -> Dict:
+        """Comprehensive transaction analysis"""
+        analysis = {
+            'structural_changes': [],
+            'database_lookups': [],
+            'value_transformations': [],
+            'source_clearing_pattern': None,
             'affected_entities': set(),
-            'affected_fields': set(),
-            'has_bic_changes': False,
-            'has_name_changes': False,
-            'has_address_changes': False,
-            'has_country_changes': False,
-            'has_clearing_changes': False,
-            'specific_repairs_indicated': set()
+            'change_complexity': 0
         }
         
-        entities_with_diffs = ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'instdAgt',
-                               'cdtr', 'dbtr', 'cdtrAcct', 'dbtrAcct', 
-                               'intrmyAgt1', 'intrmyAgt2', 'rmtInf']
-        
-        for entity_key in entities_with_diffs:
-            if entity_key not in txn_data:
-                continue
+        # Analyze source/clearing combination
+        if self.config.analyze_source_clearing:
+            source = txn_data.get('source', 'unknown')
+            clearing = txn_data.get('clearing', 'unknown')
+            pattern = f"{source}:{clearing}"
+            analysis['source_clearing_pattern'] = pattern
             
-            entity_data = txn_data[entity_key]
-            if not isinstance(entity_data, dict) or 'diffs' not in entity_data:
-                continue
-            
-            entity_key_str = ensure_hashable(entity_key).lower()
-            diff_features['affected_entities'].add(entity_key_str)
-            
-            for repair_id in repairs:
-                self.entity_repair_associations[entity_key_str][repair_id] += 1
-            
-            # Process each diff
-            for diff in entity_data.get('diffs', []):
-                action = diff.get('msg', '').lower()
-                field_path = ensure_hashable(diff.get('key', ''))
-                value = diff.get('val', '')
-                
-                # Update counts
-                if action == 'added':
-                    diff_features['num_additions'] += 1
-                elif action == 'dropped':
-                    diff_features['num_drops'] += 1
-                elif action in ['transformed', 'edited']:
-                    diff_features['num_transformations'] += 1
-                
-                field_lower = field_path.lower()
-                diff_features['affected_fields'].add(field_lower)
-                
-                # Detect specific change types
-                if 'bic' in field_lower:
-                    diff_features['has_bic_changes'] = True
-                if 'nm' in field_lower or 'name' in field_lower:
-                    diff_features['has_name_changes'] = True
-                if 'adr' in field_lower or 'pstl' in field_lower:
-                    diff_features['has_address_changes'] = True
-                if 'ctry' in field_lower:
-                    diff_features['has_country_changes'] = True
-                if 'clrsys' in field_lower or 'mmbid' in field_lower:
-                    diff_features['has_clearing_changes'] = True
-                
-                # Update repair patterns
-                for repair_id in repairs:
-                    self.repair_patterns[repair_id]['total_diffs'] += 1
-                    self.repair_patterns[repair_id]['typical_entities'][entity_key_str] += 1
-                    
-                    if action == 'added':
-                        self.repair_patterns[repair_id]['fields_added'][field_lower] += 1
-                    elif action == 'dropped':
-                        self.repair_patterns[repair_id]['fields_dropped'][field_lower] += 1
-                    elif action in ['transformed', 'edited']:
-                        self.repair_patterns[repair_id]['fields_transformed'][field_lower] += 1
+            # Learn repair associations with source/clearing
+            for repair in txn_data.get('ace', []):
+                repair_id = self._get_repair_id(repair)
+                self.source_clearing_patterns[pattern].add(repair_id)
         
-        return diff_features
-    
-    def _detect_structural_changes(self, txn_data: Dict, repairs: List[str], txn_id: str) -> Dict:
-        """Detect ALL structural changes between before/after states"""
-        
-        structural_features = {
-            'total_structural_changes': 0,
-            'field_movements': 0,
-            'field_additions': 0,
-            'field_removals': 0,
-            'restructuring_count': 0,
-            'nesting_depth_changes': 0,
-            'has_othr_addition': False,
-            'has_clrsys_restructure': False,
-            'has_mmbid_movement': False,
-            'max_nesting_change': 0,
-            'structural_complexity': 0
-        }
-        
-        all_changes = []
-        
-        # Check each entity for structural changes
+        # Analyze each entity for changes
         entities = ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'instdAgt',
-                   'cdtr', 'dbtr', 'intrmyAgt1', 'intrmyAgt2',
-                   'cdtrAcct', 'dbtrAcct', 'rmtInf']
+                   'cdtr', 'dbtr', 'cdtrAcct', 'dbtrAcct', 'rmtInf',
+                   'intrmyAgt1', 'intrmyAgt2']
         
         for entity in entities:
             if entity not in txn_data:
                 continue
-            
+                
             entity_data = txn_data[entity]
             if not isinstance(entity_data, dict):
                 continue
@@ -744,637 +173,596 @@ class AceRepairLearner:
             if not (before or after):
                 continue
             
-            # Detect changes
-            changes = self.structural_detector.detect_all_changes(before, after, entity, txn_id)
-            all_changes.extend(changes)
+            analysis['affected_entities'].add(entity)
             
-            # Process detected changes
-            for change in changes:
-                structural_features['total_structural_changes'] += 1
-                
-                if change.change_type == 'added':
-                    structural_features['field_additions'] += 1
-                    if 'othr' in change.field_path.lower():
-                        structural_features['has_othr_addition'] = True
-                        
-                elif change.change_type == 'removed':
-                    structural_features['field_removals'] += 1
-                    
-                elif change.change_type == 'moved':
-                    structural_features['field_movements'] += 1
-                    if 'mmbid' in change.field_path.lower():
-                        structural_features['has_mmbid_movement'] = True
-                    if change.details and 'depth_change' in change.details:
-                        depth = abs(change.details['depth_change'])
-                        structural_features['nesting_depth_changes'] += depth
-                        structural_features['max_nesting_change'] = max(
-                            structural_features['max_nesting_change'], depth
-                        )
-                
-                elif change.change_type == 'restructured':
-                    structural_features['restructuring_count'] += 1
-                    if change.details and 'clrsys' in str(change.details).lower():
-                        structural_features['has_clrsys_restructure'] = True
-                
-                # Map change to repairs
-                for repair_id in repairs:
-                    pattern_key = f"{change.change_type}:{change.field_path}"
-                    self.repair_patterns[repair_id]['structural_changes'][pattern_key] += 1
+            # Detect structural changes
+            changes = self._detect_changes(before, after, entity)
+            analysis['structural_changes'].extend(changes)
+            
+            # Detect database lookups
+            if self.config.track_database_lookups:
+                lookups = self._detect_database_lookups(before, after, entity)
+                analysis['database_lookups'].extend(lookups)
+            
+            # Detect value transformations
+            if self.config.detect_value_transformations:
+                transformations = self._detect_value_transformations(before, after, entity)
+                analysis['value_transformations'].extend(transformations)
         
         # Calculate complexity score
-        structural_features['structural_complexity'] = (
-            structural_features['field_movements'] * 2 +
-            structural_features['restructuring_count'] * 3 +
-            structural_features['max_nesting_change'] +
-            (structural_features['field_additions'] + structural_features['field_removals']) * 0.5
-        )
+        analysis['change_complexity'] = self._calculate_complexity(analysis)
         
-        # Learn patterns
-        if all_changes and repairs:
-            self.structural_detector.learn_patterns(all_changes, repairs)
-            for repair_id in repairs:
-                signature = self.structural_detector.get_change_signature(all_changes)
-                self.repair_to_structural_patterns[repair_id].append(signature)
-        
-        # Cache features
-        self.structural_features_cache[txn_id] = structural_features
-        
-        return structural_features
+        return analysis
     
-    def _learn_lookup_patterns(self, txn_data: Dict, repair_ids: List[str]):
-        """Learn lookup patterns from before/after states"""
-        entities = ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'instdAgt', 'intrmyAgt1', 'intrmyAgt2']
+    def _detect_changes(self, before: Dict, after: Dict, entity: str) -> List[EnhancedStructuralChange]:
+        """Detect all structural changes between states"""
+        changes = []
         
-        for entity_key in entities:
-            if entity_key not in txn_data:
-                continue
-                
-            entity_data = txn_data[entity_key]
-            if not isinstance(entity_data, dict):
-                continue
+        before_inventory = self._get_field_inventory(before)
+        after_inventory = self._get_field_inventory(after)
+        
+        # Find additions
+        for field_path in after_inventory.keys() - before_inventory.keys():
+            changes.append(EnhancedStructuralChange(
+                entity=entity,
+                change_type='added',
+                field_path=field_path,
+                new_value=after_inventory[field_path]['value']
+            ))
+        
+        # Find removals
+        for field_path in before_inventory.keys() - after_inventory.keys():
+            changes.append(EnhancedStructuralChange(
+                entity=entity,
+                change_type='removed',
+                field_path=field_path,
+                old_value=before_inventory[field_path]['value']
+            ))
+        
+        # Find movements (same value, different location)
+        value_locations_before = defaultdict(set)
+        value_locations_after = defaultdict(set)
+        
+        for path, info in before_inventory.items():
+            val_hash = self._hash_value(info['value'])
+            if val_hash:
+                value_locations_before[val_hash].add(path)
+        
+        for path, info in after_inventory.items():
+            val_hash = self._hash_value(info['value'])
+            if val_hash:
+                value_locations_after[val_hash].add(path)
+        
+        for val_hash in value_locations_before.keys() & value_locations_after.keys():
+            before_paths = value_locations_before[val_hash]
+            after_paths = value_locations_after[val_hash]
             
-            before = entity_data.get('before', {})
-            after = entity_data.get('after', {})
-            
-            # Learn BIC lookups
-            clearing = self._find_value_in_dict(before, 'mmbid') or self._find_value_in_dict(before, 'clrsysmmbid')
-            bic_after = self._find_value_in_dict(after, 'bicfi') or self._find_value_in_dict(after, 'bic')
-            
-            if clearing and bic_after and not self._find_value_in_dict(before, 'bicfi'):
-                self.lookup_tables['clearing_to_bic'][ensure_hashable(clearing)] = ensure_hashable(bic_after)
+            if before_paths != after_paths:
+                for old_path in before_paths - after_paths:
+                    for new_path in after_paths - before_paths:
+                        changes.append(EnhancedStructuralChange(
+                            entity=entity,
+                            change_type='moved',
+                            field_path=new_path,
+                            old_path=old_path,
+                            new_value=after_inventory[new_path]['value']
+                        ))
+        
+        return changes
     
-    def _find_value_in_dict(self, d: Dict, key_pattern: str) -> Optional[Any]:
-        """Recursively find value by key pattern in nested dict"""
-        if not isinstance(d, dict):
+    def _detect_database_lookups(self, before: Dict, after: Dict, entity: str) -> List[Dict]:
+        """Detect patterns indicating database lookups"""
+        lookups = []
+        
+        # Pattern 1: BIC added when clearing number exists
+        before_clearing = self._find_field(before, ['mmbId', 'clrSysMmbId'])
+        after_bic = self._find_field(after, ['bicFi', 'bic'])
+        before_bic = self._find_field(before, ['bicFi', 'bic'])
+        
+        if before_clearing and after_bic and not before_bic:
+            lookups.append({
+                'type': 'bic_lookup',
+                'input': before_clearing,
+                'output': after_bic,
+                'entity': entity
+            })
+            self.database_lookup_patterns['bic_lookup'].append((before_clearing, after_bic))
+        
+        # Pattern 2: Name added when BIC exists
+        before_bic = self._find_field(before, ['bicFi', 'bic'])
+        after_name = self._find_field(after, ['nm', 'name'])
+        before_name = self._find_field(before, ['nm', 'name'])
+        
+        if before_bic and after_name and not before_name:
+            lookups.append({
+                'type': 'name_lookup',
+                'input': before_bic,
+                'output': after_name,
+                'entity': entity
+            })
+            self.database_lookup_patterns['name_lookup'].append((before_bic, after_name))
+        
+        # Pattern 3: Address enrichment
+        before_has_partial = self._find_field(before, ['townName', 'ctry'])
+        after_has_full = self._find_field(after, ['adrLine'])
+        
+        if before_has_partial and after_has_full:
+            lookups.append({
+                'type': 'address_enrichment',
+                'entity': entity
+            })
+        
+        return lookups
+    
+    def _detect_value_transformations(self, before: Dict, after: Dict, entity: str) -> List[Dict]:
+        """Detect value transformation patterns"""
+        transformations = []
+        
+        before_fields = self._flatten_dict(before)
+        after_fields = self._flatten_dict(after)
+        
+        for field_name in before_fields.keys() & after_fields.keys():
+            before_val = before_fields[field_name]
+            after_val = after_fields[field_name]
+            
+            if before_val != after_val:
+                transformation = self._classify_transformation(before_val, after_val)
+                if transformation:
+                    transformations.append({
+                        'field': field_name,
+                        'type': transformation,
+                        'before': str(before_val)[:100],
+                        'after': str(after_val)[:100],
+                        'entity': entity
+                    })
+                    self.value_transformation_patterns[transformation].append((field_name, entity))
+        
+        return transformations
+    
+    def _classify_transformation(self, before_val: Any, after_val: Any) -> Optional[str]:
+        """Classify the type of value transformation"""
+        before_str = str(before_val).lower()
+        after_str = str(after_val).lower()
+        
+        # Case normalization
+        if before_str == after_str:
+            return 'case_normalization'
+        
+        # Format standardization
+        if before_str.replace(' ', '').replace(',', '') == after_str.replace(' ', '').replace(',', ''):
+            return 'format_standardization'
+        
+        # Address formatting
+        if any(term in before_str for term in ['street', 'ave', 'road']) or \
+           any(term in after_str for term in ['street', 'ave', 'road']):
+            return 'address_formatting'
+        
+        # Country code extraction
+        if len(after_str) == 2 and after_str.isupper() and after_str in before_str:
+            return 'country_extraction'
+        
+        # General enrichment
+        if len(after_str) > len(before_str) * 1.5:
+            return 'data_enrichment'
+        
+        # General transformation
+        return 'value_transformation'
+    
+    def _get_field_inventory(self, obj: Any, path: str = "") -> Dict[str, Dict]:
+        """Get inventory of all fields with paths"""
+        inventory = {}
+        
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                current_path = f"{path}.{key}" if path else key
+                inventory[current_path] = {
+                    'value': value,
+                    'type': type(value).__name__
+                }
+                if isinstance(value, (dict, list)):
+                    nested = self._get_field_inventory(value, current_path)
+                    inventory.update(nested)
+                    
+        elif isinstance(obj, list):
+            for idx, item in enumerate(obj):
+                current_path = f"{path}[{idx}]"
+                inventory[current_path] = {
+                    'value': item,
+                    'type': type(item).__name__
+                }
+                if isinstance(item, (dict, list)):
+                    nested = self._get_field_inventory(item, current_path)
+                    inventory.update(nested)
+        
+        return inventory
+    
+    def _find_field(self, obj: Dict, field_names: List[str]) -> Optional[Any]:
+        """Find field by multiple possible names"""
+        def search(o, depth=0):
+            if depth > 10 or not isinstance(o, dict):
+                return None
+            
+            for field_name in field_names:
+                for key, value in o.items():
+                    if field_name.lower() in key.lower():
+                        return value
+                    
+            for value in o.values():
+                if isinstance(value, dict):
+                    result = search(value, depth + 1)
+                    if result is not None:
+                        return result
             return None
         
-        key_pattern = key_pattern.lower()
-        for k, v in d.items():
-            if key_pattern in str(k).lower():
-                return v
+        return search(obj)
+    
+    def _flatten_dict(self, obj: Dict, parent_key: str = '') -> Dict:
+        """Flatten nested dictionary"""
+        items = []
+        for k, v in obj.items():
+            new_key = f"{parent_key}.{k}" if parent_key else k
             if isinstance(v, dict):
-                result = self._find_value_in_dict(v, key_pattern)
-                if result is not None:
-                    return result
+                items.extend(self._flatten_dict(v, new_key).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+    
+    def _hash_value(self, value: Any) -> Optional[str]:
+        """Create hash of value for comparison"""
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            if str(value).strip():
+                return hashlib.md5(str(value).encode()).hexdigest()[:8]
         return None
     
-    def print_summary(self):
-        """Print comprehensive learning summary"""
-        logger.info("\n" + "="*70)
-        logger.info("ACE REPAIR LEARNING SUMMARY")
-        logger.info("="*70)
-        
-        logger.info(f"\nLearned {len(self.repair_taxonomy)} unique repairs:")
-        sorted_repairs = sorted(self.repair_taxonomy.items(), key=lambda x: x[1]['count'], reverse=True)
-        for repair_id, info in sorted_repairs[:10]:
-            logger.info(f"  {repair_id}: [{info['code']}] {info['field']} - {info['text'][:50]}...")
-            logger.info(f"    Count: {info['count']}")
-        
-        # Co-occurrence patterns
-        logger.info(f"\nRepair Co-occurrence Patterns:")
-        for repair_id in list(self.repair_cooccurrence.keys())[:5]:
-            co_occurring = self.repair_cooccurrence[repair_id].most_common(3)
-            if co_occurring:
-                logger.info(f"  {repair_id} often occurs with: {co_occurring}")
-        
-        # Structural patterns
-        self.structural_detector.print_summary()
+    def _calculate_complexity(self, analysis: Dict) -> float:
+        """Calculate change complexity score"""
+        score = 0.0
+        score += len(analysis['structural_changes']) * 1.0
+        score += len(analysis['database_lookups']) * 2.0
+        score += len(analysis['value_transformations']) * 0.5
+        score += len(analysis['affected_entities']) * 1.5
+        return score
+    
+    def _get_repair_id(self, repair: Any) -> str:
+        """Extract repair ID from repair data"""
+        if isinstance(repair, dict):
+            return str(repair.get('id', 'unknown'))
+        return str(repair)
 
 
 # ============================================================================
-# FEATURE EXTRACTION
+# INCREMENTAL DATA PROCESSOR
 # ============================================================================
 
-class FeatureExtractor:
-    """Extracts features from payment structure, diffs, and structural changes"""
+class IncrementalDataProcessor:
+    """Process large datasets incrementally"""
     
-    def __init__(self, ace_learner: Optional[AceRepairLearner] = None):
-        self.ace_learner = ace_learner
-        self.feature_names = []
-        self._build_feature_names()
-    
-    def _build_feature_names(self):
-        """Define all feature names"""
-        # Basic structural features
-        self.feature_names.extend([
-            'has_bic', 'has_iban', 'has_clearing_id', 'has_bank_name',
-            'has_address', 'has_country', 'has_cdtrAgt', 'has_dbtrAgt',
-            'has_instgAgt', 'has_instdAgt', 'has_cdtr', 'has_dbtr',
-            'has_rmtInf', 'missing_bic_has_clearing', 'missing_name_has_bic',
-            'missing_country_has_bic', 'entity_count', 'field_count'
-        ])
-        
-        # Diff-based features
-        self.feature_names.extend([
-            'diff_num_additions', 'diff_num_drops', 'diff_num_transformations',
-            'diff_affected_entities', 'diff_affected_fields',
-            'diff_has_bic_changes', 'diff_has_name_changes', 
-            'diff_has_address_changes', 'diff_has_country_changes',
-            'diff_has_clearing_changes', 'diff_affects_cdtragt',
-            'diff_affects_dbtragt', 'diff_affects_instgagt'
-        ])
-        
-        # ACE-specific features
-        self.feature_names.extend([
-            'needs_country_extraction', 'needs_bic_lookup', 'needs_name_lookup',
-            'needs_address_enrichment', 'multiple_agents_incomplete',
-            'clearing_system_present', 'partial_bank_info'
-        ])
-        
-        # Structural change features
-        self.feature_names.extend([
-            'struct_total_changes', 'struct_field_movements', 
-            'struct_field_additions', 'struct_field_removals',
-            'struct_restructuring_count', 'struct_nesting_changes',
-            'struct_max_nesting_depth', 'struct_complexity_score',
-            'struct_has_othr_addition', 'struct_has_clrsys_restructure', 
-            'struct_has_mmbid_movement'
-        ])
-    
-    def extract_features(self, payment: Dict, diff_features: Optional[Dict] = None,
-                         structural_features: Optional[Dict] = None) -> np.ndarray:
-        """Extract all features"""
-        features = np.zeros(len(self.feature_names))
-        idx = 0
-        
-        # Normalize payment
-        payment = self._normalize_keys(payment)
-        
-        # Basic structural features (18 features)
-        has_bic = self._has_field(payment, 'bic')
-        has_iban = self._has_field(payment, 'iban')
-        has_clearing = self._has_field(payment, 'mmbid')
-        has_name = self._has_field(payment, 'nm')
-        has_address = self._has_field(payment, 'adrline')
-        has_country = self._has_field(payment, 'ctryofres') or self._has_field(payment, 'ctry')
-        
-        features[idx] = float(has_bic); idx += 1
-        features[idx] = float(has_iban); idx += 1
-        features[idx] = float(has_clearing); idx += 1
-        features[idx] = float(has_name); idx += 1
-        features[idx] = float(has_address); idx += 1
-        features[idx] = float(has_country); idx += 1
-        features[idx] = float('cdtragt' in payment); idx += 1
-        features[idx] = float('dbtragt' in payment); idx += 1
-        features[idx] = float('instgagt' in payment); idx += 1
-        features[idx] = float('instdagt' in payment); idx += 1
-        features[idx] = float('cdtr' in payment); idx += 1
-        features[idx] = float('dbtr' in payment); idx += 1
-        features[idx] = float('rmtinf' in payment); idx += 1
-        features[idx] = float(not has_bic and has_clearing); idx += 1
-        features[idx] = float(not has_name and has_bic); idx += 1
-        features[idx] = float(not has_country and has_bic); idx += 1
-        
-        entity_count = sum(1 for k in payment.keys() if isinstance(payment[k], dict))
-        features[idx] = min(entity_count / 10, 1.0); idx += 1
-        
-        field_count = self._count_fields(payment)
-        features[idx] = min(field_count / 50, 1.0); idx += 1
-        
-        # Diff-based features (13 features)
-        if diff_features:
-            features[idx] = min(diff_features.get('num_additions', 0) / 10, 1.0); idx += 1
-            features[idx] = min(diff_features.get('num_drops', 0) / 10, 1.0); idx += 1
-            features[idx] = min(diff_features.get('num_transformations', 0) / 10, 1.0); idx += 1
-            
-            affected_entities = diff_features.get('affected_entities', set())
-            features[idx] = min(len(affected_entities) / 5, 1.0); idx += 1
-            
-            affected_fields = diff_features.get('affected_fields', set())
-            features[idx] = min(len(affected_fields) / 20, 1.0); idx += 1
-            
-            features[idx] = float(diff_features.get('has_bic_changes', False)); idx += 1
-            features[idx] = float(diff_features.get('has_name_changes', False)); idx += 1
-            features[idx] = float(diff_features.get('has_address_changes', False)); idx += 1
-            features[idx] = float(diff_features.get('has_country_changes', False)); idx += 1
-            features[idx] = float(diff_features.get('has_clearing_changes', False)); idx += 1
-            features[idx] = float('cdtragt' in affected_entities); idx += 1
-            features[idx] = float('dbtragt' in affected_entities); idx += 1
-            features[idx] = float('instgagt' in affected_entities); idx += 1
-        else:
-            for _ in range(13):
-                features[idx] = 0.0; idx += 1
-        
-        # ACE-specific features (7 features)
-        has_location_info = has_address or self._has_field(payment, 'townname')
-        features[idx] = float(not has_country and has_location_info); idx += 1
-        features[idx] = float(has_clearing and not has_bic); idx += 1
-        features[idx] = float(has_bic and not has_name); idx += 1
-        
-        has_partial_address = self._has_field(payment, 'townname') or self._has_field(payment, 'pstlcd')
-        features[idx] = float(has_partial_address and not has_address); idx += 1
-        
-        agent_entities = ['cdtragt', 'dbtragt', 'instgagt', 'instdagt']
-        incomplete_agents = 0
-        for agent in agent_entities:
-            if agent in payment:
-                agent_data = payment[agent]
-                if isinstance(agent_data, dict):
-                    agent_has_bic = self._has_field(agent_data, 'bic')
-                    agent_has_name = self._has_field(agent_data, 'nm')
-                    if not (agent_has_bic and agent_has_name):
-                        incomplete_agents += 1
-        features[idx] = min(incomplete_agents / 3, 1.0); idx += 1
-        
-        features[idx] = float(has_clearing or self._has_field(payment, 'clrsys')); idx += 1
-        
-        has_some_bank_info = has_bic or has_name or has_clearing
-        has_complete_bank_info = has_bic and has_name
-        features[idx] = float(has_some_bank_info and not has_complete_bank_info); idx += 1
-        
-        # Structural features (11 features)
-        if structural_features:
-            features[idx] = min(structural_features.get('total_structural_changes', 0) / 20, 1.0); idx += 1
-            features[idx] = min(structural_features.get('field_movements', 0) / 10, 1.0); idx += 1
-            features[idx] = min(structural_features.get('field_additions', 0) / 15, 1.0); idx += 1
-            features[idx] = min(structural_features.get('field_removals', 0) / 15, 1.0); idx += 1
-            features[idx] = min(structural_features.get('restructuring_count', 0) / 5, 1.0); idx += 1
-            features[idx] = min(structural_features.get('nesting_depth_changes', 0) / 10, 1.0); idx += 1
-            features[idx] = min(structural_features.get('max_nesting_change', 0) / 5, 1.0); idx += 1
-            features[idx] = min(structural_features.get('structural_complexity', 0) / 50, 1.0); idx += 1
-            features[idx] = float(structural_features.get('has_othr_addition', False)); idx += 1
-            features[idx] = float(structural_features.get('has_clrsys_restructure', False)); idx += 1
-            features[idx] = float(structural_features.get('has_mmbid_movement', False)); idx += 1
-        else:
-            for _ in range(11):
-                features[idx] = 0.0; idx += 1
-        
-        return features
-    
-    def _normalize_keys(self, obj):
-        """Normalize all keys to lowercase"""
-        if isinstance(obj, dict):
-            return {k.lower() if isinstance(k, str) else k: self._normalize_keys(v)
-                   for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._normalize_keys(item) for item in obj]
-        return obj
-    
-    def _has_field(self, payment: Dict, field_name: str) -> bool:
-        """Check if field exists anywhere in payment"""
-        field_name = field_name.lower()
-        
-        def search(obj):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    if field_name in str(k).lower():
-                        return True
-                    if search(v):
-                        return True
-            elif isinstance(obj, list):
-                for item in obj:
-                    if search(item):
-                        return True
-            return False
-        
-        return search(payment)
-    
-    def _count_fields(self, obj, depth=0) -> int:
-        """Count total fields in nested structure"""
-        if depth > 10:
-            return 0
-        
-        count = 0
-        if isinstance(obj, dict):
-            count += len(obj)
-            for v in obj.values():
-                count += self._count_fields(v, depth + 1)
-        elif isinstance(obj, list):
-            for item in obj:
-                count += self._count_fields(item, depth + 1)
-        return count
-
-
-# ============================================================================
-# DATA PROCESSOR
-# ============================================================================
-
-class DataProcessor:
-    """Process training data with comprehensive learning"""
-    
-    def __init__(self, config: Config = None):
-        self.config = config or Config()
-        self.ace_learner = AceRepairLearner(self.config)
-        self.feature_extractor = FeatureExtractor(self.ace_learner)
+    def __init__(self, config: EnhancedConfig):
+        self.config = config
+        self.structural_detector = EnhancedStructuralDetector(config)
+        self.repair_patterns = defaultdict(lambda: defaultdict(int))
         self.repair_vocabulary = {}
-        self.idx_to_repair = {}
-        self.diff_features_cache = {}
-        self.structural_features_cache = {}
-    
-    def load_transactions_from_path(self, path: str) -> Dict:
-        """Load transactions from file or directory"""
-        all_transactions = {}
+        self.feature_cache = {}
+        self.transaction_count = 0
+        self.checkpoint_count = 0
         
-        if os.path.isfile(path):
-            logger.info(f"Loading single file: {path}")
-            all_transactions = self._load_file(path)
-        elif os.path.isdir(path):
-            logger.info(f"Loading directory: {path}")
-            all_transactions = self._load_directory(path)
-        else:
-            raise ValueError(f"Path does not exist: {path}")
+    def process_directory_incrementally(self, directory_path: str, 
+                                       callback_fn: Optional[callable] = None) -> Generator:
+        """
+        Process directory incrementally, yielding results file by file
         
-        return all_transactions
+        Args:
+            directory_path: Path to directory containing JSON files
+            callback_fn: Optional callback for each processed transaction
+            
+        Yields:
+            Processed transaction data
+        """
+        json_files = sorted(Path(directory_path).glob('**/*.json'))
+        
+        logger.info(f"Found {len(json_files)} JSON files in {directory_path}")
+        
+        for file_idx, json_file in enumerate(tqdm(json_files, desc="Processing files")):
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Handle different JSON structures
+                transactions = self._extract_transactions(data)
+                
+                for txn_id, txn_data in transactions.items():
+                    if not isinstance(txn_data, dict):
+                        continue
+                    
+                    # Process transaction
+                    processed = self._process_transaction(txn_id, txn_data)
+                    
+                    if processed:
+                        self.transaction_count += 1
+                        
+                        # Checkpoint if needed
+                        if self.config.checkpoint_interval > 0 and \
+                           self.transaction_count % self.config.checkpoint_interval == 0:
+                            self._save_checkpoint()
+                        
+                        # Callback for monitoring
+                        if callback_fn:
+                            callback_fn(self.transaction_count, processed)
+                        
+                        yield processed
+                
+                # Clear memory periodically
+                if file_idx % self.config.max_files_in_memory == 0:
+                    self._clear_old_cache()
+                    
+            except Exception as e:
+                logger.warning(f"Error processing {json_file}: {e}")
+                continue
+        
+        # Final checkpoint
+        self._save_checkpoint()
+        logger.info(f"Completed processing {self.transaction_count} transactions")
     
-    def _load_file(self, filepath: str) -> Dict:
-        """Load transactions from a single file"""
+    def _extract_transactions(self, data: Any) -> Dict:
+        """Extract transactions from various JSON formats"""
         transactions = {}
         
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            if isinstance(data, dict):
-                for txn_id, txn_data in data.items():
-                    if isinstance(txn_data, dict):
-                        transactions[ensure_hashable(txn_id)] = txn_data
-                        
-            elif isinstance(data, list):
-                for idx, item in enumerate(data):
-                    if isinstance(item, dict):
-                        if len(item) == 1:
-                            txn_id = list(item.keys())[0]
-                            transactions[ensure_hashable(txn_id)] = item[txn_id]
-                        else:
-                            transactions[f"txn_{idx}"] = item
-            
-            logger.info(f"  Loaded {len(transactions)} transactions from {os.path.basename(filepath)}")
-            
-        except Exception as e:
-            logger.error(f"Error loading {filepath}: {e}")
+        if isinstance(data, dict):
+            # Direct transaction dictionary
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    transactions[str(key)] = value
+                    
+        elif isinstance(data, list):
+            # List of transactions
+            for idx, item in enumerate(data):
+                if isinstance(item, dict):
+                    # Single transaction wrapped in list
+                    if len(item) == 1:
+                        txn_id = list(item.keys())[0]
+                        transactions[str(txn_id)] = item[txn_id]
+                    else:
+                        # Direct transaction object
+                        transactions[f"txn_{idx}"] = item
         
         return transactions
     
-    def _load_directory(self, dirpath: str) -> Dict:
-        """Load all JSON files from a directory"""
-        all_transactions = {}
-        
-        json_files = []
-        for root, dirs, files in os.walk(dirpath):
-            for filename in files:
-                if filename.endswith('.json'):
-                    json_files.append(os.path.join(root, filename))
-        
-        logger.info(f"Found {len(json_files)} JSON files")
-        
-        for filepath in sorted(json_files):
-            file_transactions = self._load_file(filepath)
-            all_transactions.update(file_transactions)
-        
-        return all_transactions
-    
-    def load_and_process(self, path: str, max_transactions: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
-        """Load and process training data"""
-        logger.info(f"Loading data from {path}")
-        
-        all_transactions = self.load_transactions_from_path(path)
-        
-        if not all_transactions:
-            raise ValueError(f"No transactions loaded from {path}")
-        
-        logger.info(f"Loaded {len(all_transactions)} total transactions")
-        
-        if max_transactions and len(all_transactions) > max_transactions:
-            logger.info(f"Limiting to {max_transactions} transactions")
-            all_transactions = dict(list(all_transactions.items())[:max_transactions])
-        
-        # First pass: Learn from data
-        logger.info("Learning from ACE repairs, diffs, and structural changes...")
-        processed_count = 0
-        skipped_count = 0
-        
-        for txn_id, txn_data in all_transactions.items():
-            if not isinstance(txn_data, dict):
-                continue
+    def _process_transaction(self, txn_id: str, txn_data: Dict) -> Optional[Dict]:
+        """Process a single transaction"""
+        try:
+            # Skip if no repairs
+            if 'ace' not in txn_data or not txn_data.get('ace'):
+                return None
             
-            if 'ace' not in txn_data or not txn_data['ace']:
-                skipped_count += 1
-                continue
+            # Analyze transaction
+            analysis = self.structural_detector.analyze_transaction(txn_id, txn_data)
             
-            try:
-                # Learn from transaction (includes structural detection)
-                combined_features = self.ace_learner.learn_from_transaction(txn_id, txn_data)
-                
-                # Split features for caching
-                diff_features = {k: v for k, v in combined_features.items() 
-                               if not k.startswith('struct_') and not k.startswith('total_structural')}
-                structural_features = {k: v for k, v in combined_features.items() 
-                                     if k.startswith('struct_') or k.startswith('total_structural')}
-                
-                self.diff_features_cache[txn_id] = diff_features
-                self.structural_features_cache[txn_id] = structural_features
-                processed_count += 1
-                
-                if processed_count % 100 == 0:
-                    logger.info(f"  Processed {processed_count} transactions...")
-                    
-            except Exception as e:
-                logger.warning(f"Error processing transaction {txn_id}: {e}")
-                continue
-        
-        # Print learning summary
-        self.ace_learner.print_summary()
-        
-        # Build repair vocabulary
-        self._build_repair_vocabulary(all_transactions)
-        
-        # Second pass: Extract features
-        logger.info("Extracting features...")
-        all_features = []
-        all_labels = []
-        all_payments = []
-        
-        for txn_id, txn_data in all_transactions.items():
-            if txn_id not in self.diff_features_cache:
-                continue
+            # Extract features
+            features = self._extract_features(txn_data, analysis)
             
-            try:
-                # Get repairs
-                repairs = []
-                for r in txn_data.get('ace', []):
-                    if isinstance(r, dict) and 'id' in r:
-                        repair_id = safe_get_repair_id(r.get('id'))
-                        repairs.append(repair_id)
-                
-                # Extract features
-                payment = self._extract_before_state(txn_data)
-                diff_features = self.diff_features_cache[txn_id]
-                structural_features = self.structural_features_cache.get(txn_id, {})
-                
-                features = self.feature_extractor.extract_features(
-                    payment, diff_features, structural_features
-                )
-                
-                labels = self._repairs_to_labels(repairs)
-                
-                all_features.append(features)
-                all_labels.append(labels)
-                all_payments.append(txn_data)
-                
-            except Exception as e:
-                logger.warning(f"Error extracting features for {txn_id}: {e}")
-                continue
-        
-        features_array = np.array(all_features)
-        labels_array = np.array(all_labels)
-        
-        logger.info(f"\nProcessing complete:")
-        logger.info(f"  Total transactions: {len(all_transactions)}")
-        logger.info(f"  Trainable transactions: {len(features_array)}")
-        logger.info(f"  Skipped (no repairs): {skipped_count}")
-        logger.info(f"  Feature dimensions: {features_array.shape}")
-        logger.info(f"  Unique repairs: {len(self.repair_vocabulary)}")
-        
-        return features_array, labels_array, all_payments
-    
-    def _extract_before_state(self, txn_data: Dict) -> Dict:
-        """Extract 'before' state from transaction"""
-        payment = {}
-        
-        for key in ['source', 'clearing', 'flags', 'parties']:
-            if key in txn_data:
-                payment[key] = txn_data[key]
-        
-        entities = ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'instdAgt',
-                   'cdtr', 'dbtr', 'cdtrAcct', 'dbtrAcct', 'rmtInf',
-                   'intrmyAgt1', 'intrmyAgt2']
-        
-        for entity in entities:
-            if entity in txn_data:
-                entity_data = txn_data[entity]
-                if isinstance(entity_data, dict) and 'before' in entity_data:
-                    payment[entity] = entity_data['before']
-                elif not isinstance(entity_data, dict) or 'after' not in entity_data:
-                    payment[entity] = entity_data
-        
-        return payment
-    
-    def _build_repair_vocabulary(self, data: Dict):
-        """Build repair vocabulary"""
-        all_repairs = set()
-        
-        for txn_data in data.values():
-            if not isinstance(txn_data, dict):
-                continue
+            # Get repair labels
+            repairs = []
             for repair in txn_data.get('ace', []):
-                if isinstance(repair, dict) and 'id' in repair:
-                    repair_id = safe_get_repair_id(repair.get('id'))
-                    all_repairs.add(repair_id)
-        
-        sorted_repairs = sorted(all_repairs)
-        self.repair_vocabulary = {repair_id: idx for idx, repair_id in enumerate(sorted_repairs)}
-        self.idx_to_repair = {idx: repair_id for repair_id, idx in self.repair_vocabulary.items()}
-        
-        logger.info(f"Built vocabulary with {len(self.repair_vocabulary)} unique repairs")
+                repair_id = str(repair.get('id', 'unknown')) if isinstance(repair, dict) else str(repair)
+                repairs.append(repair_id)
+                
+                # Update vocabulary
+                if repair_id not in self.repair_vocabulary:
+                    self.repair_vocabulary[repair_id] = len(self.repair_vocabulary)
+                
+                # Learn patterns
+                self._learn_repair_patterns(repair_id, analysis)
+            
+            return {
+                'txn_id': txn_id,
+                'features': features,
+                'repairs': repairs,
+                'analysis': analysis,
+                'source': txn_data.get('source'),
+                'clearing': txn_data.get('clearing')
+            }
+            
+        except Exception as e:
+            logger.debug(f"Error processing transaction {txn_id}: {e}")
+            return None
     
-    def _repairs_to_labels(self, repairs: List[str]) -> np.ndarray:
-        """Convert repair IDs to multi-hot encoding"""
-        labels = np.zeros(len(self.repair_vocabulary))
-        for repair_id in repairs:
-            if repair_id in self.repair_vocabulary:
-                labels[self.repair_vocabulary[repair_id]] = 1.0
-        return labels
-
-
-# ============================================================================
-# NEURAL NETWORK MODEL
-# ============================================================================
-
-class RepairNN(nn.Module):
-    """Neural network for repair prediction"""
-    
-    def __init__(self, num_features: int, num_repairs: int, 
-                 hidden_dim: int = 256, dropout: float = 0.3):
-        super().__init__()
+    def _extract_features(self, txn_data: Dict, analysis: Dict) -> np.ndarray:
+        """Extract features from transaction and analysis"""
+        features = []
         
-        self.feature_encoder = nn.Sequential(
-            nn.Linear(num_features, hidden_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim),
-            nn.Dropout(dropout)
+        # Source/Clearing features
+        source = txn_data.get('source', 'unknown')
+        clearing = txn_data.get('clearing', 'unknown')
+        features.extend([
+            float(source == 'SWF'),
+            float(source == 'ACH'),
+            float(clearing == 'FED'),
+            float(clearing == 'CHIPS')
+        ])
+        
+        # Structural change features
+        change_types = Counter(c.change_type for c in analysis['structural_changes'])
+        features.extend([
+            change_types.get('added', 0) / 10,
+            change_types.get('removed', 0) / 10,
+            change_types.get('moved', 0) / 5,
+            change_types.get('restructured', 0) / 5
+        ])
+        
+        # Database lookup features
+        lookup_types = Counter(l['type'] for l in analysis['database_lookups'])
+        features.extend([
+            float(lookup_types.get('bic_lookup', 0) > 0),
+            float(lookup_types.get('name_lookup', 0) > 0),
+            float(lookup_types.get('address_enrichment', 0) > 0)
+        ])
+        
+        # Entity involvement features
+        entities = ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'instdAgt']
+        for entity in entities:
+            features.append(float(entity in analysis['affected_entities']))
+        
+        # Complexity feature
+        features.append(min(analysis['change_complexity'] / 50, 1.0))
+        
+        # Flags features
+        flags = txn_data.get('flags', {})
+        important_flags = [
+            'ace_repairs', 'stp_failed', 'repair_queue',
+            'ignored_party', 'credit_party_identified_by_name'
+        ]
+        for flag in important_flags:
+            features.append(float(flags.get(flag, False)))
+        
+        return np.array(features)
+    
+    def _learn_repair_patterns(self, repair_id: str, analysis: Dict):
+        """Learn patterns associated with repairs"""
+        # Learn structural patterns
+        for change in analysis['structural_changes']:
+            pattern_key = f"{change.change_type}:{change.entity}"
+            self.repair_patterns[repair_id][pattern_key] += 1
+        
+        # Learn lookup patterns
+        for lookup in analysis['database_lookups']:
+            pattern_key = f"lookup:{lookup['type']}"
+            self.repair_patterns[repair_id][pattern_key] += 1
+        
+        # Learn source/clearing patterns
+        if analysis['source_clearing_pattern']:
+            self.repair_patterns[repair_id][analysis['source_clearing_pattern']] += 1
+    
+    def _clear_old_cache(self):
+        """Clear old cached data to free memory"""
+        if len(self.feature_cache) > 10000:
+            # Keep only recent entries
+            recent_keys = sorted(self.feature_cache.keys())[-5000:]
+            self.feature_cache = {k: self.feature_cache[k] for k in recent_keys}
+            logger.debug(f"Cleared cache, kept {len(self.feature_cache)} recent entries")
+    
+    def _save_checkpoint(self):
+        """Save processing checkpoint"""
+        os.makedirs(self.config.checkpoint_dir, exist_ok=True)
+        self.checkpoint_count += 1
+        
+        checkpoint_path = os.path.join(
+            self.config.checkpoint_dir,
+            f"checkpoint_{self.checkpoint_count}.pkl"
         )
         
-        self.prediction_network = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim // 2),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim // 4),
-            nn.Dropout(dropout / 2),
-            
-            nn.Linear(hidden_dim // 4, num_repairs),
-            nn.Sigmoid()
-        )
+        checkpoint_data = {
+            'transaction_count': self.transaction_count,
+            'repair_vocabulary': self.repair_vocabulary,
+            'repair_patterns': dict(self.repair_patterns),
+            'source_clearing_patterns': dict(self.structural_detector.source_clearing_patterns),
+            'database_lookup_patterns': dict(self.structural_detector.database_lookup_patterns)
+        }
+        
+        with open(checkpoint_path, 'wb') as f:
+            pickle.dump(checkpoint_data, f)
+        
+        logger.info(f"Saved checkpoint {self.checkpoint_count} ({self.transaction_count} transactions)")
     
-    def forward(self, x):
-        encoded = self.feature_encoder(x)
-        output = self.prediction_network(encoded)
-        return output
-
-
-class RepairDataset(Dataset):
-    """PyTorch dataset for repairs"""
-    
-    def __init__(self, features: np.ndarray, labels: np.ndarray):
-        self.features = torch.FloatTensor(features)
-        self.labels = torch.FloatTensor(labels)
-    
-    def __len__(self):
-        return len(self.features)
-    
-    def __getitem__(self, idx):
-        return self.features[idx], self.labels[idx]
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load from checkpoint"""
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint_data = pickle.load(f)
+        
+        self.transaction_count = checkpoint_data['transaction_count']
+        self.repair_vocabulary = checkpoint_data['repair_vocabulary']
+        self.repair_patterns = defaultdict(lambda: defaultdict(int), checkpoint_data['repair_patterns'])
+        self.structural_detector.source_clearing_patterns = defaultdict(set, checkpoint_data['source_clearing_patterns'])
+        self.structural_detector.database_lookup_patterns = defaultdict(list, checkpoint_data['database_lookup_patterns'])
+        
+        logger.info(f"Loaded checkpoint with {self.transaction_count} transactions")
 
 
 # ============================================================================
-# MODEL TRAINER
+# ENHANCED TRAINING PIPELINE
 # ============================================================================
 
-class ModelTrainer:
-    """Handles model training and evaluation"""
+class EnhancedTrainer:
+    """Enhanced trainer with incremental processing support"""
     
-    def __init__(self, config: Config):
+    def __init__(self, config: EnhancedConfig):
         self.config = config
-        self.processor = DataProcessor(config)
+        self.processor = IncrementalDataProcessor(config)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = None
-        self.rf_model = None
         logger.info(f"Using device: {self.device}")
     
-    def train(self, data_path: str) -> Dict:
+    def train_on_directory(self, directory_path: str):
+        """Train model on directory of JSON files"""
+        logger.info("="*70)
+        logger.info("ENHANCED ACE REPAIR PREDICTOR TRAINING")
+        logger.info("="*70)
+        logger.info(f"Processing directory: {directory_path}")
+        
+        # Collect processed data
+        all_features = []
+        all_labels = []
+        
+        def progress_callback(count, processed):
+            if count % 100 == 0:
+                logger.info(f"Processed {count} transactions...")
+        
+        # Process incrementally
+        for processed_data in self.processor.process_directory_incrementally(
+            directory_path, 
+            callback_fn=progress_callback
+        ):
+            all_features.append(processed_data['features'])
+            
+            # Convert repairs to labels
+            labels = np.zeros(len(self.processor.repair_vocabulary))
+            for repair_id in processed_data['repairs']:
+                if repair_id in self.processor.repair_vocabulary:
+                    labels[self.processor.repair_vocabulary[repair_id]] = 1.0
+            all_labels.append(labels)
+        
+        # Convert to arrays
+        X = np.array(all_features)
+        y = np.array(all_labels)
+        
+        logger.info(f"\nData shape: {X.shape}")
+        logger.info(f"Unique repairs: {len(self.processor.repair_vocabulary)}")
+        
+        # Print analysis summary
+        self._print_analysis_summary()
+        
+        # Train model
+        self._train_model(X, y)
+    
+    def _print_analysis_summary(self):
+        """Print summary of learned patterns"""
+        logger.info("\n" + "="*70)
+        logger.info("PATTERN ANALYSIS SUMMARY")
+        logger.info("="*70)
+        
+        # Source/Clearing patterns
+        logger.info("\nSource/Clearing Patterns:")
+        patterns = self.processor.structural_detector.source_clearing_patterns
+        for pattern, repairs in list(patterns.items())[:10]:
+            logger.info(f"  {pattern}: {len(repairs)} repair types")
+        
+        # Database lookup patterns
+        logger.info("\nDatabase Lookup Patterns:")
+        for lookup_type, examples in self.processor.structural_detector.database_lookup_patterns.items():
+            logger.info(f"  {lookup_type}: {len(examples)} examples")
+        
+        # Top repair patterns
+        logger.info("\nTop Repair Patterns:")
+        for repair_id, patterns in list(self.processor.repair_patterns.items())[:5]:
+            logger.info(f"  Repair {repair_id}:")
+            top_patterns = sorted(patterns.items(), key=lambda x: x[1], reverse=True)[:3]
+            for pattern, count in top_patterns:
+                logger.info(f"    {pattern}: {count} occurrences")
+    
+    def _train_model(self, X: np.ndarray, y: np.ndarray):
         """Train the model"""
-        logger.info("="*70)
-        logger.info("TRAINING ACE REPAIR PREDICTOR")
-        logger.info("="*70)
-        
-        # Load and process data
-        features, labels, _ = self.processor.load_and_process(data_path)
-        
         # Split data
-        n = len(features)
+        n = len(X)
         indices = np.random.permutation(n)
         
         train_size = int(n * self.config.train_split)
@@ -1384,9 +772,9 @@ class ModelTrainer:
         val_idx = indices[train_size:train_size + val_size]
         test_idx = indices[train_size + val_size:]
         
-        X_train, y_train = features[train_idx], labels[train_idx]
-        X_val, y_val = features[val_idx], labels[val_idx]
-        X_test, y_test = features[test_idx], labels[test_idx]
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_val, y_val = X[val_idx], y[val_idx]
+        X_test, y_test = X[test_idx], y[test_idx]
         
         logger.info(f"\nData split:")
         logger.info(f"  Train: {len(X_train)}")
@@ -1395,468 +783,47 @@ class ModelTrainer:
         
         # Train Random Forest
         logger.info("\nTraining Random Forest...")
-        self.rf_model = MultiOutputClassifier(
+        rf_model = MultiOutputClassifier(
             RandomForestClassifier(
-                n_estimators=150,
-                max_depth=20,
-                min_samples_split=5,
-                min_samples_leaf=2,
+                n_estimators=200,
+                max_depth=25,
+                min_samples_split=3,
+                min_samples_leaf=1,
                 class_weight='balanced',
                 random_state=42,
                 n_jobs=-1
             )
         )
-        self.rf_model.fit(X_train, y_train)
-        
-        # Train Neural Network
-        logger.info("Training Neural Network...")
-        self.model = RepairNN(
-            num_features=features.shape[1],
-            num_repairs=labels.shape[1],
-            hidden_dim=self.config.hidden_dim,
-            dropout=self.config.dropout
-        ).to(self.device)
-        
-        self._train_nn(X_train, y_train, X_val, y_val)
+        rf_model.fit(X_train, y_train)
         
         # Evaluate
-        logger.info("\nEvaluating on test set...")
-        metrics = self._evaluate(X_test, y_test)
-        
-        # Save models
-        self._save_models()
-        
-        return metrics
-    
-    def _train_nn(self, X_train, y_train, X_val, y_val):
-        """Train neural network"""
-        train_dataset = RepairDataset(X_train, y_train)
-        val_dataset = RepairDataset(X_val, y_val)
-        
-        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size)
-        
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.learning_rate,
-            weight_decay=0.01
-        )
-        
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
-        )
-        
-        criterion = nn.BCELoss()
-        
-        best_val_loss = float('inf')
-        patience = 15
-        patience_counter = 0
-        
-        for epoch in range(1, self.config.num_epochs + 1):
-            # Training
-            self.model.train()
-            train_loss = 0.0
-            
-            for features, labels in train_loader:
-                features = features.to(self.device)
-                labels = labels.to(self.device)
-                
-                optimizer.zero_grad()
-                outputs = self.model(features)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                
-                optimizer.step()
-                train_loss += loss.item()
-            
-            train_loss /= len(train_loader)
-            
-            # Validation
-            self.model.eval()
-            val_loss = 0.0
-            
-            with torch.no_grad():
-                for features, labels in val_loader:
-                    features = features.to(self.device)
-                    labels = labels.to(self.device)
-                    outputs = self.model(features)
-                    loss = criterion(outputs, labels)
-                    val_loss += loss.item()
-            
-            val_loss /= len(val_loader)
-            scheduler.step(val_loss)
-            
-            if epoch % 5 == 0 or epoch == 1:
-                logger.info(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}")
-            
-            # Early stopping
-            if val_loss < best_val_loss - 0.001:
-                best_val_loss = val_loss
-                patience_counter = 0
-                os.makedirs(self.config.model_dir, exist_ok=True)
-                torch.save(self.model.state_dict(), 
-                          os.path.join(self.config.model_dir, 'best_model.pt'))
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    logger.info(f"Early stopping at epoch {epoch}")
-                    break
-        
-        self.model.load_state_dict(
-            torch.load(os.path.join(self.config.model_dir, 'best_model.pt'))
-        )
-    
-    def _evaluate(self, X_test, y_test):
-        """Evaluate model performance"""
-        self.model.eval()
-        
-        dataset = RepairDataset(X_test, y_test)
-        loader = DataLoader(dataset, batch_size=self.config.batch_size)
-        
-        all_preds = []
-        all_labels = []
-        
-        with torch.no_grad():
-            for features, labels in loader:
-                features = features.to(self.device)
-                outputs = self.model(features)
-                all_preds.append(outputs.cpu().numpy())
-                all_labels.append(labels.numpy())
-        
-        preds = np.vstack(all_preds)
-        labels = np.vstack(all_labels)
-        
-        rf_preds = self.rf_model.predict(X_test)
-        
-        nn_preds_binary = (preds > 0.5).astype(int)
-        
-        exact_match_nn = np.mean(np.all(nn_preds_binary == labels, axis=1))
-        exact_match_rf = np.mean(np.all(rf_preds == labels, axis=1))
-        
-        hamming_nn = np.mean(nn_preds_binary == labels)
-        hamming_rf = np.mean(rf_preds == labels)
+        rf_preds = rf_model.predict(X_test)
+        exact_match = np.mean(np.all(rf_preds == y_test, axis=1))
+        hamming = np.mean(rf_preds == y_test)
         
         logger.info(f"\nModel Performance:")
-        logger.info(f"  Neural Network:")
-        logger.info(f"    Exact Match: {exact_match_nn:.2%}")
-        logger.info(f"    Hamming Accuracy: {hamming_nn:.2%}")
-        logger.info(f"  Random Forest:")
-        logger.info(f"    Exact Match: {exact_match_rf:.2%}")
-        logger.info(f"    Hamming Accuracy: {hamming_rf:.2%}")
+        logger.info(f"  Exact Match: {exact_match:.2%}")
+        logger.info(f"  Hamming Accuracy: {hamming:.2%}")
         
-        return {
-            'exact_match_accuracy': exact_match_nn,
-            'hamming_accuracy': hamming_nn,
-            'rf_exact_match': exact_match_rf,
-            'rf_hamming': hamming_rf
-        }
+        # Save model
+        self._save_model(rf_model)
     
-    def _save_models(self):
-        """Save trained models"""
+    def _save_model(self, model):
+        """Save trained model and processor"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
+        # Save config
         self.config.save(os.path.join(self.config.model_dir, 'config.json'))
         
+        # Save processor
         with open(os.path.join(self.config.model_dir, 'processor.pkl'), 'wb') as f:
             pickle.dump(self.processor, f)
         
-        with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
-            pickle.dump(self.rf_model, f)
+        # Save model
+        with open(os.path.join(self.config.model_dir, 'model.pkl'), 'wb') as f:
+            pickle.dump(model, f)
         
-        torch.save(self.model.state_dict(), 
-                  os.path.join(self.config.model_dir, 'neural_model.pt'))
-        
-        logger.info(f"\nModels saved to {self.config.model_dir}")
-
-
-# ============================================================================
-# ENHANCED PREDICTOR WITH STRUCTURAL INFERENCE
-# ============================================================================
-
-class RepairPredictor:
-    """Enhanced predictor that uses structural patterns for prediction"""
-    
-    def __init__(self, model_dir: str = './models'):
-        self.model_dir = model_dir
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        logger.info(f"Loading models from {model_dir}")
-        
-        # Load config
-        self.config = Config.load(os.path.join(model_dir, 'config.json'))
-        
-        # Load processor
-        with open(os.path.join(model_dir, 'processor.pkl'), 'rb') as f:
-            self.processor = pickle.load(f)
-        
-        # Load Random Forest
-        with open(os.path.join(model_dir, 'rf_model.pkl'), 'rb') as f:
-            self.rf_model = pickle.load(f)
-        
-        # Load Neural Network
-        self.nn_model = RepairNN(
-            num_features=len(self.processor.feature_extractor.feature_names),
-            num_repairs=len(self.processor.repair_vocabulary),
-            hidden_dim=self.config.hidden_dim,
-            dropout=self.config.dropout
-        ).to(self.device)
-        
-        self.nn_model.load_state_dict(
-            torch.load(os.path.join(model_dir, 'neural_model.pt'), 
-                      map_location=self.device)
-        )
-        self.nn_model.eval()
-        
-        logger.info(f"Models loaded successfully")
-        logger.info(f"Vocabulary contains {len(self.processor.repair_vocabulary)} repairs")
-    
-    def predict(self, payment_file: str, threshold: float = 0.5, 
-                use_ensemble: bool = True) -> Dict:
-        """Enhanced prediction with structural pattern inference"""
-        
-        # Load payment
-        with open(payment_file, 'r') as f:
-            data = json.load(f)
-        
-        if isinstance(data, dict) and len(data) == 1:
-            txn_id = list(data.keys())[0]
-            payment = data[txn_id]
-            logger.info(f"Processing transaction: {txn_id}")
-        else:
-            payment = data
-        
-        # CRITICAL: Infer structural features from payment structure
-        structural_features = self._infer_structural_features(payment)
-        logger.info(f"Inferred structural indicators: {structural_features}")
-        
-        # Extract features WITH inferred structural features
-        features = self.processor.feature_extractor.extract_features(
-            payment, 
-            None,  # No diff features for prediction
-            structural_features  # USE structural features!
-        )
-        
-        # Get NN predictions
-        features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            nn_probs = self.nn_model(features_tensor)[0].cpu().numpy()
-        
-        # Get RF predictions
-        rf_probs = self.rf_model.predict_proba(features.reshape(1, -1))
-        rf_probs = np.array([p[0, 1] if p.shape[1] > 1 else p[0, 0] for p in rf_probs])
-        
-        # Ensemble
-        if use_ensemble:
-            ensemble_probs = (nn_probs * 0.6 + rf_probs * 0.4)
-        else:
-            ensemble_probs = nn_probs
-        
-        # Apply structural pattern boost
-        boosted_probs = self._apply_structural_boost(ensemble_probs, structural_features)
-        
-        # Get predicted repairs
-        predicted_repairs = []
-        ace_predictions = []
-        
-        for idx, prob in enumerate(boosted_probs):
-            if prob > threshold:
-                repair_id = self.processor.idx_to_repair[idx]
-                
-                repair_info = self._get_repair_info(repair_id)
-                
-                predicted_repairs.append({
-                    'repair_id': repair_id,
-                    'confidence': float(prob),
-                    'nn_prob': float(nn_probs[idx]),
-                    'rf_prob': float(rf_probs[idx]),
-                    'boosted': prob != ensemble_probs[idx]
-                })
-                
-                ace_predictions.append({
-                    'id': repair_id,
-                    'code': repair_info['code'],
-                    'field': repair_info['field'],
-                    'text': repair_info['text']
-                })
-        
-        predicted_repairs.sort(key=lambda x: x['confidence'], reverse=True)
-        ace_predictions.sort(key=lambda x: x['id'])
-        
-        logger.info(f"Predicted {len(predicted_repairs)} repairs (threshold: {threshold})")
-        
-        return {
-            'predicted_repairs': predicted_repairs,
-            'repair_ids': [r['repair_id'] for r in predicted_repairs],
-            'ace': ace_predictions,
-            'structural_indicators': structural_features,
-            'confidence_summary': {
-                'high_confidence': [r for r in predicted_repairs if r['confidence'] > 0.8],
-                'medium_confidence': [r for r in predicted_repairs if 0.5 < r['confidence'] <= 0.8],
-                'total_repairs': len(predicted_repairs)
-            }
-        }
-    
-    def _infer_structural_features(self, payment: Dict) -> Dict:
-        """Infer likely structural issues from payment structure"""
-        
-        structural_features = {
-            'total_structural_changes': 0,
-            'field_movements': 0,
-            'field_additions': 0,
-            'field_removals': 0,
-            'restructuring_count': 0,
-            'nesting_depth_changes': 0,
-            'has_othr_addition': False,
-            'has_clrsys_restructure': False,
-            'has_mmbid_movement': False,
-            'max_nesting_change': 0,
-            'structural_complexity': 0
-        }
-        
-        payment_normalized = self._normalize_keys(payment)
-        
-        # Check for structural indicators
-        for entity in ['instgagt', 'instdagt', 'cdtragt', 'dbtragt']:
-            if entity in payment_normalized:
-                entity_data = payment_normalized[entity]
-                if isinstance(entity_data, dict):
-                    # Check for MmbId at wrong level
-                    if self._check_field_at_path(entity_data, 'fininstnid.mmbid'):
-                        if not self._check_field_at_path(entity_data, 'fininstnid.clrsysid'):
-                            structural_features['has_mmbid_movement'] = True
-                            structural_features['field_movements'] = 1
-                            structural_features['restructuring_count'] = 1
-                            logger.info(f"  Detected: MmbId likely needs to move into ClrSysId")
-                    
-                    # Check if needs othr structure
-                    has_some_id = self._has_field_recursive(entity_data, 'id') or \
-                                  self._has_field_recursive(entity_data, 'mmbid')
-                    has_bic = self._has_field_recursive(entity_data, 'bicfi') or \
-                              self._has_field_recursive(entity_data, 'bic')
-                    has_othr = self._has_field_recursive(entity_data, 'othr')
-                    
-                    if has_some_id and not has_bic and not has_othr:
-                        structural_features['has_othr_addition'] = True
-                        structural_features['field_additions'] = 2
-                        logger.info(f"  Detected: May need othr structure")
-                    
-                    # Check for incomplete clearing system
-                    has_clearing = self._has_field_recursive(entity_data, 'mmbid')
-                    has_clrsys = self._has_field_recursive(entity_data, 'clrsysid')
-                    
-                    if has_clearing and not has_clrsys:
-                        structural_features['has_clrsys_restructure'] = True
-                        structural_features['restructuring_count'] += 1
-                        logger.info(f"  Detected: Clearing system needs restructuring")
-        
-        # Calculate complexity
-        structural_features['structural_complexity'] = (
-            structural_features['field_movements'] * 2 +
-            structural_features['restructuring_count'] * 3 +
-            structural_features['field_additions'] * 0.5
-        )
-        
-        structural_features['total_structural_changes'] = (
-            structural_features['field_movements'] +
-            structural_features['field_additions'] +
-            structural_features['restructuring_count']
-        )
-        
-        return structural_features
-    
-    def _apply_structural_boost(self, probs: np.ndarray, structural_features: Dict) -> np.ndarray:
-        """Boost probabilities based on structural patterns detected"""
-        boosted_probs = probs.copy()
-        
-        if not hasattr(self.processor.ace_learner, 'repair_to_structural_patterns'):
-            return boosted_probs
-        
-        for idx, repair_id in self.processor.idx_to_repair.items():
-            if repair_id not in self.processor.ace_learner.repair_to_structural_patterns:
-                continue
-            
-            patterns = self.processor.ace_learner.repair_to_structural_patterns[repair_id]
-            if not patterns:
-                continue
-            
-            # Calculate pattern match score
-            match_score = 0.0
-            for pattern in patterns:
-                if structural_features.get('has_mmbid_movement') and pattern.get('movements', 0) > 0:
-                    match_score += 0.2
-                if structural_features.get('has_othr_addition') and pattern.get('additions', 0) > 0:
-                    match_score += 0.2
-                if structural_features.get('has_clrsys_restructure') and pattern.get('restructuring', 0) > 0:
-                    match_score += 0.2
-                if structural_features.get('structural_complexity', 0) > 5 and pattern.get('total_changes', 0) > 5:
-                    match_score += 0.1
-            
-            # Apply boost
-            if match_score > 0:
-                boost = min(0.3, match_score)
-                boosted_probs[idx] = min(1.0, boosted_probs[idx] + boost)
-                if boost > 0.1:
-                    logger.info(f"  Boosted {repair_id} by {boost:.2f} due to structural pattern match")
-        
-        return boosted_probs
-    
-    def _normalize_keys(self, obj):
-        """Normalize all keys to lowercase"""
-        if isinstance(obj, dict):
-            return {k.lower() if isinstance(k, str) else k: self._normalize_keys(v)
-                   for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._normalize_keys(item) for item in obj]
-        return obj
-    
-    def _check_field_at_path(self, obj: Dict, path: str) -> bool:
-        """Check if a field exists at a specific path"""
-        parts = path.lower().split('.')
-        current = obj
-        
-        for part in parts:
-            if isinstance(current, dict):
-                found = False
-                for key in current.keys():
-                    if key.lower() == part:
-                        current = current[key]
-                        found = True
-                        break
-                if not found:
-                    return False
-            else:
-                return False
-        return True
-    
-    def _has_field_recursive(self, obj, field_name: str) -> bool:
-        """Check if field exists anywhere in object"""
-        field_name = field_name.lower()
-        
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if field_name in str(k).lower():
-                    return True
-                if self._has_field_recursive(v, field_name):
-                    return True
-        elif isinstance(obj, list):
-            for item in obj:
-                if self._has_field_recursive(item, field_name):
-                    return True
-        return False
-    
-    def _get_repair_info(self, repair_id: str) -> Dict:
-        """Get repair information"""
-        if hasattr(self.processor.ace_learner, 'repair_taxonomy'):
-            if repair_id in self.processor.ace_learner.repair_taxonomy:
-                return self.processor.ace_learner.repair_taxonomy[repair_id]
-        
-        return {
-            'code': 'I',
-            'field': 'UNKNOWN',
-            'text': f'Repair {repair_id} applied'
-        }
+        logger.info(f"\nModel saved to {self.config.model_dir}")
 
 
 # ============================================================================
@@ -1865,89 +832,56 @@ class RepairPredictor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='ACE Payment Repair Predictor - Final Version'
+        description='Enhanced ACE Payment Repair Predictor'
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     
     # Train command
     train_parser = subparsers.add_parser('train', help='Train the model')
-    train_parser.add_argument('--input', required=True, help='Training data')
-    train_parser.add_argument('--max_txns', type=int, help='Max transactions')
-    train_parser.add_argument('--epochs', type=int, default=50)
+    train_parser.add_argument('--input_dir', required=True, help='Directory containing JSON files')
     train_parser.add_argument('--model_dir', default='./models')
-    train_parser.add_argument('--verbose', action='store_true', help='Verbose logging')
+    train_parser.add_argument('--checkpoint_dir', default='./checkpoints')
+    train_parser.add_argument('--batch_size', type=int, default=100)
+    train_parser.add_argument('--incremental', action='store_true', help='Use incremental processing')
     
-    # Predict command
-    predict_parser = subparsers.add_parser('predict', help='Predict repairs')
-    predict_parser.add_argument('--input', required=True, help='Input payment')
-    predict_parser.add_argument('--model', default='./models')
-    predict_parser.add_argument('--threshold', type=float, default=0.5)
-    predict_parser.add_argument('--output', help='Output file')
-    
-    # Debug command
-    debug_parser = subparsers.add_parser('debug', help='Debug model state')
-    debug_parser.add_argument('--model', default='./models')
+    # Analyze command
+    analyze_parser = subparsers.add_parser('analyze', help='Analyze patterns in data')
+    analyze_parser.add_argument('--input_dir', required=True)
+    analyze_parser.add_argument('--output', help='Output analysis file')
     
     args = parser.parse_args()
     
     if args.command == 'train':
-        config = Config()
-        config.num_epochs = args.epochs
-        config.model_dir = args.model_dir
-        config.verbose_logging = args.verbose
+        config = EnhancedConfig(
+            model_dir=args.model_dir,
+            checkpoint_dir=args.checkpoint_dir,
+            max_files_in_memory=args.batch_size,
+            enable_incremental=args.incremental
+        )
         
-        trainer = ModelTrainer(config)
+        trainer = EnhancedTrainer(config)
+        trainer.train_on_directory(args.input_dir)
         
-        if args.max_txns:
-            original_method = trainer.processor.load_and_process
-            def limited_load_and_process(path):
-                return original_method(path, max_transactions=args.max_txns)
-            trainer.processor.load_and_process = limited_load_and_process
+        logger.info("\nTraining complete!")
+        logger.info("Check detailed_analysis.log for comprehensive analysis")
         
-        metrics = trainer.train(args.input)
-        logger.info(f"\nTraining complete. Metrics: {metrics}")
-        logger.info(f"Check structural_changes.log for detailed analysis")
-    
-    elif args.command == 'predict':
-        predictor = RepairPredictor(args.model)
-        results = predictor.predict(args.input, args.threshold)
+    elif args.command == 'analyze':
+        config = EnhancedConfig()
+        processor = IncrementalDataProcessor(config)
         
-        logger.info(f"\n{'='*70}")
-        logger.info(f"PREDICTION RESULTS")
-        logger.info(f"{'='*70}")
-        logger.info(f"Predicted {len(results['predicted_repairs'])} repairs:")
+        analysis_results = []
+        for processed in processor.process_directory_incrementally(args.input_dir):
+            analysis_results.append(processed['analysis'])
         
-        for repair in results['predicted_repairs']:
-            boosted = " (boosted)" if repair.get('boosted') else ""
-            logger.info(f"  {repair['repair_id']}: {repair['confidence']:.2%}{boosted}")
-        
+        # Save analysis
         if args.output:
             with open(args.output, 'w') as f:
-                json.dump(results, f, indent=2, default=str)
-            logger.info(f"\nResults saved to {args.output}")
-    
-    elif args.command == 'debug':
-        # Debug model state
-        logger.info("Debugging model state...")
+                json.dump(analysis_results, f, indent=2, default=str)
+            logger.info(f"Analysis saved to {args.output}")
         
-        with open(os.path.join(args.model, 'processor.pkl'), 'rb') as f:
-            processor = pickle.load(f)
-        
-        logger.info(f"\nRepair vocabulary: {len(processor.repair_vocabulary)} repairs")
-        logger.info(f"Feature count: {len(processor.feature_extractor.feature_names)}")
-        
-        if hasattr(processor.ace_learner, 'structural_detector'):
-            detector = processor.ace_learner.structural_detector
-            logger.info(f"Structural changes detected: {len(detector.all_detected_changes)}")
-            logger.info(f"Transactions analyzed: {detector.transaction_count}")
-        
-        if hasattr(processor.ace_learner, 'repair_to_structural_patterns'):
-            patterns = processor.ace_learner.repair_to_structural_patterns
-            logger.info(f"Repairs with structural patterns: {len(patterns)}")
-            
-            for repair_id, pattern_list in list(patterns.items())[:5]:
-                logger.info(f"  {repair_id}: {len(pattern_list)} patterns")
+        # Print summary
+        processor._print_analysis_summary()
     
     else:
         parser.print_help()
