@@ -550,7 +550,7 @@ class DataProcessor:
 # NEURAL NETWORK
 # ============================================================================
 
-class RepairPredictor(nn.Module):
+class RepairNN(nn.Module):
     """Neural network for repair prediction"""
     
     def __init__(self, num_features: int, num_repairs: int, 
@@ -649,7 +649,7 @@ class ModelTrainer:
         
         # Train Neural Network
         logger.info("\nTraining Neural Network...")
-        self.model = RepairPredictor(
+        self.model = RepairNN(
             num_features=features.shape[1],
             num_repairs=labels.shape[1],
             hidden_dim=self.config.hidden_dim,
@@ -815,6 +815,168 @@ class ModelTrainer:
 
 
 # ============================================================================
+# PREDICTOR
+# ============================================================================
+
+class RepairPredictor:
+    """Make predictions on new payments"""
+    
+    def __init__(self, model_dir: str = './models'):
+        self.model_dir = model_dir
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Load saved components
+        logger.info(f"Loading models from {model_dir}")
+        
+        # Load config
+        self.config = Config.load(os.path.join(model_dir, 'config.json'))
+        
+        # Load processor
+        with open(os.path.join(model_dir, 'processor.pkl'), 'rb') as f:
+            self.processor = pickle.load(f)
+        
+        # Load Random Forest
+        with open(os.path.join(model_dir, 'rf_model.pkl'), 'rb') as f:
+            self.rf_model = pickle.load(f)
+        
+        # Load Neural Network
+        self.nn_model = RepairNN(
+            num_features=len(self.processor.feature_extractor.feature_names),
+            num_repairs=len(self.processor.repair_vocabulary),
+            hidden_dim=self.config.hidden_dim,
+            dropout=self.config.dropout
+        ).to(self.device)
+        
+        self.nn_model.load_state_dict(
+            torch.load(os.path.join(model_dir, 'neural_model.pt'), 
+                      map_location=self.device)
+        )
+        self.nn_model.eval()
+        
+        logger.info("Models loaded successfully")
+    
+    def predict(self, payment_file: str, threshold: float = 0.5) -> Dict:
+        """Predict repairs for a payment"""
+        
+        # Load payment
+        with open(payment_file, 'r') as f:
+            data = json.load(f)
+        
+        # Extract payment (handle wrapper format)
+        if isinstance(data, dict) and len(data) == 1:
+            txn_id = list(data.keys())[0]
+            payment = data[txn_id]
+            logger.info(f"Processing transaction: {txn_id}")
+        else:
+            payment = data
+        
+        # Extract features (no diff features for prediction)
+        features = self.processor.feature_extractor.extract_features(payment, None)
+        
+        # Get predictions from Neural Network
+        features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            nn_probs = self.nn_model(features_tensor)[0].cpu().numpy()
+        
+        # Get predictions from Random Forest
+        rf_probs = self.rf_model.predict_proba(features.reshape(1, -1))
+        rf_probs = np.array([p[0, 1] if p.shape[1] > 1 else p[0, 0] for p in rf_probs])
+        
+        # Ensemble predictions (average)
+        ensemble_probs = (nn_probs + rf_probs) / 2
+        
+        # Get predicted repairs
+        predicted_repairs = []
+        for idx, prob in enumerate(ensemble_probs):
+            if prob > threshold:
+                repair_id = self.processor.idx_to_repair[idx]
+                predicted_repairs.append({
+                    'repair_id': repair_id,
+                    'confidence': float(prob),
+                    'nn_prob': float(nn_probs[idx]),
+                    'rf_prob': float(rf_probs[idx])
+                })
+        
+        # Sort by confidence
+        predicted_repairs.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Analyze what needs to be repaired based on features
+        repair_reasons = self._analyze_repair_needs(payment, features)
+        
+        return {
+            'predicted_repairs': predicted_repairs,
+            'repair_ids': [r['repair_id'] for r in predicted_repairs],
+            'repair_reasons': repair_reasons,
+            'feature_analysis': self._get_feature_analysis(features)
+        }
+    
+    def _analyze_repair_needs(self, payment: Dict, features: np.ndarray) -> List[str]:
+        """Analyze why repairs are needed based on payment structure"""
+        reasons = []
+        
+        # Check key feature indicators
+        feature_names = self.processor.feature_extractor.feature_names
+        
+        for i, name in enumerate(feature_names[:18]):  # Check structural features
+            if 'missing' in name and features[i] > 0.5:
+                reasons.append(f"Missing field detected: {name}")
+            elif name == 'has_bic' and features[i] < 0.5:
+                reasons.append("No BIC code found")
+            elif name == 'has_country' and features[i] < 0.5:
+                reasons.append("No country code found")
+            elif name == 'has_bank_name' and features[i] < 0.5:
+                reasons.append("No bank name found")
+        
+        return reasons
+    
+    def _get_feature_analysis(self, features: np.ndarray) -> Dict:
+        """Get human-readable feature analysis"""
+        feature_names = self.processor.feature_extractor.feature_names
+        
+        analysis = {
+            'entities_present': [],
+            'fields_present': [],
+            'fields_missing': []
+        }
+        
+        # Check which entities are present
+        entity_features = {
+            'has_cdtrAgt': 'Creditor Agent',
+            'has_dbtrAgt': 'Debtor Agent', 
+            'has_instgAgt': 'Instructing Agent',
+            'has_instdAgt': 'Instructed Agent',
+            'has_cdtr': 'Creditor',
+            'has_dbtr': 'Debtor'
+        }
+        
+        for feat_name, entity_name in entity_features.items():
+            if feat_name in feature_names:
+                idx = feature_names.index(feat_name)
+                if features[idx] > 0.5:
+                    analysis['entities_present'].append(entity_name)
+        
+        # Check which fields are present/missing
+        field_features = {
+            'has_bic': 'BIC',
+            'has_iban': 'IBAN',
+            'has_clearing_id': 'Clearing ID',
+            'has_bank_name': 'Bank Name',
+            'has_address': 'Address',
+            'has_country': 'Country Code'
+        }
+        
+        for feat_name, field_name in field_features.items():
+            if feat_name in feature_names:
+                idx = feature_names.index(feat_name)
+                if features[idx] > 0.5:
+                    analysis['fields_present'].append(field_name)
+                else:
+                    analysis['fields_missing'].append(field_name)
+        
+        return analysis
+
+
+# ============================================================================
 # CLI
 # ============================================================================
 
@@ -833,8 +995,11 @@ def main():
     
     # Predict command
     predict_parser = subparsers.add_parser('predict', help='Predict repairs')
-    predict_parser.add_argument('--input', required=True, help='Input file')
+    predict_parser.add_argument('--input', required=True, help='Input payment file')
     predict_parser.add_argument('--model', default='./models', help='Model directory')
+    predict_parser.add_argument('--threshold', type=float, default=0.5, 
+                               help='Confidence threshold for predictions')
+    predict_parser.add_argument('--output', help='Output file for results (optional)')
     
     args = parser.parse_args()
     
@@ -849,8 +1014,42 @@ def main():
         trainer.train(args.input)
     
     elif args.command == 'predict':
-        # Prediction logic would go here
-        logger.info("Prediction not yet implemented in this version")
+        predictor = RepairPredictor(args.model)
+        results = predictor.predict(args.input, args.threshold)
+        
+        # Display results
+        logger.info("\n" + "="*70)
+        logger.info("REPAIR PREDICTIONS")
+        logger.info("="*70)
+        
+        if results['predicted_repairs']:
+            logger.info(f"\nPredicted {len(results['predicted_repairs'])} repairs:")
+            for repair in results['predicted_repairs']:
+                logger.info(f"\n  Repair ID: {repair['repair_id']}")
+                logger.info(f"    Confidence: {repair['confidence']:.2%}")
+                logger.info(f"    NN Probability: {repair['nn_prob']:.2%}")
+                logger.info(f"    RF Probability: {repair['rf_prob']:.2%}")
+        else:
+            logger.info("\nNo repairs predicted (all probabilities below threshold)")
+        
+        # Show feature analysis
+        analysis = results['feature_analysis']
+        logger.info(f"\nPayment Analysis:")
+        logger.info(f"  Entities present: {', '.join(analysis['entities_present'])}")
+        logger.info(f"  Fields present: {', '.join(analysis['fields_present'])}")
+        logger.info(f"  Fields missing: {', '.join(analysis['fields_missing'])}")
+        
+        # Show repair reasons
+        if results['repair_reasons']:
+            logger.info(f"\nPotential issues detected:")
+            for reason in results['repair_reasons']:
+                logger.info(f"  - {reason}")
+        
+        # Save results if output file specified
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"\nResults saved to {args.output}")
     
     else:
         parser.print_help()
