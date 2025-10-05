@@ -69,17 +69,23 @@ class Config:
 # DIFF ANALYZER
 # ============================================================================
 
+def _repair_pattern_factory():
+    """Factory function for repair pattern defaultdict"""
+    return {
+        'fields_added': Counter(),
+        'fields_dropped': Counter(),
+        'fields_transformed': Counter(),
+        'typical_entities': Counter(),
+        'total_diffs': 0
+    }
+
+
 class DiffAnalyzer:
     """Analyzes diffs to learn repair patterns"""
     
     def __init__(self):
-        self.repair_patterns = defaultdict(lambda: {
-            'fields_added': Counter(),
-            'fields_dropped': Counter(),
-            'fields_transformed': Counter(),
-            'typical_entities': Counter(),
-            'total_diffs': 0
-        })
+        # Use factory function instead of lambda for pickle compatibility
+        self.repair_patterns = defaultdict(_repair_pattern_factory)
         self.lookup_tables = {
             'bic_to_name': {},
             'bic_to_address': {},
