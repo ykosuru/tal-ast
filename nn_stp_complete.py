@@ -699,34 +699,47 @@ class EnhancedTrainer:
         logger.info("="*70)
         logger.info(f"Processing directory: {directory_path}")
         
-        # Collect processed data
-        all_features = []
-        all_labels = []
+        # First pass: Build vocabulary and collect data
+        logger.info("First pass: Building vocabulary...")
+        processed_transactions = []
         
         def progress_callback(count, processed):
             if count % 100 == 0:
                 logger.info(f"Processed {count} transactions...")
         
-        # Process incrementally
+        # Collect all processed data
         for processed_data in self.processor.process_directory_incrementally(
             directory_path, 
             callback_fn=progress_callback
         ):
+            processed_transactions.append(processed_data)
+        
+        logger.info(f"Collected {len(processed_transactions)} transactions")
+        logger.info(f"Vocabulary size: {len(self.processor.repair_vocabulary)}")
+        
+        # Second pass: Create feature and label arrays with fixed vocabulary size
+        logger.info("Second pass: Creating feature and label arrays...")
+        all_features = []
+        all_labels = []
+        vocab_size = len(self.processor.repair_vocabulary)
+        
+        for processed_data in processed_transactions:
             all_features.append(processed_data['features'])
             
-            # Convert repairs to labels
-            labels = np.zeros(len(self.processor.repair_vocabulary))
+            # Create fixed-size label vector
+            labels = np.zeros(vocab_size)
             for repair_id in processed_data['repairs']:
                 if repair_id in self.processor.repair_vocabulary:
                     labels[self.processor.repair_vocabulary[repair_id]] = 1.0
             all_labels.append(labels)
         
-        # Convert to arrays
+        # Convert to arrays - now all labels have same size
         X = np.array(all_features)
         y = np.array(all_labels)
         
         logger.info(f"\nData shape: {X.shape}")
-        logger.info(f"Unique repairs: {len(self.processor.repair_vocabulary)}")
+        logger.info(f"Label shape: {y.shape}")
+        logger.info(f"Unique repairs: {vocab_size}")
         
         # Print analysis summary
         self._print_analysis_summary()
