@@ -2,6 +2,7 @@
 """
 ISO 20022 Comprehensive Entity Validator
 Shows spec, validates structure, checks every field
+Version 5
 """
 
 import json
