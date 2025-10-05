@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-ace_repair_predictor_complete.py
-=================================
+ace_repair_predictor_final.py
+==============================
 Complete ACE Payment Repair Predictor with Structural Change Detection
-Learns from diffs, ACE repairs, and ALL structural changes to predict repairs
+Version: 6.0 - Production Ready with All Fixes
 
-Version: 5.0 - Production Ready
 Features:
 - Learns from explicit diffs[] array
 - Learns from ace[] repairs  
 - Detects ALL structural changes between before/after states
-- Comprehensive logging of detected patterns
-- Predicts repairs for new payments
+- Comprehensive logging that actually works
+- Predicts multiple repairs using structural patterns
 """
 
 import json
 import argparse
 import os
+import sys
 import pickle
 import logging
 from typing import Dict, List, Set, Tuple, Optional, Any
@@ -34,7 +34,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 
 # ============================================================================
-# LOGGING CONFIGURATION
+# LOGGING CONFIGURATION WITH PROPER FLUSHING
 # ============================================================================
 
 # Main logger
@@ -44,21 +44,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Structural changes logger (separate file)
+# Create custom flushing handler
+class FlushingFileHandler(logging.FileHandler):
+    """File handler that flushes after every write"""
+    def emit(self, record):
+        super().emit(record)
+        if self.stream:
+            self.stream.flush()
+
+# Structural changes logger with guaranteed flushing
 structural_logger = logging.getLogger('structural_changes')
 structural_logger.setLevel(logging.DEBUG)
+structural_logger.propagate = False
 
-# File handler for structural changes
-fh = logging.FileHandler('structural_changes.log', mode='w')
+# Remove any existing handlers
+for handler in structural_logger.handlers[:]:
+    structural_logger.removeHandler(handler)
+
+# File handler with immediate flushing
+fh = FlushingFileHandler('structural_changes.log', mode='w')
 fh.setLevel(logging.DEBUG)
-fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+fh.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
 structural_logger.addHandler(fh)
 
-# Console handler for important structural changes
-ch = logging.StreamHandler()
+# Console handler for important structural messages
+ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.INFO)
-ch.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+ch.setFormatter(logging.Formatter('STRUCTURAL: %(message)s'))
 structural_logger.addHandler(ch)
+
+# Write initial message to ensure file is created
+structural_logger.info("="*70)
+structural_logger.info("STRUCTURAL CHANGE DETECTION LOG")
+structural_logger.info("="*70)
 
 
 # ============================================================================
@@ -72,16 +90,13 @@ def safe_get_repair_id(repair_data: Any) -> str:
     elif isinstance(repair_data, (int, float)):
         return str(repair_data)
     elif isinstance(repair_data, dict):
-        # Try common patterns for nested IDs
         for key in ['id', 'value', 'repair_id', 'ID']:
             if key in repair_data:
                 value = repair_data[key]
                 if isinstance(value, (str, int, float)):
                     return str(value)
                 elif isinstance(value, dict):
-                    # Recursively try to extract
                     return safe_get_repair_id(value)
-        # If no valid ID found, create hashable representation
         return str(hash(frozenset(repair_data.items())))
     else:
         return str(repair_data)
@@ -158,6 +173,9 @@ class StructuralChangeDetector:
         self.all_detected_changes = []
         self.transaction_count = 0
         
+        # Log initialization
+        structural_logger.info(f"Structural detector initialized (verbose={verbose})")
+        
     def detect_all_changes(self, before: Dict, after: Dict, entity_name: str, 
                           txn_id: str = None) -> List[StructuralChange]:
         """Detect all structural changes between before and after states"""
@@ -165,58 +183,70 @@ class StructuralChangeDetector:
         self.transaction_count += 1
         changes = []
         
-        if self.verbose:
-            structural_logger.info(f"\n{'='*70}")
-            structural_logger.info(f"Analyzing {entity_name} (Transaction: {txn_id or 'unknown'})")
+        structural_logger.info(f"\n{'='*70}")
+        structural_logger.info(f"Transaction #{self.transaction_count}: {entity_name} ({txn_id or 'unknown'})")
+        structural_logger.info(f"{'='*70}")
         
         # Get complete field inventories
         before_fields = self._get_field_inventory(before)
         after_fields = self._get_field_inventory(after)
         
+        structural_logger.info(f"Field counts - Before: {len(before_fields)}, After: {len(after_fields)}")
+        
         # 1. Find added fields
         added_fields = after_fields.keys() - before_fields.keys()
-        for field_path in added_fields:
-            value = after_fields[field_path]['value']
-            changes.append(StructuralChange(
-                entity=entity_name,
-                change_type='added',
-                field_path=field_path,
-                new_value=value
-            ))
-            
-            # Log special additions
-            if 'othr' in field_path.lower():
-                structural_logger.info(f"  ⚠️ 'othr' structure added: {field_path}")
-            if 'clrsysid.mmbid' in field_path.lower():
-                structural_logger.info(f"  ⚠️ MmbId added inside ClrSysId: {field_path}")
+        if added_fields:
+            structural_logger.info(f"\n📌 ADDED FIELDS ({len(added_fields)}):")
+            for field_path in sorted(added_fields):
+                value = after_fields[field_path]['value']
+                structural_logger.info(f"  + {field_path}")
+                changes.append(StructuralChange(
+                    entity=entity_name,
+                    change_type='added',
+                    field_path=field_path,
+                    new_value=value
+                ))
+                
+                # Special pattern detection
+                if 'othr' in field_path.lower():
+                    structural_logger.warning(f"    ⚠️ 'othr' structure added!")
+                if 'clrsysid.mmbid' in field_path.lower():
+                    structural_logger.warning(f"    ⚠️ MmbId added inside ClrSysId!")
         
         # 2. Find removed fields
         removed_fields = before_fields.keys() - after_fields.keys()
-        for field_path in removed_fields:
-            value = before_fields[field_path]['value']
-            changes.append(StructuralChange(
-                entity=entity_name,
-                change_type='removed',
-                field_path=field_path,
-                old_value=value
-            ))
+        if removed_fields:
+            structural_logger.info(f"\n📌 REMOVED FIELDS ({len(removed_fields)}):")
+            for field_path in sorted(removed_fields):
+                value = before_fields[field_path]['value']
+                structural_logger.info(f"  - {field_path}")
+                changes.append(StructuralChange(
+                    entity=entity_name,
+                    change_type='removed',
+                    field_path=field_path,
+                    old_value=value
+                ))
         
         # 3. Find moved fields
         moved_changes = self._detect_field_movements(before_fields, after_fields, entity_name)
-        for change in moved_changes:
-            changes.append(change)
-            if 'mmbid' in change.old_path.lower() and 'clrsysid' in change.field_path.lower():
-                structural_logger.info(f"  ⚠️ MmbId moved into ClrSysId: {change.old_path} -> {change.field_path}")
+        if moved_changes:
+            structural_logger.info(f"\n📌 MOVED FIELDS ({len(moved_changes)}):")
+            for change in moved_changes:
+                structural_logger.info(f"  ➜ {change.old_path} -> {change.field_path}")
+                if 'mmbid' in change.old_path.lower() and 'clrsysid' in change.field_path.lower():
+                    structural_logger.warning(f"    ⚠️ MmbId moved into ClrSysId structure!")
+                changes.append(change)
         
         # 4. Find value changes
         common_fields = before_fields.keys() & after_fields.keys()
+        value_changes = []
         for field_path in common_fields:
             before_val = before_fields[field_path]['value']
             after_val = after_fields[field_path]['value']
             
             if isinstance(before_val, (str, int, float, bool)) and isinstance(after_val, (str, int, float, bool)):
                 if before_val != after_val:
-                    changes.append(StructuralChange(
+                    value_changes.append(StructuralChange(
                         entity=entity_name,
                         change_type='value_changed',
                         field_path=field_path,
@@ -224,29 +254,27 @@ class StructuralChangeDetector:
                         new_value=after_val
                     ))
         
-        # 5. Find type changes
-        for field_path in common_fields:
-            before_type = before_fields[field_path]['type']
-            after_type = after_fields[field_path]['type']
-            if before_type != after_type:
-                changes.append(StructuralChange(
-                    entity=entity_name,
-                    change_type='type_changed',
-                    field_path=field_path,
-                    old_value=before_fields[field_path]['value'],
-                    new_value=after_fields[field_path]['value'],
-                    details={'old_type': before_type, 'new_type': after_type}
-                ))
+        if value_changes:
+            structural_logger.info(f"\n📌 VALUE CHANGES ({len(value_changes)}):")
+            for change in value_changes[:5]:  # Show first 5
+                structural_logger.info(f"  ≠ {change.field_path}: '{change.old_value}' -> '{change.new_value}'")
+            changes.extend(value_changes)
         
-        # 6. Detect restructuring patterns
+        # 5. Detect restructuring patterns
         restructured = self._detect_restructuring(before, after, entity_name)
-        changes.extend(restructured)
+        if restructured:
+            structural_logger.info(f"\n📌 RESTRUCTURING PATTERNS ({len(restructured)}):")
+            for change in restructured:
+                if change.details:
+                    structural_logger.info(f"  ♻️ {change.details.get('pattern', 'Unknown')}")
+            changes.extend(restructured)
         
-        if self.verbose and changes:
-            structural_logger.info(f"  Total changes detected: {len(changes)}")
-            structural_logger.info(f"    Added: {len([c for c in changes if c.change_type == 'added'])}")
-            structural_logger.info(f"    Removed: {len([c for c in changes if c.change_type == 'removed'])}")
-            structural_logger.info(f"    Moved: {len([c for c in changes if c.change_type == 'moved'])}")
+        # Summary
+        structural_logger.info(f"\n📊 SUMMARY for {entity_name}:")
+        structural_logger.info(f"  Total changes: {len(changes)}")
+        structural_logger.info(f"  Added: {len([c for c in changes if c.change_type == 'added'])}")
+        structural_logger.info(f"  Removed: {len([c for c in changes if c.change_type == 'removed'])}")
+        structural_logger.info(f"  Moved: {len([c for c in changes if c.change_type == 'moved'])}")
         
         self.all_detected_changes.extend(changes)
         return changes
@@ -265,7 +293,6 @@ class StructuralChangeDetector:
                     'depth': current_path.count('.')
                 }
                 
-                # Recursively process nested structures
                 if isinstance(value, (dict, list)):
                     nested_inventory = self._get_field_inventory(value, current_path)
                     inventory.update(nested_inventory)
@@ -467,18 +494,18 @@ class StructuralChangeDetector:
         structural_logger.info(f"\n{'='*70}")
         structural_logger.info("STRUCTURAL LEARNING SUMMARY")
         structural_logger.info(f"{'='*70}")
-        structural_logger.info(f"Analyzed {self.transaction_count} transactions")
+        structural_logger.info(f"Analyzed {self.transaction_count} entity states")
         structural_logger.info(f"Total changes detected: {len(self.all_detected_changes)}")
         
         # Change type distribution
         change_counts = Counter(c.change_type for c in self.all_detected_changes)
-        structural_logger.info("\nChange Type Distribution:")
+        structural_logger.info("\n📊 Change Type Distribution:")
         for change_type, count in change_counts.most_common():
             structural_logger.info(f"  {change_type}: {count}")
         
         # Movement patterns
         if self.field_movements:
-            structural_logger.info("\nField Movement Patterns:")
+            structural_logger.info("\n➜ Field Movement Patterns:")
             for entity, movements in list(self.field_movements.items())[:5]:
                 movement_counts = Counter(movements)
                 structural_logger.info(f"  {entity}:")
@@ -486,7 +513,7 @@ class StructuralChangeDetector:
                     structural_logger.info(f"    {pattern}: {count} times")
         
         # Top correlations
-        structural_logger.info("\nTop Change-to-Repair Correlations:")
+        structural_logger.info("\n🔗 Top Change-to-Repair Correlations:")
         top_correlations = []
         for pattern_key, repair_counts in self.change_patterns.items():
             for repair_id, count in repair_counts.items():
@@ -515,16 +542,16 @@ def _repair_pattern_factory():
         'fields': Counter(),
         'co_occurring_repairs': Counter(),
         'entity_field_patterns': defaultdict(Counter),
-        'structural_changes': Counter()  # Track structural changes
+        'structural_changes': Counter()
     }
 
 
 # ============================================================================
-# ACE REPAIR LEARNER (Enhanced with Structural Detection)
+# ACE REPAIR LEARNER
 # ============================================================================
 
 class AceRepairLearner:
-    """Enhanced learner that analyzes ACE repairs, diffs, and structural changes"""
+    """Learner that analyzes ACE repairs, diffs, and structural changes"""
     
     def __init__(self, config: Config = None):
         self.config = config or Config()
@@ -633,7 +660,6 @@ class AceRepairLearner:
             entity_key_str = ensure_hashable(entity_key).lower()
             diff_features['affected_entities'].add(entity_key_str)
             
-            # Track repairs for this entity
             for repair_id in repairs:
                 self.entity_repair_associations[entity_key_str][repair_id] += 1
             
@@ -646,12 +672,6 @@ class AceRepairLearner:
                 # Update counts
                 if action == 'added':
                     diff_features['num_additions'] += 1
-                    if 'ctry' in field_path.lower() and value and len(str(value)) == 2:
-                        diff_features['specific_repairs_indicated'].add('6021')
-                    if 'bicfi' in field_path.lower():
-                        diff_features['specific_repairs_indicated'].add('6035')
-                    if 'nm' in field_path.lower():
-                        diff_features['specific_repairs_indicated'].add('6036')
                 elif action == 'dropped':
                     diff_features['num_drops'] += 1
                 elif action in ['transformed', 'edited']:
@@ -669,8 +689,6 @@ class AceRepairLearner:
                     diff_features['has_address_changes'] = True
                 if 'ctry' in field_lower:
                     diff_features['has_country_changes'] = True
-                    if value and len(str(value)) == 2:
-                        self.lookup_tables['country_extractions'][str(value)] += 1
                 if 'clrsys' in field_lower or 'mmbid' in field_lower:
                     diff_features['has_clearing_changes'] = True
                 
@@ -804,12 +822,6 @@ class AceRepairLearner:
             
             if clearing and bic_after and not self._find_value_in_dict(before, 'bicfi'):
                 self.lookup_tables['clearing_to_bic'][ensure_hashable(clearing)] = ensure_hashable(bic_after)
-            
-            # Learn name lookups
-            if bic_after:
-                name_after = self._find_value_in_dict(after, 'nm')
-                if name_after:
-                    self.lookup_tables['bic_to_name'][ensure_hashable(bic_after)] = ensure_hashable(name_after)
     
     def _find_value_in_dict(self, d: Dict, key_pattern: str) -> Optional[Any]:
         """Recursively find value by key pattern in nested dict"""
@@ -832,7 +844,6 @@ class AceRepairLearner:
         logger.info("ACE REPAIR LEARNING SUMMARY")
         logger.info("="*70)
         
-        # Repair taxonomy
         logger.info(f"\nLearned {len(self.repair_taxonomy)} unique repairs:")
         sorted_repairs = sorted(self.repair_taxonomy.items(), key=lambda x: x[1]['count'], reverse=True)
         for repair_id, info in sorted_repairs[:10]:
@@ -909,7 +920,7 @@ class FeatureExtractor:
         # Normalize payment
         payment = self._normalize_keys(payment)
         
-        # Basic structural features
+        # Basic structural features (18 features)
         has_bic = self._has_field(payment, 'bic')
         has_iban = self._has_field(payment, 'iban')
         has_clearing = self._has_field(payment, 'mmbid')
@@ -930,8 +941,6 @@ class FeatureExtractor:
         features[idx] = float('cdtr' in payment); idx += 1
         features[idx] = float('dbtr' in payment); idx += 1
         features[idx] = float('rmtinf' in payment); idx += 1
-        
-        # Derived features
         features[idx] = float(not has_bic and has_clearing); idx += 1
         features[idx] = float(not has_name and has_bic); idx += 1
         features[idx] = float(not has_country and has_bic); idx += 1
@@ -942,7 +951,7 @@ class FeatureExtractor:
         field_count = self._count_fields(payment)
         features[idx] = min(field_count / 50, 1.0); idx += 1
         
-        # Diff-based features
+        # Diff-based features (13 features)
         if diff_features:
             features[idx] = min(diff_features.get('num_additions', 0) / 10, 1.0); idx += 1
             features[idx] = min(diff_features.get('num_drops', 0) / 10, 1.0); idx += 1
@@ -966,7 +975,7 @@ class FeatureExtractor:
             for _ in range(13):
                 features[idx] = 0.0; idx += 1
         
-        # ACE-specific features
+        # ACE-specific features (7 features)
         has_location_info = has_address or self._has_field(payment, 'townname')
         features[idx] = float(not has_country and has_location_info); idx += 1
         features[idx] = float(has_clearing and not has_bic); idx += 1
@@ -993,7 +1002,7 @@ class FeatureExtractor:
         has_complete_bank_info = has_bic and has_name
         features[idx] = float(has_some_bank_info and not has_complete_bank_info); idx += 1
         
-        # Structural features
+        # Structural features (11 features)
         if structural_features:
             features[idx] = min(structural_features.get('total_structural_changes', 0) / 20, 1.0); idx += 1
             features[idx] = min(structural_features.get('field_movements', 0) / 10, 1.0); idx += 1
@@ -1242,12 +1251,10 @@ class DataProcessor:
         """Extract 'before' state from transaction"""
         payment = {}
         
-        # Copy metadata
         for key in ['source', 'clearing', 'flags', 'parties']:
             if key in txn_data:
                 payment[key] = txn_data[key]
         
-        # Extract before states from entities
         entities = ['cdtrAgt', 'dbtrAgt', 'instgAgt', 'instdAgt',
                    'cdtr', 'dbtr', 'cdtrAcct', 'dbtrAcct', 'rmtInf',
                    'intrmyAgt1', 'intrmyAgt2']
@@ -1497,7 +1504,6 @@ class ModelTrainer:
                     logger.info(f"Early stopping at epoch {epoch}")
                     break
         
-        # Load best model
         self.model.load_state_dict(
             torch.load(os.path.join(self.config.model_dir, 'best_model.pt'))
         )
@@ -1522,10 +1528,8 @@ class ModelTrainer:
         preds = np.vstack(all_preds)
         labels = np.vstack(all_labels)
         
-        # Get RF predictions
         rf_preds = self.rf_model.predict(X_test)
         
-        # Calculate metrics
         nn_preds_binary = (preds > 0.5).astype(int)
         
         exact_match_nn = np.mean(np.all(nn_preds_binary == labels, axis=1))
@@ -1553,18 +1557,14 @@ class ModelTrainer:
         """Save trained models"""
         os.makedirs(self.config.model_dir, exist_ok=True)
         
-        # Save config
         self.config.save(os.path.join(self.config.model_dir, 'config.json'))
         
-        # Save processor
         with open(os.path.join(self.config.model_dir, 'processor.pkl'), 'wb') as f:
             pickle.dump(self.processor, f)
         
-        # Save Random Forest
         with open(os.path.join(self.config.model_dir, 'rf_model.pkl'), 'wb') as f:
             pickle.dump(self.rf_model, f)
         
-        # Save Neural Network
         torch.save(self.model.state_dict(), 
                   os.path.join(self.config.model_dir, 'neural_model.pt'))
         
@@ -1572,11 +1572,11 @@ class ModelTrainer:
 
 
 # ============================================================================
-# PREDICTOR
+# ENHANCED PREDICTOR WITH STRUCTURAL INFERENCE
 # ============================================================================
 
 class RepairPredictor:
-    """Make predictions on new payments"""
+    """Enhanced predictor that uses structural patterns for prediction"""
     
     def __init__(self, model_dir: str = './models'):
         self.model_dir = model_dir
@@ -1609,17 +1609,17 @@ class RepairPredictor:
         )
         self.nn_model.eval()
         
-        logger.info("Models loaded successfully")
+        logger.info(f"Models loaded successfully")
+        logger.info(f"Vocabulary contains {len(self.processor.repair_vocabulary)} repairs")
     
     def predict(self, payment_file: str, threshold: float = 0.5, 
                 use_ensemble: bool = True) -> Dict:
-        """Predict repairs for a payment"""
+        """Enhanced prediction with structural pattern inference"""
         
         # Load payment
         with open(payment_file, 'r') as f:
             data = json.load(f)
         
-        # Extract payment
         if isinstance(data, dict) and len(data) == 1:
             txn_id = list(data.keys())[0]
             payment = data[txn_id]
@@ -1627,8 +1627,16 @@ class RepairPredictor:
         else:
             payment = data
         
-        # Extract features (no diff/structural features for prediction)
-        features = self.processor.feature_extractor.extract_features(payment, None, None)
+        # CRITICAL: Infer structural features from payment structure
+        structural_features = self._infer_structural_features(payment)
+        logger.info(f"Inferred structural indicators: {structural_features}")
+        
+        # Extract features WITH inferred structural features
+        features = self.processor.feature_extractor.extract_features(
+            payment, 
+            None,  # No diff features for prediction
+            structural_features  # USE structural features!
+        )
         
         # Get NN predictions
         features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
@@ -1645,22 +1653,25 @@ class RepairPredictor:
         else:
             ensemble_probs = nn_probs
         
+        # Apply structural pattern boost
+        boosted_probs = self._apply_structural_boost(ensemble_probs, structural_features)
+        
         # Get predicted repairs
         predicted_repairs = []
         ace_predictions = []
         
-        for idx, prob in enumerate(ensemble_probs):
+        for idx, prob in enumerate(boosted_probs):
             if prob > threshold:
                 repair_id = self.processor.idx_to_repair[idx]
                 
-                # Get repair info
                 repair_info = self._get_repair_info(repair_id)
                 
                 predicted_repairs.append({
                     'repair_id': repair_id,
                     'confidence': float(prob),
                     'nn_prob': float(nn_probs[idx]),
-                    'rf_prob': float(rf_probs[idx])
+                    'rf_prob': float(rf_probs[idx]),
+                    'boosted': prob != ensemble_probs[idx]
                 })
                 
                 ace_predictions.append({
@@ -1670,14 +1681,16 @@ class RepairPredictor:
                     'text': repair_info['text']
                 })
         
-        # Sort by confidence
         predicted_repairs.sort(key=lambda x: x['confidence'], reverse=True)
         ace_predictions.sort(key=lambda x: x['id'])
+        
+        logger.info(f"Predicted {len(predicted_repairs)} repairs (threshold: {threshold})")
         
         return {
             'predicted_repairs': predicted_repairs,
             'repair_ids': [r['repair_id'] for r in predicted_repairs],
             'ace': ace_predictions,
+            'structural_indicators': structural_features,
             'confidence_summary': {
                 'high_confidence': [r for r in predicted_repairs if r['confidence'] > 0.8],
                 'medium_confidence': [r for r in predicted_repairs if 0.5 < r['confidence'] <= 0.8],
@@ -1685,13 +1698,160 @@ class RepairPredictor:
             }
         }
     
+    def _infer_structural_features(self, payment: Dict) -> Dict:
+        """Infer likely structural issues from payment structure"""
+        
+        structural_features = {
+            'total_structural_changes': 0,
+            'field_movements': 0,
+            'field_additions': 0,
+            'field_removals': 0,
+            'restructuring_count': 0,
+            'nesting_depth_changes': 0,
+            'has_othr_addition': False,
+            'has_clrsys_restructure': False,
+            'has_mmbid_movement': False,
+            'max_nesting_change': 0,
+            'structural_complexity': 0
+        }
+        
+        payment_normalized = self._normalize_keys(payment)
+        
+        # Check for structural indicators
+        for entity in ['instgagt', 'instdagt', 'cdtragt', 'dbtragt']:
+            if entity in payment_normalized:
+                entity_data = payment_normalized[entity]
+                if isinstance(entity_data, dict):
+                    # Check for MmbId at wrong level
+                    if self._check_field_at_path(entity_data, 'fininstnid.mmbid'):
+                        if not self._check_field_at_path(entity_data, 'fininstnid.clrsysid'):
+                            structural_features['has_mmbid_movement'] = True
+                            structural_features['field_movements'] = 1
+                            structural_features['restructuring_count'] = 1
+                            logger.info(f"  Detected: MmbId likely needs to move into ClrSysId")
+                    
+                    # Check if needs othr structure
+                    has_some_id = self._has_field_recursive(entity_data, 'id') or \
+                                  self._has_field_recursive(entity_data, 'mmbid')
+                    has_bic = self._has_field_recursive(entity_data, 'bicfi') or \
+                              self._has_field_recursive(entity_data, 'bic')
+                    has_othr = self._has_field_recursive(entity_data, 'othr')
+                    
+                    if has_some_id and not has_bic and not has_othr:
+                        structural_features['has_othr_addition'] = True
+                        structural_features['field_additions'] = 2
+                        logger.info(f"  Detected: May need othr structure")
+                    
+                    # Check for incomplete clearing system
+                    has_clearing = self._has_field_recursive(entity_data, 'mmbid')
+                    has_clrsys = self._has_field_recursive(entity_data, 'clrsysid')
+                    
+                    if has_clearing and not has_clrsys:
+                        structural_features['has_clrsys_restructure'] = True
+                        structural_features['restructuring_count'] += 1
+                        logger.info(f"  Detected: Clearing system needs restructuring")
+        
+        # Calculate complexity
+        structural_features['structural_complexity'] = (
+            structural_features['field_movements'] * 2 +
+            structural_features['restructuring_count'] * 3 +
+            structural_features['field_additions'] * 0.5
+        )
+        
+        structural_features['total_structural_changes'] = (
+            structural_features['field_movements'] +
+            structural_features['field_additions'] +
+            structural_features['restructuring_count']
+        )
+        
+        return structural_features
+    
+    def _apply_structural_boost(self, probs: np.ndarray, structural_features: Dict) -> np.ndarray:
+        """Boost probabilities based on structural patterns detected"""
+        boosted_probs = probs.copy()
+        
+        if not hasattr(self.processor.ace_learner, 'repair_to_structural_patterns'):
+            return boosted_probs
+        
+        for idx, repair_id in self.processor.idx_to_repair.items():
+            if repair_id not in self.processor.ace_learner.repair_to_structural_patterns:
+                continue
+            
+            patterns = self.processor.ace_learner.repair_to_structural_patterns[repair_id]
+            if not patterns:
+                continue
+            
+            # Calculate pattern match score
+            match_score = 0.0
+            for pattern in patterns:
+                if structural_features.get('has_mmbid_movement') and pattern.get('movements', 0) > 0:
+                    match_score += 0.2
+                if structural_features.get('has_othr_addition') and pattern.get('additions', 0) > 0:
+                    match_score += 0.2
+                if structural_features.get('has_clrsys_restructure') and pattern.get('restructuring', 0) > 0:
+                    match_score += 0.2
+                if structural_features.get('structural_complexity', 0) > 5 and pattern.get('total_changes', 0) > 5:
+                    match_score += 0.1
+            
+            # Apply boost
+            if match_score > 0:
+                boost = min(0.3, match_score)
+                boosted_probs[idx] = min(1.0, boosted_probs[idx] + boost)
+                if boost > 0.1:
+                    logger.info(f"  Boosted {repair_id} by {boost:.2f} due to structural pattern match")
+        
+        return boosted_probs
+    
+    def _normalize_keys(self, obj):
+        """Normalize all keys to lowercase"""
+        if isinstance(obj, dict):
+            return {k.lower() if isinstance(k, str) else k: self._normalize_keys(v)
+                   for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._normalize_keys(item) for item in obj]
+        return obj
+    
+    def _check_field_at_path(self, obj: Dict, path: str) -> bool:
+        """Check if a field exists at a specific path"""
+        parts = path.lower().split('.')
+        current = obj
+        
+        for part in parts:
+            if isinstance(current, dict):
+                found = False
+                for key in current.keys():
+                    if key.lower() == part:
+                        current = current[key]
+                        found = True
+                        break
+                if not found:
+                    return False
+            else:
+                return False
+        return True
+    
+    def _has_field_recursive(self, obj, field_name: str) -> bool:
+        """Check if field exists anywhere in object"""
+        field_name = field_name.lower()
+        
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if field_name in str(k).lower():
+                    return True
+                if self._has_field_recursive(v, field_name):
+                    return True
+        elif isinstance(obj, list):
+            for item in obj:
+                if self._has_field_recursive(item, field_name):
+                    return True
+        return False
+    
     def _get_repair_info(self, repair_id: str) -> Dict:
         """Get repair information"""
         if hasattr(self.processor.ace_learner, 'repair_taxonomy'):
             if repair_id in self.processor.ace_learner.repair_taxonomy:
                 return self.processor.ace_learner.repair_taxonomy[repair_id]
         
-        # Fallback
         return {
             'code': 'I',
             'field': 'UNKNOWN',
@@ -1705,7 +1865,7 @@ class RepairPredictor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='ACE Payment Repair Predictor - Complete Version with Structural Detection'
+        description='ACE Payment Repair Predictor - Final Version'
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Commands')
@@ -1725,10 +1885,9 @@ def main():
     predict_parser.add_argument('--threshold', type=float, default=0.5)
     predict_parser.add_argument('--output', help='Output file')
     
-    # Analyze command
-    analyze_parser = subparsers.add_parser('analyze', help='Analyze data')
-    analyze_parser.add_argument('--input', required=True, help='Data to analyze')
-    analyze_parser.add_argument('--output', help='Output report')
+    # Debug command
+    debug_parser = subparsers.add_parser('debug', help='Debug model state')
+    debug_parser.add_argument('--model', default='./models')
     
     args = parser.parse_args()
     
@@ -1748,43 +1907,47 @@ def main():
         
         metrics = trainer.train(args.input)
         logger.info(f"\nTraining complete. Metrics: {metrics}")
-        logger.info(f"Check structural_changes.log for detailed change analysis")
+        logger.info(f"Check structural_changes.log for detailed analysis")
     
     elif args.command == 'predict':
         predictor = RepairPredictor(args.model)
         results = predictor.predict(args.input, args.threshold)
         
-        logger.info(f"\nPredicted {len(results['predicted_repairs'])} repairs:")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"PREDICTION RESULTS")
+        logger.info(f"{'='*70}")
+        logger.info(f"Predicted {len(results['predicted_repairs'])} repairs:")
+        
         for repair in results['predicted_repairs']:
-            logger.info(f"  {repair['repair_id']}: {repair['confidence']:.2%}")
+            boosted = " (boosted)" if repair.get('boosted') else ""
+            logger.info(f"  {repair['repair_id']}: {repair['confidence']:.2%}{boosted}")
         
         if args.output:
             with open(args.output, 'w') as f:
                 json.dump(results, f, indent=2, default=str)
-            logger.info(f"Results saved to {args.output}")
+            logger.info(f"\nResults saved to {args.output}")
     
-    elif args.command == 'analyze':
-        config = Config(verbose_logging=True)
-        processor = DataProcessor(config)
+    elif args.command == 'debug':
+        # Debug model state
+        logger.info("Debugging model state...")
         
-        transactions = processor.load_transactions_from_path(args.input)
-        logger.info(f"Analyzing {len(transactions)} transactions...")
+        with open(os.path.join(args.model, 'processor.pkl'), 'rb') as f:
+            processor = pickle.load(f)
         
-        for txn_id, txn_data in list(transactions.items())[:100]:  # Analyze first 100
-            if isinstance(txn_data, dict) and 'ace' in txn_data:
-                processor.ace_learner.learn_from_transaction(txn_id, txn_data)
+        logger.info(f"\nRepair vocabulary: {len(processor.repair_vocabulary)} repairs")
+        logger.info(f"Feature count: {len(processor.feature_extractor.feature_names)}")
         
-        processor.ace_learner.print_summary()
-        logger.info(f"Check structural_changes.log for detailed analysis")
+        if hasattr(processor.ace_learner, 'structural_detector'):
+            detector = processor.ace_learner.structural_detector
+            logger.info(f"Structural changes detected: {len(detector.all_detected_changes)}")
+            logger.info(f"Transactions analyzed: {detector.transaction_count}")
         
-        if args.output:
-            summary = {
-                'transactions_analyzed': len(transactions),
-                'repairs_found': len(processor.ace_learner.repair_taxonomy),
-                'structural_changes': len(processor.ace_learner.structural_detector.all_detected_changes)
-            }
-            with open(args.output, 'w') as f:
-                json.dump(summary, f, indent=2)
+        if hasattr(processor.ace_learner, 'repair_to_structural_patterns'):
+            patterns = processor.ace_learner.repair_to_structural_patterns
+            logger.info(f"Repairs with structural patterns: {len(patterns)}")
+            
+            for repair_id, pattern_list in list(patterns.items())[:5]:
+                logger.info(f"  {repair_id}: {len(pattern_list)} patterns")
     
     else:
         parser.print_help()
