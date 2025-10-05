@@ -2125,4 +2125,3 @@ Examples:
 # Entry point when script is run directly
 if __name__ == "__main__":
     main()
-
