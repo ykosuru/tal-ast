@@ -436,13 +436,17 @@ class EnhancedStructuralDetector:
 # INCREMENTAL DATA PROCESSOR
 # ============================================================================
 
+def create_counter_dict():
+    """Factory function for creating defaultdict(int)"""
+    return defaultdict(int)
+
 class IncrementalDataProcessor:
     """Process large datasets incrementally"""
     
     def __init__(self, config: EnhancedConfig):
         self.config = config
         self.structural_detector = EnhancedStructuralDetector(config)
-        self.repair_patterns = defaultdict(lambda: defaultdict(int))
+        self.repair_patterns = defaultdict(create_counter_dict)
         self.repair_vocabulary = {}
         self.feature_cache = {}
         self.transaction_count = 0
@@ -672,7 +676,12 @@ class IncrementalDataProcessor:
         
         self.transaction_count = checkpoint_data['transaction_count']
         self.repair_vocabulary = checkpoint_data['repair_vocabulary']
-        self.repair_patterns = defaultdict(lambda: defaultdict(int), checkpoint_data['repair_patterns'])
+        
+        # Properly reconstruct defaultdicts
+        self.repair_patterns = defaultdict(create_counter_dict)
+        for key, value_dict in checkpoint_data['repair_patterns'].items():
+            self.repair_patterns[key] = defaultdict(int, value_dict)
+        
         self.structural_detector.source_clearing_patterns = defaultdict(set, checkpoint_data['source_clearing_patterns'])
         self.structural_detector.database_lookup_patterns = defaultdict(list, checkpoint_data['database_lookup_patterns'])
         
@@ -692,6 +701,44 @@ class EnhancedTrainer:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"Using device: {self.device}")
     
+    def build_vocabulary_from_directory(self, directory_path: str) -> Dict[str, int]:
+        """Build complete vocabulary from directory (memory efficient)"""
+        logger.info("Building vocabulary from directory...")
+        vocabulary = {}
+        transaction_count = 0
+        
+        json_files = sorted(Path(directory_path).glob('**/*.json'))
+        
+        for json_file in tqdm(json_files, desc="Scanning for repairs"):
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                transactions = self.processor._extract_transactions(data)
+                
+                for txn_id, txn_data in transactions.items():
+                    if not isinstance(txn_data, dict):
+                        continue
+                    
+                    # Extract repairs for vocabulary
+                    for repair in txn_data.get('ace', []):
+                        if isinstance(repair, dict):
+                            repair_id = str(repair.get('id', 'unknown'))
+                        else:
+                            repair_id = str(repair)
+                        
+                        if repair_id not in vocabulary:
+                            vocabulary[repair_id] = len(vocabulary)
+                    
+                    transaction_count += 1
+                    
+            except Exception as e:
+                logger.debug(f"Error reading {json_file}: {e}")
+                continue
+        
+        logger.info(f"Built vocabulary with {len(vocabulary)} unique repairs from {transaction_count} transactions")
+        return vocabulary
+    
     def train_on_directory(self, directory_path: str):
         """Train model on directory of JSON files"""
         logger.info("="*70)
@@ -699,38 +746,32 @@ class EnhancedTrainer:
         logger.info("="*70)
         logger.info(f"Processing directory: {directory_path}")
         
-        # First pass: Build vocabulary and collect data
-        logger.info("First pass: Building vocabulary...")
-        processed_transactions = []
+        # Option 1: Memory-efficient - build vocabulary first
+        vocabulary = self.build_vocabulary_from_directory(directory_path)
+        self.processor.repair_vocabulary = vocabulary
+        
+        # Now process with fixed vocabulary
+        logger.info("Processing transactions with fixed vocabulary...")
+        all_features = []
+        all_labels = []
+        vocab_size = len(vocabulary)
         
         def progress_callback(count, processed):
             if count % 100 == 0:
                 logger.info(f"Processed {count} transactions...")
         
-        # Collect all processed data
+        # Process incrementally with fixed vocabulary
         for processed_data in self.processor.process_directory_incrementally(
             directory_path, 
             callback_fn=progress_callback
         ):
-            processed_transactions.append(processed_data)
-        
-        logger.info(f"Collected {len(processed_transactions)} transactions")
-        logger.info(f"Vocabulary size: {len(self.processor.repair_vocabulary)}")
-        
-        # Second pass: Create feature and label arrays with fixed vocabulary size
-        logger.info("Second pass: Creating feature and label arrays...")
-        all_features = []
-        all_labels = []
-        vocab_size = len(self.processor.repair_vocabulary)
-        
-        for processed_data in processed_transactions:
             all_features.append(processed_data['features'])
             
             # Create fixed-size label vector
             labels = np.zeros(vocab_size)
             for repair_id in processed_data['repairs']:
-                if repair_id in self.processor.repair_vocabulary:
-                    labels[self.processor.repair_vocabulary[repair_id]] = 1.0
+                if repair_id in vocabulary:
+                    labels[vocabulary[repair_id]] = 1.0
             all_labels.append(labels)
         
         # Convert to arrays - now all labels have same size
