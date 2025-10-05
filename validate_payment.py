@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-ISO 20022 Payment Entity Validator with Structure Comparison
-Validates payment entities and shows structure differences
+ISO 20022 Deep Field Validator
+Validates every field with format, length, and character restrictions
 """
 
 import json
 import re
-from typing import Dict, List, Optional, Any, Tuple, Set
+from typing import Dict, List, Optional, Any, Set
 from dataclasses import dataclass
 from enum import Enum
 
@@ -23,160 +23,34 @@ class ValidationResult:
     level: ValidationLevel
     field: str
     message: str
+    value: Any = None
     
     def __str__(self):
-        return f"[{self.level.value}] {self.field}: {self.message}"
-
-
-# ISO 20022 Structure Specifications (hardcoded)
-ISO20022_SPECS = {
-    'cdtr': {
-        'name': 'Creditor (Beneficiary)',
-        'required_fields': ['Nm'],
-        'optional_fields': ['PstlAdr', 'Id', 'CtryOfRes'],
-        'structure': {
-            'Nm': {'type': 'string', 'max_length': 140, 'description': 'Name'},
-            'PstlAdr': {'type': 'object', 'description': 'Postal Address'},
-            'CtryOfRes': {'type': 'string', 'max_length': 2, 'description': 'Country Code (ISO 3166)'}
-        }
-    },
-    'dbtr': {
-        'name': 'Debtor (Originator)',
-        'required_fields': ['Nm'],
-        'optional_fields': ['PstlAdr', 'Id', 'CtryOfRes'],
-        'structure': {
-            'Nm': {'type': 'string', 'max_length': 140, 'description': 'Name'},
-            'PstlAdr': {'type': 'object', 'description': 'Postal Address'},
-            'CtryOfRes': {'type': 'string', 'max_length': 2, 'description': 'Country Code (ISO 3166)'}
-        }
-    },
-    'cdtrAgt': {
-        'name': 'Creditor Agent (Beneficiary Bank)',
-        'required_fields': ['FinInstnId'],
-        'optional_fields': ['BrnchId', 'CtryOfRes'],
-        'structure': {
-            'FinInstnId': {
-                'type': 'object',
-                'description': 'Financial Institution ID',
-                'fields': {
-                    'BICFI': {'type': 'string', 'format': 'BIC (8 or 11 chars)', 'optional': True},
-                    'ClrSysMmbId': {'type': 'object', 'optional': True},
-                    'Nm': {'type': 'string', 'max_length': 140, 'optional': True},
-                    'PstlAdr': {'type': 'object', 'optional': True},
-                    'Othr': {'type': 'object', 'optional': True}
-                }
-            },
-            'CtryOfRes': {'type': 'string', 'max_length': 2, 'description': 'Country Code'}
-        }
-    },
-    'dbtrAgt': {
-        'name': 'Debtor Agent (Ordering Bank)',
-        'required_fields': ['FinInstnId'],
-        'optional_fields': ['BrnchId', 'CtryOfRes'],
-        'structure': {
-            'FinInstnId': {
-                'type': 'object',
-                'description': 'Financial Institution ID',
-                'fields': {
-                    'BICFI': {'type': 'string', 'format': 'BIC (8 or 11 chars)', 'optional': True},
-                    'ClrSysMmbId': {'type': 'object', 'optional': True},
-                    'Nm': {'type': 'string', 'max_length': 140, 'optional': True},
-                    'PstlAdr': {'type': 'object', 'optional': True},
-                    'Othr': {'type': 'object', 'optional': True}
-                }
-            }
-        }
-    },
-    'cdtrAcct': {
-        'name': 'Creditor Account',
-        'required_fields': ['Id'],
-        'optional_fields': ['Tp', 'Ccy', 'Nm'],
-        'structure': {
-            'Id': {
-                'type': 'object',
-                'description': 'Account Identification (IBAN OR Othr required)',
-                'fields': {
-                    'IBAN': {'type': 'string', 'format': 'IBAN (15-34 chars)', 'optional': True},
-                    'Othr': {
-                        'type': 'object',
-                        'optional': True,
-                        'fields': {
-                            'Id': {'type': 'string', 'max_length': 34, 'description': 'Account number'}
-                        }
-                    }
-                }
-            },
-            'Tp': {'type': 'object', 'description': 'Account Type'},
-            'Ccy': {'type': 'string', 'max_length': 3, 'description': 'Currency Code (ISO 4217)'},
-            'Nm': {'type': 'string', 'max_length': 70, 'description': 'Account Name'}
-        }
-    },
-    'dbtrAcct': {
-        'name': 'Debtor Account',
-        'required_fields': ['Id'],
-        'optional_fields': ['Tp', 'Ccy', 'Nm'],
-        'structure': {
-            'Id': {
-                'type': 'object',
-                'description': 'Account Identification (IBAN OR Othr required)',
-                'fields': {
-                    'IBAN': {'type': 'string', 'format': 'IBAN (15-34 chars)', 'optional': True},
-                    'Othr': {
-                        'type': 'object',
-                        'optional': True,
-                        'fields': {
-                            'Id': {'type': 'string', 'max_length': 34, 'description': 'Account number'}
-                        }
-                    }
-                }
-            },
-            'Tp': {'type': 'object', 'description': 'Account Type'},
-            'Ccy': {'type': 'string', 'max_length': 3, 'description': 'Currency Code (ISO 4217)'}
-        }
-    },
-    'instgAgt': {
-        'name': 'Instructing Agent',
-        'required_fields': ['FinInstnId'],
-        'optional_fields': ['BrnchId'],
-        'structure': {
-            'FinInstnId': {'type': 'object', 'description': 'Financial Institution ID'}
-        }
-    },
-    'instdAgt': {
-        'name': 'Instructed Agent',
-        'required_fields': ['FinInstnId'],
-        'optional_fields': ['BrnchId'],
-        'structure': {
-            'FinInstnId': {'type': 'object', 'description': 'Financial Institution ID'}
-        }
-    },
-    'rmtInf': {
-        'name': 'Remittance Information',
-        'required_fields': [],
-        'optional_fields': ['Ustrd', 'Strd'],
-        'structure': {
-            'Ustrd': {'type': 'string or array', 'max_length': 140, 'description': 'Unstructured text'},
-            'Strd': {'type': 'object', 'description': 'Structured remittance'}
-        }
-    }
-}
+        value_str = f" (value: '{self.value}')" if self.value else ""
+        return f"[{self.level.value}] {self.field}: {self.message}{value_str}"
 
 
 class ISO20022Validator:
-    """Validates payment entities against ISO 20022 specifications"""
+    """Deep validator for ISO 20022 payment entities"""
     
     def __init__(self):
         self.results: List[ValidationResult] = []
-        self.structure_analysis = {}
+        self.field_count = 0
+        self.valid_count = 0
+        self.error_count = 0
     
-    def add_error(self, field: str, message: str):
-        self.results.append(ValidationResult(ValidationLevel.ERROR, field, message))
+    def add_error(self, field: str, message: str, value: Any = None):
+        self.results.append(ValidationResult(ValidationLevel.ERROR, field, message, value))
+        self.error_count += 1
     
-    def add_warning(self, field: str, message: str):
-        self.results.append(ValidationResult(ValidationLevel.WARNING, field, message))
+    def add_warning(self, field: str, message: str, value: Any = None):
+        self.results.append(ValidationResult(ValidationLevel.WARNING, field, message, value))
     
-    def add_info(self, field: str, message: str):
-        self.results.append(ValidationResult(ValidationLevel.INFO, field, message))
+    def add_info(self, field: str, message: str, value: Any = None):
+        self.results.append(ValidationResult(ValidationLevel.INFO, field, message, value))
+    
+    def add_valid(self, field: str):
+        self.valid_count += 1
     
     def get_errors(self) -> List[ValidationResult]:
         return [r for r in self.results if r.level == ValidationLevel.ERROR]
@@ -189,153 +63,578 @@ class ISO20022Validator:
     
     def clear(self):
         self.results.clear()
-        self.structure_analysis.clear()
+        self.field_count = 0
+        self.valid_count = 0
+        self.error_count = 0
     
     # ========================================================================
-    # STRUCTURE ANALYSIS
+    # DEEP FIELD VALIDATORS
     # ========================================================================
     
-    def extract_structure(self, obj: Any, max_depth: int = 4) -> Dict:
-        """Extract structure from an object"""
-        def traverse(o, depth=0):
-            if depth > max_depth:
-                return "..."
+    def validate_string_field(self, value: Any, field: str, min_len: int = 1, max_len: int = 140, 
+                             pattern: str = None, allow_dash: bool = True, 
+                             numeric_only: bool = False, alpha_only: bool = False) -> bool:
+        """Deep validation of string field"""
+        self.field_count += 1
+        
+        # Type check
+        if not isinstance(value, str):
+            self.add_error(field, f"Must be string, got {type(value).__name__}", value)
+            return False
+        
+        # Empty check
+        if not value.strip():
+            self.add_error(field, "Cannot be empty or whitespace only", value)
+            return False
+        
+        # Length check
+        if len(value) < min_len:
+            self.add_error(field, f"Length {len(value)} is below minimum {min_len}", value)
+            return False
+        
+        if len(value) > max_len:
+            self.add_error(field, f"Length {len(value)} exceeds maximum {max_len}", value)
+            return False
+        
+        # Dash check
+        if not allow_dash and '-' in value:
+            self.add_error(field, f"Dashes not allowed in this field", value)
+            return False
+        
+        # Numeric check
+        if numeric_only:
+            if not value.replace('-', '').replace(' ', '').isdigit():
+                self.add_error(field, f"Must contain only digits", value)
+                return False
             
-            if isinstance(o, dict):
-                return {k: traverse(v, depth + 1) for k, v in o.items()}
-            elif isinstance(o, list):
-                if len(o) > 0:
-                    return [traverse(o[0], depth + 1)]
-                return []
-            else:
-                return type(o).__name__
+            # Check for dashes in numeric fields
+            if '-' in value:
+                self.add_warning(field, f"Numeric field contains dashes", value)
         
-        return traverse(obj)
+        # Alpha check
+        if alpha_only:
+            if not value.replace(' ', '').replace('-', '').isalpha():
+                self.add_error(field, f"Must contain only letters", value)
+                return False
+        
+        # Pattern check
+        if pattern:
+            if not re.match(pattern, value):
+                self.add_error(field, f"Does not match required pattern: {pattern}", value)
+                return False
+        
+        # Check for common issues
+        if value != value.strip():
+            self.add_warning(field, f"Has leading/trailing whitespace", value)
+        
+        if '  ' in value:
+            self.add_warning(field, f"Contains multiple consecutive spaces", value)
+        
+        # Check for non-printable characters
+        if any(ord(c) < 32 or ord(c) > 126 for c in value if c not in ['\n', '\r', '\t']):
+            self.add_warning(field, f"Contains non-printable characters", value)
+        
+        self.add_valid(field)
+        return True
     
-    def get_all_fields(self, obj: Any, prefix: str = "") -> Set[str]:
-        """Get all field paths from an object"""
-        fields = set()
+    def validate_currency(self, value: Any, field: str) -> bool:
+        """Validate ISO 4217 currency code"""
+        self.field_count += 1
         
-        def traverse(o, path):
-            if isinstance(o, dict):
-                for k, v in o.items():
-                    field_path = f"{path}.{k}" if path else k
-                    fields.add(field_path)
-                    traverse(v, field_path)
-            elif isinstance(o, list) and len(o) > 0:
-                traverse(o[0], f"{path}[0]")
+        if not isinstance(value, str):
+            self.add_error(field, f"Currency must be string", value)
+            return False
         
-        traverse(obj, prefix)
-        return fields
+        if len(value) != 3:
+            self.add_error(field, f"Currency must be exactly 3 characters (ISO 4217), got {len(value)}", value)
+            return False
+        
+        if not value.isalpha():
+            self.add_error(field, f"Currency must contain only letters", value)
+            return False
+        
+        if not value.isupper():
+            self.add_warning(field, f"Currency should be uppercase (ISO 4217)", value)
+        
+        # Common currencies check
+        common_currencies = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'CNY']
+        if value.upper() not in common_currencies:
+            self.add_info(field, f"Uncommon currency code: {value}", value)
+        
+        self.add_valid(field)
+        return True
     
-    def normalize_field_name(self, field: str) -> str:
-        """Normalize field names (handle PascalCase and camelCase)"""
-        # Convert first letter to uppercase for comparison
-        if field and field[0].islower():
-            return field[0].upper() + field[1:]
-        return field
+    def validate_country_code(self, value: Any, field: str) -> bool:
+        """Validate ISO 3166 country code"""
+        self.field_count += 1
+        
+        if not isinstance(value, str):
+            self.add_error(field, f"Country code must be string", value)
+            return False
+        
+        if len(value) != 2:
+            self.add_error(field, f"Country code must be exactly 2 characters (ISO 3166), got {len(value)}", value)
+            return False
+        
+        if not value.isalpha():
+            self.add_error(field, f"Country code must contain only letters", value)
+            return False
+        
+        if not value.isupper():
+            self.add_warning(field, f"Country code should be uppercase (ISO 3166)", value)
+        
+        self.add_valid(field)
+        return True
     
-    def compare_structures(self, entity_name: str, actual: Dict, spec: Dict) -> Dict:
-        """Compare actual structure with ISO 20022 spec"""
-        comparison = {
-            'entity': entity_name,
-            'spec_name': spec['name'],
-            'actual_fields': set(),
-            'expected_required': set(spec['required_fields']),
-            'expected_optional': set(spec['optional_fields']),
-            'missing_required': set(),
-            'missing_optional': set(),
-            'extra_fields': set(),
-            'present_fields': set()
-        }
+    def validate_bic(self, value: Any, field: str) -> bool:
+        """Validate BIC/SWIFT code"""
+        self.field_count += 1
         
-        # Get all actual fields (normalized)
-        actual_fields_raw = self.get_all_fields(actual)
-        actual_fields_normalized = set()
+        if not isinstance(value, str):
+            self.add_error(field, f"BIC must be string", value)
+            return False
         
-        for field in actual_fields_raw:
-            # Get top-level field name
-            top_field = field.split('.')[0].split('[')[0]
-            normalized = self.normalize_field_name(top_field)
-            actual_fields_normalized.add(normalized)
-            comparison['actual_fields'].add(field)
+        # Remove spaces
+        bic = value.replace(' ', '')
         
-        # Check required fields
-        for req_field in spec['required_fields']:
-            if req_field not in actual_fields_normalized:
-                # Check camelCase version
-                camel = req_field[0].lower() + req_field[1:] if req_field else req_field
-                if camel not in [f.split('.')[0] for f in actual_fields_raw]:
-                    comparison['missing_required'].add(req_field)
-                else:
-                    comparison['present_fields'].add(camel)
-            else:
-                comparison['present_fields'].add(req_field)
+        if len(bic) not in [8, 11]:
+            self.add_error(field, f"BIC must be 8 or 11 characters, got {len(bic)}", value)
+            return False
         
-        # Check optional fields
-        all_expected = comparison['expected_required'] | comparison['expected_optional']
-        for opt_field in spec['optional_fields']:
-            if opt_field in actual_fields_normalized:
-                comparison['present_fields'].add(opt_field)
+        # Check for dashes (not allowed in BIC)
+        if '-' in bic:
+            self.add_error(field, f"BIC cannot contain dashes", value)
+            return False
         
-        # Check for extra fields
-        for actual_field in actual_fields_normalized:
-            if actual_field not in all_expected:
-                comparison['extra_fields'].add(actual_field)
+        # Format: AAAABBCCXXX
+        if not bic[:4].isalpha():
+            self.add_error(field, f"BIC bank code (first 4 chars) must be letters", value)
+            return False
         
-        return comparison
+        if not bic[4:6].isalpha():
+            self.add_error(field, f"BIC country code (chars 5-6) must be letters", value)
+            return False
+        
+        if not bic[6:8].isalnum():
+            self.add_error(field, f"BIC location code (chars 7-8) must be alphanumeric", value)
+            return False
+        
+        if len(bic) == 11:
+            if not bic[8:11].isalnum():
+                self.add_error(field, f"BIC branch code (chars 9-11) must be alphanumeric", value)
+                return False
+        
+        # Check if uppercase
+        if not bic.isupper():
+            self.add_warning(field, f"BIC should be uppercase", value)
+        
+        self.add_valid(field)
+        return True
+    
+    def validate_iban(self, value: Any, field: str) -> bool:
+        """Validate IBAN"""
+        self.field_count += 1
+        
+        if not isinstance(value, str):
+            self.add_error(field, f"IBAN must be string", value)
+            return False
+        
+        # Remove spaces
+        iban = value.replace(' ', '')
+        
+        # Check for dashes (not standard in IBAN)
+        if '-' in iban:
+            self.add_warning(field, f"IBAN should not contain dashes", value)
+            iban = iban.replace('-', '')
+        
+        # Length: 15-34 characters
+        if len(iban) < 15 or len(iban) > 34:
+            self.add_error(field, f"IBAN must be 15-34 characters, got {len(iban)}", value)
+            return False
+        
+        # First 2 chars: country code
+        if not iban[:2].isalpha():
+            self.add_error(field, f"IBAN must start with 2-letter country code", value)
+            return False
+        
+        # Next 2 chars: check digits
+        if not iban[2:4].isdigit():
+            self.add_error(field, f"IBAN chars 3-4 must be check digits (numeric)", value)
+            return False
+        
+        # Rest should be alphanumeric
+        if not iban[4:].isalnum():
+            self.add_error(field, f"IBAN contains invalid characters after check digits", value)
+            return False
+        
+        if not iban.isupper():
+            self.add_warning(field, f"IBAN should be uppercase", value)
+        
+        self.add_valid(field)
+        return True
+    
+    def validate_routing_number(self, value: Any, field: str) -> bool:
+        """Validate US ABA routing number"""
+        self.field_count += 1
+        
+        if not isinstance(value, str):
+            self.add_error(field, f"Routing number must be string", value)
+            return False
+        
+        # Check for dashes (not allowed)
+        if '-' in value:
+            self.add_error(field, f"Routing number cannot contain dashes", value)
+            return False
+        
+        # Must be exactly 9 digits
+        if len(value) != 9:
+            self.add_error(field, f"US routing number must be exactly 9 digits, got {len(value)}", value)
+            return False
+        
+        if not value.isdigit():
+            self.add_error(field, f"Routing number must be numeric only", value)
+            return False
+        
+        self.add_valid(field)
+        return True
+    
+    def validate_account_number(self, value: Any, field: str, max_len: int = 34) -> bool:
+        """Validate account number"""
+        self.field_count += 1
+        
+        if not isinstance(value, str):
+            self.add_error(field, f"Account number must be string", value)
+            return False
+        
+        if not value.strip():
+            self.add_error(field, f"Account number cannot be empty", value)
+            return False
+        
+        if len(value) > max_len:
+            self.add_error(field, f"Account number exceeds maximum length {max_len}, got {len(value)}", value)
+            return False
+        
+        # Check for dashes in numeric-only account numbers
+        if value.replace('-', '').isdigit() and '-' in value:
+            self.add_warning(field, f"Numeric account number contains dashes", value)
+        
+        # Account numbers should be alphanumeric
+        if not value.replace('-', '').replace(' ', '').isalnum():
+            self.add_warning(field, f"Account number contains special characters", value)
+        
+        self.add_valid(field)
+        return True
     
     # ========================================================================
-    # VALIDATION (simplified for structure focus)
+    # ENTITY VALIDATORS
+    # ========================================================================
+    
+    def validate_party(self, party: Dict, base_path: str, party_type: str) -> bool:
+        """Validate Party (Creditor/Debtor)"""
+        if not isinstance(party, dict):
+            self.add_error(base_path, f"{party_type} must be object/dict")
+            return False
+        
+        valid = True
+        
+        # Name - REQUIRED
+        name_key = self._find_key(party, ['Nm', 'nm'])
+        if not name_key:
+            self.add_error(f"{base_path}.Nm", "Name is REQUIRED")
+            valid = False
+        else:
+            self.validate_string_field(party[name_key], f"{base_path}.{name_key}", max_len=140)
+        
+        # Postal Address - OPTIONAL
+        addr_key = self._find_key(party, ['PstlAdr', 'pstlAdr'])
+        if addr_key:
+            self.validate_postal_address(party[addr_key], f"{base_path}.{addr_key}")
+        
+        # Country - OPTIONAL
+        ctry_key = self._find_key(party, ['CtryOfRes', 'ctryOfRes'])
+        if ctry_key:
+            self.validate_country_code(party[ctry_key], f"{base_path}.{ctry_key}")
+        
+        return valid
+    
+    def validate_postal_address(self, address: Dict, base_path: str) -> bool:
+        """Validate Postal Address"""
+        if not isinstance(address, dict):
+            self.add_error(base_path, "Postal address must be object/dict")
+            return False
+        
+        # Country
+        ctry_key = self._find_key(address, ['Ctry', 'ctry'])
+        if ctry_key:
+            self.validate_country_code(address[ctry_key], f"{base_path}.{ctry_key}")
+        
+        # Address Lines - max 7 lines, max 70 chars each
+        adr_key = self._find_key(address, ['AdrLine', 'adrLine'])
+        if adr_key:
+            adr_lines = address[adr_key]
+            if isinstance(adr_lines, list):
+                if len(adr_lines) > 7:
+                    self.add_error(f"{base_path}.{adr_key}", f"Maximum 7 address lines allowed, got {len(adr_lines)}")
+                
+                for i, line in enumerate(adr_lines):
+                    self.validate_string_field(line, f"{base_path}.{adr_key}[{i}]", max_len=70)
+            elif isinstance(adr_lines, str):
+                self.validate_string_field(adr_lines, f"{base_path}.{adr_key}", max_len=70)
+        
+        # Post Code - max 16 chars
+        pst_key = self._find_key(address, ['PstCd', 'pstCd'])
+        if pst_key:
+            self.validate_string_field(address[pst_key], f"{base_path}.{pst_key}", max_len=16)
+        
+        # Town Name - max 35 chars
+        twn_key = self._find_key(address, ['TwnNm', 'twnNm'])
+        if twn_key:
+            self.validate_string_field(address[twn_key], f"{base_path}.{twn_key}", max_len=35)
+        
+        # Street Name - max 70 chars
+        str_key = self._find_key(address, ['StrtNm', 'strtNm'])
+        if str_key:
+            self.validate_string_field(address[str_key], f"{base_path}.{str_key}", max_len=70)
+        
+        # Building Number - max 16 chars
+        bld_key = self._find_key(address, ['BldgNb', 'bldgNb'])
+        if bld_key:
+            self.validate_string_field(address[bld_key], f"{base_path}.{bld_key}", max_len=16)
+        
+        return True
+    
+    def validate_agent(self, agent: Dict, base_path: str, agent_type: str) -> bool:
+        """Validate Financial Institution Agent"""
+        if not isinstance(agent, dict):
+            self.add_error(base_path, f"{agent_type} must be object/dict")
+            return False
+        
+        # FinInstnId - REQUIRED
+        fin_key = self._find_key(agent, ['FinInstnId', 'finInstnId'])
+        if not fin_key:
+            self.add_error(f"{base_path}.FinInstnId", "Financial Institution ID is REQUIRED")
+            return False
+        
+        fin_instn = agent[fin_key]
+        if not isinstance(fin_instn, dict):
+            self.add_error(f"{base_path}.{fin_key}", "Must be object/dict")
+            return False
+        
+        has_id = False
+        
+        # BIC/SWIFT
+        bic_key = self._find_key(fin_instn, ['BICFI', 'bicFi', 'BIC', 'bic'])
+        if bic_key:
+            self.validate_bic(fin_instn[bic_key], f"{base_path}.{fin_key}.{bic_key}")
+            has_id = True
+        
+        # Clearing System Member ID
+        clr_key = self._find_key(fin_instn, ['ClrSysMmbId', 'clrSysMmbId'])
+        if clr_key:
+            self.validate_clearing_system_member_id(fin_instn[clr_key], f"{base_path}.{fin_key}.{clr_key}")
+            has_id = True
+        
+        # Other ID
+        oth_key = self._find_key(fin_instn, ['Othr', 'othr'])
+        if oth_key:
+            other = fin_instn[oth_key]
+            if isinstance(other, dict):
+                id_key = self._find_key(other, ['Id', 'id'])
+                if id_key:
+                    self.validate_string_field(other[id_key], f"{base_path}.{fin_key}.{oth_key}.{id_key}", max_len=35)
+                    has_id = True
+        
+        if not has_id:
+            self.add_warning(f"{base_path}.{fin_key}", "No identification (BIC, ClrSysMmbId, or Othr) provided")
+        
+        # Name - max 140 chars
+        nm_key = self._find_key(fin_instn, ['Nm', 'nm'])
+        if nm_key:
+            self.validate_string_field(fin_instn[nm_key], f"{base_path}.{fin_key}.{nm_key}", max_len=140)
+        
+        # Postal Address
+        addr_key = self._find_key(fin_instn, ['PstlAdr', 'pstlAdr'])
+        if addr_key:
+            self.validate_postal_address(fin_instn[addr_key], f"{base_path}.{fin_key}.{addr_key}")
+        
+        # Country of Residence
+        ctry_key = self._find_key(agent, ['CtryOfRes', 'ctryOfRes'])
+        if ctry_key:
+            self.validate_country_code(agent[ctry_key], f"{base_path}.{ctry_key}")
+        
+        return True
+    
+    def validate_clearing_system_member_id(self, clr_sys: Dict, base_path: str) -> bool:
+        """Validate Clearing System Member ID"""
+        if not isinstance(clr_sys, dict):
+            self.add_error(base_path, "Must be object/dict")
+            return False
+        
+        # Clearing System ID
+        clr_id_key = self._find_key(clr_sys, ['ClrSysId', 'clrSysId'])
+        clr_sys_code = None
+        
+        if clr_id_key:
+            clr_sys_id = clr_sys[clr_id_key]
+            if isinstance(clr_sys_id, dict):
+                cd_key = self._find_key(clr_sys_id, ['Cd', 'cd'])
+                if cd_key:
+                    clr_sys_code = clr_sys_id[cd_key]
+                    self.validate_string_field(clr_sys_code, f"{base_path}.{clr_id_key}.{cd_key}", max_len=35)
+            elif isinstance(clr_sys_id, str):
+                clr_sys_code = clr_sys_id
+                self.validate_string_field(clr_sys_code, f"{base_path}.{clr_id_key}", max_len=35)
+        
+        # Member ID - REQUIRED
+        mmb_key = self._find_key(clr_sys, ['MmbId', 'mmbId'])
+        if not mmb_key:
+            self.add_error(f"{base_path}.MmbId", "Member ID is REQUIRED")
+            return False
+        
+        mmb_id = clr_sys[mmb_key]
+        
+        # Validate based on clearing system
+        if clr_sys_code == 'USABA':
+            self.validate_routing_number(mmb_id, f"{base_path}.{mmb_key}")
+        else:
+            self.validate_string_field(mmb_id, f"{base_path}.{mmb_key}", max_len=35, numeric_only=True, allow_dash=False)
+        
+        return True
+    
+    def validate_account(self, account: Dict, base_path: str, account_type: str) -> bool:
+        """Validate Account"""
+        if not isinstance(account, dict):
+            self.add_error(base_path, f"{account_type} must be object/dict")
+            return False
+        
+        # Id - REQUIRED
+        id_key = self._find_key(account, ['Id', 'id'])
+        if not id_key:
+            self.add_error(f"{base_path}.Id", "Account ID is REQUIRED")
+            return False
+        
+        acct_id = account[id_key]
+        if not isinstance(acct_id, dict):
+            self.add_error(f"{base_path}.{id_key}", "Account ID must be object/dict")
+            return False
+        
+        # IBAN or Othr - at least one required
+        iban_key = self._find_key(acct_id, ['IBAN', 'iban'])
+        oth_key = self._find_key(acct_id, ['Othr', 'othr'])
+        
+        if not iban_key and not oth_key:
+            self.add_error(f"{base_path}.{id_key}", "Must have either IBAN or Othr identification")
+            return False
+        
+        if iban_key:
+            self.validate_iban(acct_id[iban_key], f"{base_path}.{id_key}.{iban_key}")
+        
+        if oth_key:
+            other = acct_id[oth_key]
+            if isinstance(other, dict):
+                other_id_key = self._find_key(other, ['Id', 'id'])
+                if not other_id_key:
+                    self.add_error(f"{base_path}.{id_key}.{oth_key}.Id", "ID is REQUIRED in Othr")
+                else:
+                    self.validate_account_number(other[other_id_key], f"{base_path}.{id_key}.{oth_key}.{other_id_key}")
+        
+        # Type - OPTIONAL, max 35 chars
+        tp_key = self._find_key(account, ['Tp', 'tp'])
+        if tp_key:
+            tp = account[tp_key]
+            if isinstance(tp, dict):
+                prtry_key = self._find_key(tp, ['Prtry', 'prtry'])
+                if prtry_key:
+                    self.validate_string_field(tp[prtry_key], f"{base_path}.{tp_key}.{prtry_key}", max_len=35)
+        
+        # Currency - OPTIONAL
+        ccy_key = self._find_key(account, ['Ccy', 'ccy'])
+        if ccy_key:
+            self.validate_currency(account[ccy_key], f"{base_path}.{ccy_key}")
+        
+        # Name - OPTIONAL, max 70 chars
+        nm_key = self._find_key(account, ['Nm', 'nm'])
+        if nm_key:
+            self.validate_string_field(account[nm_key], f"{base_path}.{nm_key}", max_len=70)
+        
+        return True
+    
+    def validate_remittance_info(self, rmt_inf: Any, base_path: str) -> bool:
+        """Validate Remittance Information"""
+        if isinstance(rmt_inf, str):
+            self.validate_string_field(rmt_inf, base_path, max_len=140)
+            return True
+        
+        if isinstance(rmt_inf, dict):
+            ustrd_key = self._find_key(rmt_inf, ['Ustrd', 'ustrd'])
+            if ustrd_key:
+                ustrd = rmt_inf[ustrd_key]
+                if isinstance(ustrd, str):
+                    self.validate_string_field(ustrd, f"{base_path}.{ustrd_key}", max_len=140)
+                elif isinstance(ustrd, list):
+                    for i, line in enumerate(ustrd):
+                        self.validate_string_field(line, f"{base_path}.{ustrd_key}[{i}]", max_len=140)
+            return True
+        
+        if isinstance(rmt_inf, list):
+            for i, item in enumerate(rmt_inf):
+                if isinstance(item, dict):
+                    ustrd_key = self._find_key(item, ['Ustrd', 'ustrd'])
+                    if ustrd_key:
+                        ustrd = item[ustrd_key]
+                        if isinstance(ustrd, str):
+                            self.validate_string_field(ustrd, f"{base_path}[{i}].{ustrd_key}", max_len=140)
+                        elif isinstance(ustrd, list):
+                            for j, line in enumerate(ustrd):
+                                self.validate_string_field(line, f"{base_path}[{i}].{ustrd_key}[{j}]", max_len=140)
+                elif isinstance(item, str):
+                    self.validate_string_field(item, f"{base_path}[{i}]", max_len=140)
+            return True
+        
+        return True
+    
+    # ========================================================================
+    # MAIN VALIDATION
     # ========================================================================
     
     def validate_payment(self, payment: Dict) -> Dict:
-        """Validate entire payment structure"""
+        """Validate entire payment with deep field validation"""
         self.clear()
         
         if not isinstance(payment, dict):
-            self.add_error("payment", "Payment must be a dictionary")
+            self.add_error("payment", "Payment must be object/dict")
             return self.get_summary()
         
-        # Analyze each entity
-        entities_to_check = [
-            ('cdtr', 'Cdtr'),
-            ('dbtr', 'Dbtr'),
-            ('cdtrAgt', 'CdtrAgt'),
-            ('dbtrAgt', 'DbtrAgt'),
-            ('cdtrAcct', 'CdtrAcct'),
-            ('dbtrAcct', 'DbtrAcct'),
-            ('instgAgt', 'InstgAgt'),
-            ('instdAgt', 'InstdAgt'),
-            ('rmtInf', 'RmtInf')
+        # Validate each entity
+        entities = [
+            ('cdtr', 'Cdtr', self.validate_party, 'Creditor'),
+            ('dbtr', 'Dbtr', self.validate_party, 'Debtor'),
+            ('cdtrAgt', 'CdtrAgt', self.validate_agent, 'Creditor Agent'),
+            ('dbtrAgt', 'DbtrAgt', self.validate_agent, 'Debtor Agent'),
+            ('cdtrAcct', 'CdtrAcct', self.validate_account, 'Creditor Account'),
+            ('dbtrAcct', 'DbtrAcct', self.validate_account, 'Debtor Account'),
+            ('instgAgt', 'InstgAgt', self.validate_agent, 'Instructing Agent'),
+            ('instdAgt', 'InstdAgt', self.validate_agent, 'Instructed Agent'),
         ]
         
-        for camel_name, pascal_name in entities_to_check:
-            entity_data = None
-            entity_key = None
-            
-            if camel_name in payment:
-                entity_data = payment[camel_name]
-                entity_key = camel_name
-            elif pascal_name in payment:
-                entity_data = payment[pascal_name]
-                entity_key = pascal_name
-            
-            if entity_data and camel_name in ISO20022_SPECS:
-                spec = ISO20022_SPECS[camel_name]
-                comparison = self.compare_structures(entity_key, entity_data, spec)
-                self.structure_analysis[entity_key] = comparison
-                
-                # Add validation messages based on comparison
-                if comparison['missing_required']:
-                    for field in comparison['missing_required']:
-                        self.add_error(f"{entity_key}.{field}", f"Required field missing")
-                
-                if comparison['extra_fields']:
-                    for field in comparison['extra_fields']:
-                        self.add_info(f"{entity_key}.{field}", f"Extra field (not in ISO 20022 spec)")
+        for camel, pascal, validator, label in entities:
+            key = self._find_key(payment, [camel, pascal])
+            if key:
+                validator(payment[key], key, label)
+        
+        # Remittance Info
+        rmt_key = self._find_key(payment, ['rmtInf', 'RmtInf'])
+        if rmt_key:
+            self.validate_remittance_info(payment[rmt_key], rmt_key)
         
         return self.get_summary()
+    
+    def _find_key(self, obj: Dict, candidates: List[str]) -> Optional[str]:
+        """Find first matching key from candidates"""
+        for key in candidates:
+            if key in obj:
+                return key
+        return None
     
     def get_summary(self) -> Dict:
         """Get validation summary"""
@@ -344,141 +643,37 @@ class ISO20022Validator:
         
         return {
             'valid': len(errors) == 0,
+            'fields_checked': self.field_count,
+            'fields_valid': self.valid_count,
             'error_count': len(errors),
             'warning_count': len(warnings),
             'errors': [str(e) for e in errors],
             'warnings': [str(w) for w in warnings],
-            'all_results': [str(r) for r in self.results],
-            'structure_analysis': self.structure_analysis
+            'all_results': [str(r) for r in self.results]
         }
-    
-    def print_structure_comparison(self, payment: Dict):
-        """Print detailed structure comparison"""
-        print("\n" + "="*80)
-        print("STRUCTURE COMPARISON: INPUT vs ISO 20022 SPECIFICATION")
-        print("="*80)
-        
-        entities_to_check = [
-            ('cdtr', 'Cdtr'),
-            ('dbtr', 'Dbtr'),
-            ('cdtrAgt', 'CdtrAgt'),
-            ('dbtrAgt', 'DbtrAgt'),
-            ('cdtrAcct', 'CdtrAcct'),
-            ('dbtrAcct', 'DbtrAcct'),
-            ('instgAgt', 'InstgAgt'),
-            ('instdAgt', 'InstdAgt'),
-            ('rmtInf', 'RmtInf')
-        ]
-        
-        for camel_name, pascal_name in entities_to_check:
-            entity_data = None
-            entity_key = None
-            
-            if camel_name in payment:
-                entity_data = payment[camel_name]
-                entity_key = camel_name
-            elif pascal_name in payment:
-                entity_data = payment[pascal_name]
-                entity_key = pascal_name
-            
-            if camel_name in ISO20022_SPECS:
-                spec = ISO20022_SPECS[camel_name]
-                
-                print(f"\n{'─'*80}")
-                print(f"Entity: {entity_key if entity_key else camel_name} ({spec['name']})")
-                print(f"{'─'*80}")
-                
-                if entity_data:
-                    # Show input structure
-                    print("\n  INPUT STRUCTURE:")
-                    self._print_dict(entity_data, indent=4)
-                    
-                    # Show ISO spec
-                    print("\n  ISO 20022 SPECIFICATION:")
-                    print(f"    Required fields: {', '.join(spec['required_fields']) if spec['required_fields'] else 'None'}")
-                    print(f"    Optional fields: {', '.join(spec['optional_fields']) if spec['optional_fields'] else 'None'}")
-                    
-                    # Show detailed spec structure
-                    if 'structure' in spec:
-                        print("\n    Expected Structure:")
-                        for field_name, field_spec in spec['structure'].items():
-                            desc = field_spec.get('description', '')
-                            field_type = field_spec.get('type', 'unknown')
-                            max_len = field_spec.get('max_length', '')
-                            length_str = f" (max {max_len})" if max_len else ""
-                            print(f"      {field_name}: {field_type}{length_str} - {desc}")
-                            
-                            # Show nested fields if any
-                            if 'fields' in field_spec:
-                                for nested, nested_spec in field_spec['fields'].items():
-                                    opt = " [OPTIONAL]" if nested_spec.get('optional') else " [REQUIRED]"
-                                    n_desc = nested_spec.get('description', '')
-                                    print(f"        └─ {nested}: {nested_spec.get('type', 'unknown')}{opt} - {n_desc}")
-                    
-                    # Show differences
-                    if entity_key in self.structure_analysis:
-                        comp = self.structure_analysis[entity_key]
-                        
-                        print("\n  COMPARISON:")
-                        print(f"    ✓ Present fields: {', '.join(sorted(comp['present_fields'])) if comp['present_fields'] else 'None'}")
-                        
-                        if comp['missing_required']:
-                            print(f"    ✗ Missing REQUIRED: {', '.join(sorted(comp['missing_required']))}")
-                        
-                        if comp['extra_fields']:
-                            print(f"    ⚠ Extra fields (not in spec): {', '.join(sorted(comp['extra_fields']))}")
-                else:
-                    print("\n  ✗ NOT FOUND IN INPUT")
-                    print("\n  ISO 20022 SPECIFICATION:")
-                    print(f"    Required fields: {', '.join(spec['required_fields'])}")
-                    print(f"    Optional fields: {', '.join(spec['optional_fields'])}")
-    
-    def _print_dict(self, d, indent=0):
-        """Pretty print dictionary structure"""
-        if not isinstance(d, dict):
-            print(" " * indent + str(d))
-            return
-        
-        for key, value in d.items():
-            if isinstance(value, dict):
-                print(" " * indent + f"{key}:")
-                self._print_dict(value, indent + 2)
-            elif isinstance(value, list):
-                print(" " * indent + f"{key}: [")
-                for item in value:
-                    if isinstance(item, dict):
-                        self._print_dict(item, indent + 2)
-                    else:
-                        print(" " * (indent + 2) + str(item))
-                print(" " * indent + "]")
-            else:
-                print(" " * indent + f"{key}: {value}")
 
 
 # ============================================================================
-# CLI INTERFACE
+# CLI
 # ============================================================================
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description='ISO 20022 Payment Validator')
-    parser.add_argument('input', help='Input JSON file containing payment data')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Show detailed structure comparison')
+    parser = argparse.ArgumentParser(description='ISO 20022 Deep Field Validator')
+    parser.add_argument('input', help='Input JSON file')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Show all validation results')
     
     args = parser.parse_args()
     
-    # Load payment
     with open(args.input, 'r') as f:
         data = json.load(f)
     
-    # Extract payment (handle wrapped format)
+    # Extract payment
     if isinstance(data, dict):
         if len(data) == 1:
-            # Wrapped format: { "txn_id": { payment } }
             payment = data[list(data.keys())[0]]
         else:
-            # Direct format
             payment = data
     else:
         print("Error: Invalid JSON format")
@@ -490,26 +685,35 @@ def main():
     
     # Print results
     print("\n" + "="*80)
-    print("ISO 20022 VALIDATION RESULTS")
+    print("ISO 20022 DEEP FIELD VALIDATION RESULTS")
     print("="*80)
     
     print(f"\nStatus: {'✓ VALID' if summary['valid'] else '✗ INVALID'}")
+    print(f"Fields Checked: {summary['fields_checked']}")
+    print(f"Fields Valid: {summary['fields_valid']}")
     print(f"Errors: {summary['error_count']}")
     print(f"Warnings: {summary['warning_count']}")
     
     if summary['errors']:
-        print("\nERRORS:")
+        print("\n" + "="*80)
+        print("ERRORS")
+        print("="*80)
         for error in summary['errors']:
             print(f"  {error}")
     
     if summary['warnings']:
-        print("\nWARNINGS:")
+        print("\n" + "="*80)
+        print("WARNINGS")
+        print("="*80)
         for warning in summary['warnings']:
             print(f"  {warning}")
     
-    # Always show structure comparison in verbose mode
-    if args.verbose or True:  # Always show for now
-        validator.print_structure_comparison(payment)
+    if args.verbose:
+        print("\n" + "="*80)
+        print("ALL VALIDATION RESULTS")
+        print("="*80)
+        for result in summary['all_results']:
+            print(f"  {result}")
     
     print("\n" + "="*80)
 
