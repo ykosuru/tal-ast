@@ -8,6 +8,7 @@ import json
 import os
 import glob
 import pandas as pd
+import argparse
 from typing import Dict, List, Any, Optional
 
 
@@ -158,14 +159,13 @@ def parse_transaction(txn_id: str, txn_data: Dict) -> List[Dict]:
 def parse_json_files(json_folder: str) -> pd.DataFrame:
     """Parse all JSON files in a folder and build the ACE violation matrix."""
     all_rows = []
-    json_files = glob.glob(os.path.join(json_folder, "*.json"))
+    json_files = glob.glob(os.path.join(json_folder, "**", "*.json"), recursive=True)
     
     if not json_files:
         print(f"Warning: No JSON files found in {json_folder}")
         return pd.DataFrame()
     
     print(f"Processing {len(json_files)} JSON files...")
-    unknown_entities = set()
     
     for file_path in json_files:
         try:
@@ -234,22 +234,36 @@ def build_ace_lookup_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    # Folder containing JSON files
-    input_folder = "./prod_json"
-    output_lookup = "ace_lookup_table.csv"
+    parser = argparse.ArgumentParser(
+        description='Build ACE violation lookup table from production JSON files'
+    )
+    parser.add_argument(
+        '--data_dir',
+        required=True,
+        help='Directory containing JSON payment files (searches recursively)'
+    )
+    parser.add_argument(
+        '--output',
+        default='ace_lookup_table.csv',
+        help='Output CSV file path (default: ace_lookup_table.csv)'
+    )
+    
+    args = parser.parse_args()
     
     print("=" * 80)
     print("ACE VIOLATION LOOKUP TABLE BUILDER")
     print("=" * 80)
+    print(f"\nData directory: {args.data_dir}")
+    print(f"Output file: {args.output}\n")
     
     # Parse all transactions
-    df_matrix = parse_json_files(input_folder)
+    df_matrix = parse_json_files(args.data_dir)
     
     if not df_matrix.empty:
         # Build lookup table
         df_lookup = build_ace_lookup_table(df_matrix)
-        df_lookup.to_csv(output_lookup, index=False)
-        print(f"\n✓ ACE lookup table exported to {output_lookup} ({len(df_lookup)} unique patterns)")
+        df_lookup.to_csv(args.output, index=False)
+        print(f"\n✓ ACE lookup table exported to {args.output} ({len(df_lookup)} unique patterns)")
         
         # Print summary
         print(f"\nSummary:")
