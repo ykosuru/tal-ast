@@ -483,13 +483,9 @@ class ISO20022Validator:
             print(f"{'-'*80}\n")
             
             for result, repair in repairs:
-                severity = repair.get_severity()
-                severity_icon = {"ERROR": "✗", "WARNING": "⚠", "INFO": "ℹ"}.get(severity, "•")
-                
-                print(f"  {severity_icon} ACE {repair.repair_id} ({severity})")
-                print(f"    Field: {result.field}")
-                print(f"    Validation Error: {result.message}")
-                print(f"    ACE Repair: {repair.text}")
+                print(f"  Field: {result.field}")
+                print(f"  Error: {result.message}")
+                print(f"  ACE {repair.repair_id} ({repair.code}): {repair.text}")
                 print()
     
     # ========================================================================
