@@ -454,8 +454,9 @@ class ISO20022Validator:
     
     def validate_party(self, entity_key: str, party: Dict, spec: Dict) -> bool:
         """Validate party entity"""
-        # Check required fields
-        for req_field in spec['required']:
+        # Check ALL required fields from spec
+        for req_field in spec.get('required', []):
+            # Normalize field name for checking (handle both cases)
             key = self._find_key(party, [req_field, req_field[0].lower() + req_field[1:]])
             
             if not key:
@@ -469,16 +470,18 @@ class ISO20022Validator:
                     self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
                     continue
             
-            # Validate the field
+            # Validate the field value
             field_spec = spec['fields'].get(req_field, {})
             if field_spec.get('type') == 'string':
                 self.check_string(entity_key, key, party[key], 
                                 field_spec.get('min', 1), field_spec.get('max', 140))
             elif field_spec.get('type') == 'CountryCode':
                 self.check_country(entity_key, key, party[key])
+            elif field_spec.get('type') == 'PostalAddress':
+                self.validate_postal_address(entity_key, key, party[key])
         
         # Check optional fields if present
-        for opt_field in spec['optional']:
+        for opt_field in spec.get('optional', []):
             key = self._find_key(party, [opt_field, opt_field[0].lower() + opt_field[1:]])
             
             if not key:
@@ -489,9 +492,9 @@ class ISO20022Validator:
                                   f"Found as '{key}' - case mismatch (expected '{opt_field}')")
             
             if key:
-                if opt_field == 'PstlAdr' or opt_field == 'pstlAdr':
+                if 'PstlAdr' in opt_field or 'pstlAdr' in opt_field:
                     self.validate_postal_address(entity_key, key, party[key])
-                elif opt_field == 'CtryOfRes':
+                elif 'CtryOfRes' in opt_field:
                     self.check_country(entity_key, key, party[key])
         
         return True
@@ -586,7 +589,22 @@ class ISO20022Validator:
     
     def validate_account(self, entity_key: str, account: Dict, spec: Dict) -> bool:
         """Validate account"""
-        # Id required
+        
+        # Check ALL required fields from spec first
+        for req_field in spec.get('required', []):
+            key = self._find_key(account, [req_field, req_field[0].lower() + req_field[1:]])
+            
+            if not key:
+                key = self._find_key_case_insensitive(account, req_field)
+                if key:
+                    self.add_result(entity_key, ValidationLevel.WARNING, req_field,
+                                  f"Found as '{key}' - case mismatch (expected '{req_field}')")
+                else:
+                    self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
+                    if req_field in ['Id', 'id']:
+                        return False  # Can't continue without Id
+        
+        # Id validation
         id_key = self._find_key(account, ['Id', 'id'])
         if not id_key:
             self.add_result(entity_key, ValidationLevel.ERROR, 'Id', "REQUIRED field missing")
