@@ -459,6 +459,14 @@ class ISO20022Validator:
     def print_repair_suggestions(self):
         """Print ACE repair code suggestions"""
         if not self.repair_suggestions:
+            print(f"\n{'='*80}")
+            print("ACE REPAIR SUGGESTIONS")
+            print(f"{'='*80}")
+            print("\nNo repair suggestions found.")
+            print("This could mean:")
+            print("  1. No validation errors/warnings were detected")
+            print("  2. The repair lookup table doesn't have matching repairs")
+            print("  3. The repair lookup table wasn't loaded")
             return
         
         print(f"\n{'='*80}")
@@ -483,14 +491,17 @@ class ISO20022Validator:
             print(f"{'-'*80}\n")
             
             for result, repair in repairs:
-                # Format ACE code with repair ID and severity
-                ace_id = repair.repair_id if repair.repair_id else "UNKNOWN"
-                severity = repair.code if repair.code else "?"
+                # Debug: print all repair attributes
+                print(f"  DEBUG: repair_id='{repair.repair_id}', code='{repair.code}', field='{repair.field}'")
+                print(f"  DEBUG: entity='{repair.entity}', text='{repair.text}'")
+                
+                # Format ACE output
+                ace_id = str(repair.repair_id) if repair.repair_id else "UNKNOWN"
+                severity = str(repair.code) if repair.code else "?"
                 
                 print(f"  Field: {result.field}")
                 print(f"  Error: {result.message}")
                 print(f"  ACE {ace_id} ({severity}): {repair.text}")
-                print(f"  [Entity: {repair.entity}, Repair Field: {repair.field}]")
                 print()
     
     # ========================================================================
