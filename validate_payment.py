@@ -719,18 +719,49 @@ class ISO20022Validator:
             self.add_result(entity_key, ValidationLevel.ERROR, fin_key, "Must be object")
             return False
         
+        # Check BIC
         bic_key = self._find_key(fin_instn, ['BICFI', 'bicFi', 'BIC', 'bic'])
+        has_bic = bic_key and fin_instn[bic_key]
+        
         if bic_key:
             self.check_bic(entity_key, f"{fin_key}.{bic_key}", fin_instn[bic_key])
         
+        # Check Clearing System
         clr_key = self._find_key(fin_instn, ['ClrSysMmbId', 'clrSysMmbId'])
+        has_clearing = clr_key and isinstance(fin_instn[clr_key], dict)
+        
         if clr_key:
             self.validate_clearing_system(entity_key, f"{fin_key}.{clr_key}", fin_instn[clr_key])
         
+        # Check if NHC should be looked up from BIC
+        if has_bic and not has_clearing:
+            # Determine if clearing context requires NHC
+            clearing_system = self.payment_context.get('clearing', '') if self.payment_context else ''
+            
+            # Countries/systems that require both BIC and NHC
+            nhc_required_systems = ['AUBSB', 'CACPA', 'GBDSC', 'USABA', 'DEBLZ', 'FRCPC', 'ITNCC']
+            
+            # Also check if clearing context suggests domestic routing needed
+            requires_nhc = (
+                clearing_system in nhc_required_systems or
+                'DOMESTIC' in clearing_system.upper() or
+                'LOCAL' in clearing_system.upper()
+            )
+            
+            if requires_nhc:
+                self.add_result(
+                    entity_key, 
+                    ValidationLevel.WARNING, 
+                    f"{fin_key}.ClrSysMmbId",
+                    f"National clearing code should be looked up from BIC for {clearing_system}"
+                )
+        
+        # Check Name
         nm_key = self._find_key(fin_instn, ['Nm', 'nm'])
         if nm_key:
             self.check_string(entity_key, f"{fin_key}.{nm_key}", fin_instn[nm_key], 1, 140)
         
+        # Check Address
         addr_key = self._find_key(fin_instn, ['PstlAdr', 'pstlAdr'])
         if addr_key:
             self.validate_postal_address(entity_key, f"{fin_key}.{addr_key}", fin_instn[addr_key])
