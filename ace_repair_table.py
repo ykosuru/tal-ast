@@ -2,6 +2,7 @@
 """
 Payment Repair Lookup Table Builder
 Extracts repairs from payment data and creates a searchable lookup table
+Version 2
 """
 
 import json
