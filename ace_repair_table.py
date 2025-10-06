@@ -2,7 +2,6 @@
 """
 Payment Repair Lookup Table Builder
 Extracts repairs from payment data and creates a searchable lookup table
-Version 1
 """
 
 import json
@@ -298,8 +297,9 @@ class RepairLookupBuilder:
             'COUNTRY': 'Country Code extracted from address',
             'CDTPTY': 'ISO Country Code extracted from field',
             'IBAN': 'IBAN validated and formatted',
-            'CLRSYSMMBID': 'Clearing System Member ID extracted',
-            'MMBID': 'Member ID extracted from clearing system',
+            'CLRSYSMMBID': 'National clearing code looked up from BIC',
+            'MMBID': 'Member ID looked up from BIC',
+            'CLRSYSID': 'Clearing System ID identified',
         }
         
         for pattern, text in repair_patterns.items():
