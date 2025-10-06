@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ISO 20022 Comprehensive Entity Validator with Integrated Repair Lookup
-Shows spec, validates structure, checks every field, suggests ACE repairs
-Version 7
+ISO 20022 Validator with Context-Aware Repair Lookup
+Shows spec, validates structure, suggests ACE repairs
+Version 8
 """
 
 import json
@@ -85,10 +85,22 @@ class RepairInfo:
                         break
         
         return min(score, 1.0)
+    
+    def get_severity(self) -> str:
+        """Get severity level based on repair code"""
+        code_upper = self.code.upper()
+        if code_upper == 'W':
+            return 'WARNING'
+        elif code_upper == 'I':
+            return 'INFO'
+        elif code_upper == 'E':
+            return 'ERROR'
+        else:
+            return 'INFO'
 
 
 class RepairLookup:
-    """Lookup repairs from saved pickle file"""
+    """Context-aware repair lookup from pickle file"""
     
     def __init__(self, lookup_path: str):
         if not Path(lookup_path).exists():
@@ -103,9 +115,17 @@ class RepairLookup:
         self.stats = data['stats']
     
     def find_repair(self, entity: str, field: str, error_message: str = "", 
-                    threshold: float = 0.3) -> Optional[RepairInfo]:
-        """Find best matching repair for an error"""
-        # Normalize inputs
+                    context: Optional[Dict] = None, threshold: float = 0.3) -> Optional[RepairInfo]:
+        """
+        Find best matching repair for an error with context awareness
+        
+        Args:
+            entity: Entity name (e.g., 'cdtrAgt')
+            field: Field name (e.g., 'BICFI')
+            error_message: Error message from validator
+            context: Dict with 'source', 'clearing', 'parties'
+            threshold: Minimum match score
+        """
         entity = entity.lower()
         field_normalized = self.normalize_field_name(field)
         
@@ -120,8 +140,9 @@ class RepairLookup:
             # Partial field match (for nested fields)
             for repair_field, repairs in self.repairs_by_entity_field[entity].items():
                 if repair_field in field_normalized or field_normalized in repair_field:
-                    if repairs not in candidates:
-                        candidates.extend(repairs)
+                    for repair in repairs:
+                        if repair not in candidates:
+                            candidates.append(repair)
         
         if not candidates:
             return None
@@ -130,11 +151,14 @@ class RepairLookup:
         scored_repairs = []
         for repair in candidates:
             score = repair.matches_error(error_message, field)
+            
+            # Boost score if context matches (if context filtering is needed in future)
+            # For now, we use all repairs regardless of context
+            
             if score >= threshold:
                 scored_repairs.append((score, repair))
         
         if not scored_repairs:
-            # Return first candidate if no good match
             return candidates[0] if candidates else None
         
         # Return best match
@@ -304,23 +328,20 @@ ISO20022_SPECS = {
 
 
 class ISO20022Validator:
-    """Comprehensive ISO 20022 validator with entity-by-entity output and repair suggestions"""
+    """ISO 20022 validator with context-aware ACE repair suggestions"""
     
-    def __init__(self, discovered_spec_path: Optional[str] = None, 
-                 context_spec_path: Optional[str] = None,
+    def __init__(self, context_spec_path: Optional[str] = None,
                  repair_lookup_path: Optional[str] = None,
-                 use_discovered: bool = False, 
                  use_context: bool = False,
                  merge_specs: bool = False):
         self.results: List[ValidationResult] = []
         self.entity_results: Dict[str, List[ValidationResult]] = {}
-        self.discovered_spec = {}
         self.context_specs = {}
-        self.use_discovered = use_discovered
         self.use_context = use_context
         self.merge_specs = merge_specs
         self.active_spec = ISO20022_SPECS.copy()
         self.matched_context = None
+        self.payment_context = None  # Store payment context for repair lookup
         
         # Repair lookup
         self.repair_lookup: Optional[RepairLookup] = None
@@ -334,37 +355,9 @@ class ISO20022Validator:
             except Exception as e:
                 print(f"Warning: Could not load repair lookup: {e}")
         
-        # Load discovered spec if provided
-        if discovered_spec_path and Path(discovered_spec_path).exists():
-            self.load_discovered_spec(discovered_spec_path)
-        
         # Load context-aware spec if provided
         if context_spec_path and Path(context_spec_path).exists():
             self.load_context_spec(context_spec_path)
-    
-    def load_discovered_spec(self, spec_path: str):
-        """Load discovered specification from JSON"""
-        with open(spec_path, 'r') as f:
-            self.discovered_spec = json.load(f)
-        
-        if self.use_discovered and not self.use_context:
-            for entity_name, disc_spec in self.discovered_spec.items():
-                if entity_name in self.active_spec:
-                    self.active_spec[entity_name]['required'] = disc_spec.get('required', [])
-                    self.active_spec[entity_name]['optional'] = disc_spec.get('optional', [])
-        
-        elif self.merge_specs and not self.use_context:
-            for entity_name, disc_spec in self.discovered_spec.items():
-                if entity_name in self.active_spec:
-                    iso_req = set(self.active_spec[entity_name]['required'])
-                    disc_req = set(disc_spec.get('required', []))
-                    self.active_spec[entity_name]['required'] = sorted(iso_req | disc_req)
-                    
-                    iso_opt = set(self.active_spec[entity_name]['optional'])
-                    disc_opt = set(disc_spec.get('optional', []))
-                    all_req = iso_req | disc_req
-                    all_fields = iso_opt | disc_opt
-                    self.active_spec[entity_name]['optional'] = sorted(all_fields - all_req)
     
     def load_context_spec(self, spec_path: str):
         """Load context-aware specifications from JSON"""
@@ -442,7 +435,7 @@ class ISO20022Validator:
     # ========================================================================
     
     def find_repairs_for_errors(self):
-        """Find repair suggestions for all validation errors"""
+        """Find context-aware repair suggestions for all validation errors"""
         if not self.repair_lookup:
             return
         
@@ -454,7 +447,8 @@ class ISO20022Validator:
                     repair = self.repair_lookup.find_repair(
                         entity_name,
                         result.field,
-                        result.message
+                        result.message,
+                        context=self.payment_context
                     )
                     
                     if repair:
@@ -463,41 +457,39 @@ class ISO20022Validator:
                         self.repair_suggestions[entity_name].append((result, repair))
     
     def print_repair_suggestions(self):
-        """Print ACE repair code suggestions for errors"""
+        """Print ACE repair code suggestions"""
         if not self.repair_suggestions:
             return
         
         print(f"\n{'='*80}")
         print("ACE REPAIR SUGGESTIONS")
-        print(f"{'='*80}\n")
+        print(f"{'='*80}")
+        
+        # Show context if available
+        if self.payment_context:
+            print(f"\nPayment Context:")
+            print(f"  Source: {self.payment_context.get('source', 'N/A')}")
+            print(f"  Clearing: {self.payment_context.get('clearing', 'N/A')}")
+            print(f"  Parties: {', '.join(self.payment_context.get('parties', []))}")
         
         total_suggestions = sum(len(repairs) for repairs in self.repair_suggestions.values())
-        print(f"Found {total_suggestions} repair suggestion(s) for validation errors\n")
+        print(f"\nFound {total_suggestions} ACE repair(s)\n")
         
         for entity_name in sorted(self.repair_suggestions.keys()):
             repairs = self.repair_suggestions[entity_name]
             
             print(f"{'-'*80}")
             print(f"Entity: {entity_name}")
-            print(f"{'-'*80}")
+            print(f"{'-'*80}\n")
             
             for result, repair in repairs:
-                print(f"\n  VALIDATION ERROR:")
+                severity = repair.get_severity()
+                severity_icon = {"ERROR": "✗", "WARNING": "⚠", "INFO": "ℹ"}.get(severity, "•")
+                
+                print(f"  {severity_icon} ACE {repair.repair_id} ({severity})")
                 print(f"    Field: {result.field}")
-                print(f"    Error: {result.message}")
-                if result.value:
-                    print(f"    Value: {result.value}")
-                
-                print(f"\n  ACE REPAIR:")
-                print(f"    Repair ID: {repair.repair_id}")
-                print(f"    Code: {repair.code}")
-                print(f"    Field: {repair.field}")
-                print(f"    Action: {repair.text}")
-                
-                # Calculate confidence
-                confidence_score = repair.matches_error(result.message, result.field)
-                confidence = "HIGH" if confidence_score > 0.6 else "MEDIUM" if confidence_score > 0.3 else "LOW"
-                print(f"    Confidence: {confidence} ({confidence_score:.2f})")
+                print(f"    Validation Error: {result.message}")
+                print(f"    ACE Repair: {repair.text}")
                 print()
     
     # ========================================================================
@@ -839,6 +831,19 @@ class ISO20022Validator:
         """Validate entire payment and find repair suggestions"""
         self.clear()
         
+        # Extract and store payment context
+        source = payment.get('source', 'UNKNOWN')
+        clearing = payment.get('clearing', 'UNKNOWN')
+        parties = payment.get('parties', {})
+        active_parties = sorted([k for k, v in parties.items() if v])
+        
+        self.payment_context = {
+            'source': source,
+            'clearing': clearing,
+            'parties': active_parties
+        }
+        
+        # Match context if using context-aware validation
         if self.use_context and self.context_specs:
             context_key = self.match_context(payment)
             if context_key:
@@ -880,35 +885,20 @@ class ISO20022Validator:
     def print_entity_validation(self, payment: Dict):
         """Print detailed entity-by-entity validation"""
         print("\n" + "="*80)
-        
-        if self.use_context:
-            spec_mode = "CONTEXT-AWARE SPEC"
-        elif self.use_discovered:
-            spec_mode = "DISCOVERED SPEC"
-        elif self.merge_specs:
-            spec_mode = "MERGED SPEC"
-        else:
-            spec_mode = "ISO 20022 SPEC"
-        
-        print(f"ENTITY-BY-ENTITY VALIDATION REPORT ({spec_mode})")
+        print(f"VALIDATION REPORT")
         print("="*80)
         
         if self.matched_context:
-            print(f"\nMATCHED CONTEXT:")
-            print(f"  Source: {self.matched_context['source']}")
-            print(f"  Clearing: {self.matched_context['clearing']}")
-            print(f"  Parties: {', '.join(self.matched_context['parties'])}")
-            print(f"  Based on {self.matched_context['payment_count']} training payments")
+            print(f"\nContext: {self.matched_context['source']} | {self.matched_context['clearing']}")
+            print(f"Parties: {', '.join(self.matched_context['parties'])}")
         
         for entity_name, spec in self.active_spec.items():
             print(f"\n{'='*80}")
             print(f"ENTITY: {spec['name']}")
             print(f"{'='*80}")
-            print(f"Description: {spec.get('description', 'N/A')}")
             
             print(f"\nREQUIREMENTS:")
-            print(f"  Required fields: {', '.join(spec['required']) if spec['required'] else 'None'}")
-            print(f"  Optional fields: {', '.join(spec['optional']) if spec['optional'] else 'None'}")
+            print(f"  Required: {', '.join(spec['required']) if spec['required'] else 'None'}")
             
             key = self._find_key(payment, [entity_name, entity_name.capitalize()])
             if key:
@@ -966,25 +956,17 @@ class ISO20022Validator:
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description='ISO 20022 Entity Validator with Repair Suggestions')
+    parser = argparse.ArgumentParser(description='ISO 20022 Validator with ACE Repair Suggestions')
     parser.add_argument('input', help='Input JSON file')
-    parser.add_argument('--discovered-spec', help='Path to discovered_spec.json')
     parser.add_argument('--context-spec', help='Path to context_specs.json')
     parser.add_argument('--repair-lookup', help='Path to repair_lookup.pkl')
-    parser.add_argument('--use-discovered', action='store_true')
     parser.add_argument('--use-context', action='store_true')
     parser.add_argument('--merge', action='store_true')
     
     args = parser.parse_args()
     
-    if args.use_discovered and not args.discovered_spec:
-        parser.error("--use-discovered requires --discovered-spec")
-    
     if args.use_context and not args.context_spec:
         parser.error("--use-context requires --context-spec")
-    
-    if args.use_discovered and args.use_context:
-        parser.error("Cannot use both --use-discovered and --use-context")
     
     with open(args.input, 'r') as f:
         data = json.load(f)
@@ -999,10 +981,8 @@ def main():
         return
     
     validator = ISO20022Validator(
-        discovered_spec_path=args.discovered_spec,
         context_spec_path=args.context_spec,
         repair_lookup_path=args.repair_lookup,
-        use_discovered=args.use_discovered,
         use_context=args.use_context,
         merge_specs=args.merge
     )
@@ -1010,20 +990,18 @@ def main():
     summary = validator.validate_payment(payment)
     validator.print_entity_validation(payment)
     
-    # Print repair suggestions
+    # Print ACE repair suggestions
     if validator.repair_lookup:
         validator.print_repair_suggestions()
     
     print(f"\n{'='*80}")
-    print("OVERALL SUMMARY")
+    print("SUMMARY")
     print(f"{'='*80}")
     print(f"Status: {'✓ VALID' if summary['valid'] else '✗ INVALID'}")
-    print(f"Fields Checked: {summary['fields_checked']}")
-    print(f"Fields Passed: {summary['fields_passed']}")
     print(f"Errors: {summary['error_count']}")
     print(f"Warnings: {summary['warning_count']}")
     if validator.repair_lookup:
-        print(f"Repair Suggestions: {summary['repair_suggestions']}")
+        print(f"ACE Repairs: {summary['repair_suggestions']}")
     print(f"{'='*80}\n")
 
 
