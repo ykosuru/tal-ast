@@ -483,9 +483,14 @@ class ISO20022Validator:
             print(f"{'-'*80}\n")
             
             for result, repair in repairs:
+                # Format ACE code with repair ID and severity
+                ace_id = repair.repair_id if repair.repair_id else "UNKNOWN"
+                severity = repair.code if repair.code else "?"
+                
                 print(f"  Field: {result.field}")
                 print(f"  Error: {result.message}")
-                print(f"  ACE {repair.repair_id} ({repair.code}): {repair.text}")
+                print(f"  ACE {ace_id} ({severity}): {repair.text}")
+                print(f"  [Entity: {repair.entity}, Repair Field: {repair.field}]")
                 print()
     
     # ========================================================================
