@@ -522,7 +522,23 @@ class ISO20022Validator:
     
     def validate_agent(self, entity_key: str, agent: Dict, spec: Dict) -> bool:
         """Validate financial institution agent"""
-        # FinInstnId required
+        
+        # Check ALL required fields from spec
+        for req_field in spec.get('required', []):
+            key = self._find_key(agent, [req_field, req_field[0].lower() + req_field[1:]])
+            
+            if not key:
+                # Try case-insensitive search
+                key_insensitive = self._find_key_case_insensitive(agent, req_field)
+                if key_insensitive:
+                    self.add_result(entity_key, ValidationLevel.WARNING, req_field,
+                        f"Found as '{key_insensitive}' - case mismatch (expected '{req_field}')")
+                    key = key_insensitive
+                else:
+                    self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
+                    continue
+        
+        # FinInstnId validation
         fin_key = self._find_key(agent, ['FinInstnId', 'finInstnId'])
         if not fin_key:
             self.add_result(entity_key, ValidationLevel.ERROR, 'FinInstnId', "REQUIRED field missing")
@@ -944,3 +960,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
