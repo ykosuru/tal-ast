@@ -925,6 +925,55 @@ class ISO20022Validator:
         
         return self.get_summary()
     
+    def _print_expected_structure(self, entity_name: str, spec: Dict, indent: int = 0):
+        """Print expected ISO 20022 structure for an entity"""
+        prefix = " " * indent
+        
+        # Print required fields
+        for field in spec.get('required', []):
+            field_spec = spec.get('fields', {}).get(field, {})
+            field_type = field_spec.get('type', 'unknown')
+            field_desc = field_spec.get('desc', '')
+            
+            print(f"{prefix}{field}: <{field_type}> [REQUIRED]")
+            if field_desc:
+                print(f"{prefix}  # {field_desc}")
+            
+            # Check for nested structure
+            nested = spec.get('nested', {})
+            if field in nested:
+                nested_spec = nested[field]
+                if 'required_one_of' in nested_spec:
+                    print(f"{prefix}  (One of: {', '.join(nested_spec['required_one_of'])})")
+                for nested_field, nested_field_spec in nested_spec.get('fields', {}).items():
+                    nested_type = nested_field_spec.get('type', 'unknown')
+                    nested_desc = nested_field_spec.get('desc', '')
+                    print(f"{prefix}    {nested_field}: <{nested_type}>")
+                    if nested_desc:
+                        print(f"{prefix}      # {nested_desc}")
+            
+            # Show nested path specifications
+            for nest_path, nest_spec in nested.items():
+                if nest_path.startswith(f"{field}."):
+                    sub_path = nest_path.split('.', 1)[1]
+                    print(f"{prefix}  {sub_path}:")
+                    for req in nest_spec.get('required', []):
+                        req_spec = nest_spec.get('fields', {}).get(req, {})
+                        req_type = req_spec.get('type', 'unknown')
+                        print(f"{prefix}    {req}: <{req_type}> [REQUIRED]")
+        
+        # Print optional fields
+        if spec.get('optional'):
+            print(f"{prefix}# Optional fields:")
+            for field in spec.get('optional', []):
+                field_spec = spec.get('fields', {}).get(field, {})
+                field_type = field_spec.get('type', 'unknown')
+                field_desc = field_spec.get('desc', '')
+                
+                print(f"{prefix}{field}: <{field_type}> [optional]")
+                if field_desc:
+                    print(f"{prefix}  # {field_desc}")
+    
     def print_entity_validation(self, payment: Dict):
         """Print detailed entity-by-entity validation"""
         print("\n" + "="*80)
@@ -943,6 +992,11 @@ class ISO20022Validator:
             print(f"\nREQUIREMENTS:")
             print(f"  Required: {', '.join(spec['required']) if spec['required'] else 'None'}")
             
+            # Show expected structure
+            print(f"\nEXPECTED ISO 20022 STRUCTURE:")
+            self._print_expected_structure(entity_name, spec, indent=2)
+            
+            # Show input data
             key = self._find_key(payment, [entity_name, entity_name.capitalize()])
             if key:
                 print(f"\nINPUT DATA:")
