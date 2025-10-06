@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-ISO 20022 Comprehensive Entity Validator
-Shows spec, validates structure, checks every field
-Version 6
+ISO 20022 Comprehensive Entity Validator with Integrated Repair Lookup
+Shows spec, validates structure, checks every field, suggests ACE repairs
+Version 7
 """
 
 import json
+import pickle
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -35,6 +36,116 @@ class ValidationResult:
         value_str = f" → '{self.value}'" if self.value else ""
         icon = {"ERROR": "✗", "WARNING": "⚠", "INFO": "ℹ"}.get(self.level.value, "•")
         return f"  {icon} {self.field}: {self.message}{value_str}"
+
+
+@dataclass
+class RepairInfo:
+    """Information about a specific repair"""
+    code: str
+    field: str
+    text: str
+    entity: str
+    repair_id: str
+    
+    def matches_error(self, error_message: str, field_name: str) -> float:
+        """Calculate match score between this repair and a validation error"""
+        score = 0.0
+        error_lower = error_message.lower()
+        field_lower = field_name.lower()
+        repair_field_lower = self.field.lower()
+        repair_text_lower = self.text.lower()
+        
+        # Exact field match
+        if repair_field_lower in field_lower or field_lower in repair_field_lower:
+            score += 0.4
+        
+        # Field mentioned in repair text
+        if field_lower in repair_text_lower:
+            score += 0.2
+        
+        # Error type matching
+        error_keywords = {
+            'missing': ['extracted', 'looked up', 'added', 'required'],
+            'required': ['extracted', 'looked up', 'added'],
+            'country': ['country', 'ctryofres', 'cdtpty'],
+            'bic': ['bic', 'bicfi'],
+            'name': ['name', 'nm'],
+            'address': ['address', 'pstladr'],
+            'routing': ['routing', 'clrsysmmbid'],
+            'iban': ['iban'],
+            'account': ['account', 'acct'],
+            'dashes': ['dashes', 'format'],
+        }
+        
+        for error_type, keywords in error_keywords.items():
+            if error_type in error_lower:
+                for keyword in keywords:
+                    if keyword in repair_text_lower or keyword in repair_field_lower:
+                        score += 0.3
+                        break
+        
+        return min(score, 1.0)
+
+
+class RepairLookup:
+    """Lookup repairs from saved pickle file"""
+    
+    def __init__(self, lookup_path: str):
+        if not Path(lookup_path).exists():
+            raise FileNotFoundError(f"Repair lookup file not found: {lookup_path}")
+        
+        with open(lookup_path, 'rb') as f:
+            data = pickle.load(f)
+        
+        self.repairs_by_entity_field = data['repairs_by_entity_field']
+        self.repairs_by_id = data['repairs_by_id']
+        self.all_repairs = data['all_repairs']
+        self.stats = data['stats']
+    
+    def find_repair(self, entity: str, field: str, error_message: str = "", 
+                    threshold: float = 0.3) -> Optional[RepairInfo]:
+        """Find best matching repair for an error"""
+        # Normalize inputs
+        entity = entity.lower()
+        field_normalized = self.normalize_field_name(field)
+        
+        # Get candidate repairs
+        candidates = []
+        
+        if entity in self.repairs_by_entity_field:
+            # Exact field match
+            if field_normalized in self.repairs_by_entity_field[entity]:
+                candidates.extend(self.repairs_by_entity_field[entity][field_normalized])
+            
+            # Partial field match (for nested fields)
+            for repair_field, repairs in self.repairs_by_entity_field[entity].items():
+                if repair_field in field_normalized or field_normalized in repair_field:
+                    if repairs not in candidates:
+                        candidates.extend(repairs)
+        
+        if not candidates:
+            return None
+        
+        # Score each candidate
+        scored_repairs = []
+        for repair in candidates:
+            score = repair.matches_error(error_message, field)
+            if score >= threshold:
+                scored_repairs.append((score, repair))
+        
+        if not scored_repairs:
+            # Return first candidate if no good match
+            return candidates[0] if candidates else None
+        
+        # Return best match
+        scored_repairs.sort(reverse=True, key=lambda x: x[0])
+        return scored_repairs[0][1]
+    
+    def normalize_field_name(self, name: str) -> str:
+        """Normalize field name"""
+        if '.' in name:
+            name = name.split('.')[-1]
+        return name.upper()
 
 
 # ISO 20022 Specifications
@@ -193,10 +304,11 @@ ISO20022_SPECS = {
 
 
 class ISO20022Validator:
-    """Comprehensive ISO 20022 validator with entity-by-entity output"""
+    """Comprehensive ISO 20022 validator with entity-by-entity output and repair suggestions"""
     
     def __init__(self, discovered_spec_path: Optional[str] = None, 
                  context_spec_path: Optional[str] = None,
+                 repair_lookup_path: Optional[str] = None,
                  use_discovered: bool = False, 
                  use_context: bool = False,
                  merge_specs: bool = False):
@@ -209,6 +321,18 @@ class ISO20022Validator:
         self.merge_specs = merge_specs
         self.active_spec = ISO20022_SPECS.copy()
         self.matched_context = None
+        
+        # Repair lookup
+        self.repair_lookup: Optional[RepairLookup] = None
+        self.repair_suggestions: Dict[str, List[Tuple[ValidationResult, RepairInfo]]] = {}
+        
+        # Load repair lookup if provided
+        if repair_lookup_path and Path(repair_lookup_path).exists():
+            try:
+                self.repair_lookup = RepairLookup(repair_lookup_path)
+                print(f"Loaded repair lookup: {len(self.repair_lookup.all_repairs)} repairs")
+            except Exception as e:
+                print(f"Warning: Could not load repair lookup: {e}")
         
         # Load discovered spec if provided
         if discovered_spec_path and Path(discovered_spec_path).exists():
@@ -224,14 +348,12 @@ class ISO20022Validator:
             self.discovered_spec = json.load(f)
         
         if self.use_discovered and not self.use_context:
-            # Replace ISO spec with discovered spec
             for entity_name, disc_spec in self.discovered_spec.items():
                 if entity_name in self.active_spec:
                     self.active_spec[entity_name]['required'] = disc_spec.get('required', [])
                     self.active_spec[entity_name]['optional'] = disc_spec.get('optional', [])
         
         elif self.merge_specs and not self.use_context:
-            # Merge: use discovered required fields, but keep ISO optional
             for entity_name, disc_spec in self.discovered_spec.items():
                 if entity_name in self.active_spec:
                     iso_req = set(self.active_spec[entity_name]['required'])
@@ -254,21 +376,17 @@ class ISO20022Validator:
         if not self.context_specs:
             return None
         
-        # Extract payment context
         source = payment.get('source', 'UNKNOWN')
         clearing = payment.get('clearing', 'UNKNOWN')
         parties = payment.get('parties', {})
         
-        # Get active parties
         active_parties = sorted([k for k, v in parties.items() if v])
         parties_str = ','.join(active_parties) if active_parties else 'none'
         
-        # Try exact match
         context_key = f"{source}|{clearing}|{parties_str}"
         if context_key in self.context_specs:
             return context_key
         
-        # Try fuzzy match (same source+clearing, subset of parties)
         for spec_key, spec in self.context_specs.items():
             parts = spec_key.split('|')
             spec_source = parts[0] if len(parts) > 0 else ''
@@ -276,9 +394,7 @@ class ISO20022Validator:
             spec_parties_str = parts[2] if len(parts) > 2 else ''
             spec_parties = set(spec_parties_str.split(',')) if spec_parties_str else set()
             
-            # Match if source+clearing match and parties are compatible
             if source == spec_source and clearing == spec_clearing:
-                # Check if payment parties are subset or superset
                 payment_parties = set(active_parties)
                 if payment_parties == spec_parties or payment_parties.issubset(spec_parties):
                     return spec_key
@@ -299,16 +415,13 @@ class ISO20022Validator:
             'payment_count': context_spec.get('payment_count', 'N/A')
         }
         
-        # Update active spec with context-specific requirements
         for entity_name, entity_spec in context_spec.get('entities', {}).items():
             if entity_name in self.active_spec:
                 if self.merge_specs:
-                    # Merge ISO + context requirements
                     iso_req = set(self.active_spec[entity_name]['required'])
                     ctx_req = set(entity_spec.get('required', []))
                     self.active_spec[entity_name]['required'] = sorted(iso_req | ctx_req)
                 else:
-                    # Use context requirements only
                     self.active_spec[entity_name]['required'] = entity_spec.get('required', [])
                     self.active_spec[entity_name]['optional'] = entity_spec.get('optional', [])
     
@@ -322,6 +435,70 @@ class ISO20022Validator:
     def clear(self):
         self.results.clear()
         self.entity_results.clear()
+        self.repair_suggestions.clear()
+    
+    # ========================================================================
+    # REPAIR LOOKUP FUNCTIONS
+    # ========================================================================
+    
+    def find_repairs_for_errors(self):
+        """Find repair suggestions for all validation errors"""
+        if not self.repair_lookup:
+            return
+        
+        self.repair_suggestions.clear()
+        
+        for entity_name in self.entity_results:
+            for result in self.entity_results[entity_name]:
+                if result.level in [ValidationLevel.ERROR, ValidationLevel.WARNING]:
+                    repair = self.repair_lookup.find_repair(
+                        entity_name,
+                        result.field,
+                        result.message
+                    )
+                    
+                    if repair:
+                        if entity_name not in self.repair_suggestions:
+                            self.repair_suggestions[entity_name] = []
+                        self.repair_suggestions[entity_name].append((result, repair))
+    
+    def print_repair_suggestions(self):
+        """Print ACE repair code suggestions for errors"""
+        if not self.repair_suggestions:
+            return
+        
+        print(f"\n{'='*80}")
+        print("ACE REPAIR SUGGESTIONS")
+        print(f"{'='*80}\n")
+        
+        total_suggestions = sum(len(repairs) for repairs in self.repair_suggestions.values())
+        print(f"Found {total_suggestions} repair suggestion(s) for validation errors\n")
+        
+        for entity_name in sorted(self.repair_suggestions.keys()):
+            repairs = self.repair_suggestions[entity_name]
+            
+            print(f"{'-'*80}")
+            print(f"Entity: {entity_name}")
+            print(f"{'-'*80}")
+            
+            for result, repair in repairs:
+                print(f"\n  VALIDATION ERROR:")
+                print(f"    Field: {result.field}")
+                print(f"    Error: {result.message}")
+                if result.value:
+                    print(f"    Value: {result.value}")
+                
+                print(f"\n  ACE REPAIR:")
+                print(f"    Repair ID: {repair.repair_id}")
+                print(f"    Code: {repair.code}")
+                print(f"    Field: {repair.field}")
+                print(f"    Action: {repair.text}")
+                
+                # Calculate confidence
+                confidence_score = repair.matches_error(result.message, result.field)
+                confidence = "HIGH" if confidence_score > 0.6 else "MEDIUM" if confidence_score > 0.3 else "LOW"
+                print(f"    Confidence: {confidence} ({confidence_score:.2f})")
+                print()
     
     # ========================================================================
     # FIELD VALIDATORS
@@ -454,13 +631,10 @@ class ISO20022Validator:
     
     def validate_party(self, entity_key: str, party: Dict, spec: Dict) -> bool:
         """Validate party entity"""
-        # Check ALL required fields from spec
         for req_field in spec.get('required', []):
-            # Normalize field name for checking (handle both cases)
             key = self._find_key(party, [req_field, req_field[0].lower() + req_field[1:]])
             
             if not key:
-                # Try case-insensitive search
                 key_insensitive = self._find_key_case_insensitive(party, req_field)
                 if key_insensitive:
                     self.add_result(entity_key, ValidationLevel.WARNING, req_field, 
@@ -470,7 +644,6 @@ class ISO20022Validator:
                     self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
                     continue
             
-            # Validate the field value
             field_spec = spec['fields'].get(req_field, {})
             if field_spec.get('type') == 'string':
                 self.check_string(entity_key, key, party[key], 
@@ -480,12 +653,10 @@ class ISO20022Validator:
             elif field_spec.get('type') == 'PostalAddress':
                 self.validate_postal_address(entity_key, key, party[key])
         
-        # Check optional fields if present
         for opt_field in spec.get('optional', []):
             key = self._find_key(party, [opt_field, opt_field[0].lower() + opt_field[1:]])
             
             if not key:
-                # Try case-insensitive
                 key = self._find_key_case_insensitive(party, opt_field)
                 if key:
                     self.add_result(entity_key, ValidationLevel.WARNING, opt_field,
@@ -505,7 +676,6 @@ class ISO20022Validator:
             self.add_result(entity_key, ValidationLevel.ERROR, base_path, "Must be object")
             return False
         
-        # Address Lines
         adr_key = self._find_key(address, ['AdrLine', 'adrLine'])
         if adr_key:
             adr_lines = address[adr_key]
@@ -522,13 +692,10 @@ class ISO20022Validator:
     
     def validate_agent(self, entity_key: str, agent: Dict, spec: Dict) -> bool:
         """Validate financial institution agent"""
-        
-        # Check ALL required fields from spec
         for req_field in spec.get('required', []):
             key = self._find_key(agent, [req_field, req_field[0].lower() + req_field[1:]])
             
             if not key:
-                # Try case-insensitive search
                 key_insensitive = self._find_key_case_insensitive(agent, req_field)
                 if key_insensitive:
                     self.add_result(entity_key, ValidationLevel.WARNING, req_field,
@@ -538,7 +705,6 @@ class ISO20022Validator:
                     self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
                     continue
         
-        # FinInstnId validation
         fin_key = self._find_key(agent, ['FinInstnId', 'finInstnId'])
         if not fin_key:
             self.add_result(entity_key, ValidationLevel.ERROR, 'FinInstnId', "REQUIRED field missing")
@@ -549,22 +715,18 @@ class ISO20022Validator:
             self.add_result(entity_key, ValidationLevel.ERROR, fin_key, "Must be object")
             return False
         
-        # Check BIC
         bic_key = self._find_key(fin_instn, ['BICFI', 'bicFi', 'BIC', 'bic'])
         if bic_key:
             self.check_bic(entity_key, f"{fin_key}.{bic_key}", fin_instn[bic_key])
         
-        # Check Clearing System
         clr_key = self._find_key(fin_instn, ['ClrSysMmbId', 'clrSysMmbId'])
         if clr_key:
             self.validate_clearing_system(entity_key, f"{fin_key}.{clr_key}", fin_instn[clr_key])
         
-        # Check Name
         nm_key = self._find_key(fin_instn, ['Nm', 'nm'])
         if nm_key:
             self.check_string(entity_key, f"{fin_key}.{nm_key}", fin_instn[nm_key], 1, 140)
         
-        # Check Address
         addr_key = self._find_key(fin_instn, ['PstlAdr', 'pstlAdr'])
         if addr_key:
             self.validate_postal_address(entity_key, f"{fin_key}.{addr_key}", fin_instn[addr_key])
@@ -577,7 +739,6 @@ class ISO20022Validator:
             self.add_result(entity_key, ValidationLevel.ERROR, base_path, "Must be object")
             return False
         
-        # Get clearing system code
         clr_id_key = self._find_key(clr_sys, ['ClrSysId', 'clrSysId'])
         clr_code = None
         if clr_id_key:
@@ -589,13 +750,11 @@ class ISO20022Validator:
             elif isinstance(clr_sys_id, str):
                 clr_code = clr_sys_id
         
-        # Member ID required
         mmb_key = self._find_key(clr_sys, ['MmbId', 'mmbId'])
         if not mmb_key:
             self.add_result(entity_key, ValidationLevel.ERROR, f"{base_path}.MmbId", "REQUIRED field missing")
             return False
         
-        # Validate based on clearing system
         if clr_code == 'USABA':
             self.check_routing(entity_key, f"{base_path}.{mmb_key}", clr_sys[mmb_key])
         else:
@@ -605,8 +764,6 @@ class ISO20022Validator:
     
     def validate_account(self, entity_key: str, account: Dict, spec: Dict) -> bool:
         """Validate account"""
-        
-        # Check ALL required fields from spec first
         for req_field in spec.get('required', []):
             key = self._find_key(account, [req_field, req_field[0].lower() + req_field[1:]])
             
@@ -618,9 +775,8 @@ class ISO20022Validator:
                 else:
                     self.add_result(entity_key, ValidationLevel.ERROR, req_field, "REQUIRED field missing")
                     if req_field in ['Id', 'id']:
-                        return False  # Can't continue without Id
+                        return False
         
-        # Id validation
         id_key = self._find_key(account, ['Id', 'id'])
         if not id_key:
             self.add_result(entity_key, ValidationLevel.ERROR, 'Id', "REQUIRED field missing")
@@ -631,7 +787,6 @@ class ISO20022Validator:
             self.add_result(entity_key, ValidationLevel.ERROR, id_key, "Must be object")
             return False
         
-        # IBAN or Othr required
         iban_key = self._find_key(acct_id, ['IBAN', 'iban'])
         oth_key = self._find_key(acct_id, ['Othr', 'othr'])
         
@@ -649,12 +804,10 @@ class ISO20022Validator:
                     self.check_string(entity_key, f"{id_key}.{oth_key}.{other_id_key}", 
                                     other[other_id_key], 1, 34, no_dashes=True)
         
-        # Currency
         ccy_key = self._find_key(account, ['Ccy', 'ccy'])
         if ccy_key:
             self.check_currency(entity_key, ccy_key, account[ccy_key])
         
-        # Type
         tp_key = self._find_key(account, ['Tp', 'tp'])
         if tp_key:
             self.add_result(entity_key, ValidationLevel.PASS, tp_key, "Present")
@@ -683,10 +836,9 @@ class ISO20022Validator:
         return None
     
     def validate_payment(self, payment: Dict) -> Dict:
-        """Validate entire payment"""
+        """Validate entire payment and find repair suggestions"""
         self.clear()
         
-        # Match context if using context-aware validation
         if self.use_context and self.context_specs:
             context_key = self.match_context(payment)
             if context_key:
@@ -719,13 +871,16 @@ class ISO20022Validator:
                 else:
                     self.add_result(camel, ValidationLevel.INFO, camel, "Entity not found in input")
         
+        # Find repair suggestions after validation
+        if self.repair_lookup:
+            self.find_repairs_for_errors()
+        
         return self.get_summary()
     
     def print_entity_validation(self, payment: Dict):
         """Print detailed entity-by-entity validation"""
         print("\n" + "="*80)
         
-        # Determine spec mode
         if self.use_context:
             spec_mode = "CONTEXT-AWARE SPEC"
         elif self.use_discovered:
@@ -738,24 +893,12 @@ class ISO20022Validator:
         print(f"ENTITY-BY-ENTITY VALIDATION REPORT ({spec_mode})")
         print("="*80)
         
-        # Show matched context
         if self.matched_context:
             print(f"\nMATCHED CONTEXT:")
             print(f"  Source: {self.matched_context['source']}")
             print(f"  Clearing: {self.matched_context['clearing']}")
             print(f"  Parties: {', '.join(self.matched_context['parties'])}")
             print(f"  Based on {self.matched_context['payment_count']} training payments")
-            print(f"  → Using context-specific requirements for this network/party combination")
-        
-        if self.discovered_spec and not self.use_context:
-            print(f"\nDiscovered spec loaded with {len(self.discovered_spec)} entities")
-            if self.use_discovered:
-                print("Mode: Using DISCOVERED requirements (from actual data)")
-            elif self.merge_specs:
-                print("Mode: Using MERGED requirements (ISO + Discovered)")
-        
-        if self.context_specs and not self.use_context:
-            print(f"\nContext specs loaded with {len(self.context_specs)} contexts (not active)")
         
         for entity_name, spec in self.active_spec.items():
             print(f"\n{'='*80}")
@@ -763,62 +906,10 @@ class ISO20022Validator:
             print(f"{'='*80}")
             print(f"Description: {spec.get('description', 'N/A')}")
             
-            # Show which spec is being used
-            spec_source = ""
-            if self.matched_context:
-                spec_source = f" [CONTEXT: {self.matched_context['source']}|{self.matched_context['clearing']}]"
-            elif entity_name in self.discovered_spec:
-                if self.use_discovered:
-                    spec_source = " [DISCOVERED FROM DATA]"
-                elif self.merge_specs:
-                    spec_source = " [ISO + DISCOVERED]"
-            
-            # Show requirements
-            print(f"\nREQUIREMENTS{spec_source}:")
+            print(f"\nREQUIREMENTS:")
             print(f"  Required fields: {', '.join(spec['required']) if spec['required'] else 'None'}")
             print(f"  Optional fields: {', '.join(spec['optional']) if spec['optional'] else 'None'}")
             
-            # Compare with ISO if using context/discovered
-            if (self.use_context or self.use_discovered) and entity_name in ISO20022_SPECS:
-                iso_required = set(ISO20022_SPECS[entity_name]['required'])
-                active_required = set(spec['required'])
-                
-                added = active_required - iso_required
-                removed = iso_required - active_required
-                
-                if added or removed:
-                    print(f"\n  DIFFERENCES FROM ISO 20022:")
-                    if added:
-                        print(f"    + Additional required: {', '.join(sorted(added))}")
-                    if removed:
-                        print(f"    - Removed required: {', '.join(sorted(removed))}")
-            
-            # Show field details
-            print(f"\n  Field Details:")
-            for field_name, field_spec in spec.get('fields', {}).items():
-                ftype = field_spec.get('type', 'unknown')
-                fformat = field_spec.get('format', '')
-                format_str = f" ({fformat})" if fformat else ""
-                min_max = ""
-                if 'min' in field_spec and 'max' in field_spec:
-                    min_max = f" [{field_spec['min']}-{field_spec['max']} chars]"
-                desc = field_spec.get('desc', '')
-                print(f"    • {field_name}: {ftype}{format_str}{min_max}")
-                print(f"      {desc}")
-            
-            # Show nested structure if any
-            if 'nested' in spec:
-                print(f"\n  Nested Structure:")
-                for nest_path, nest_spec in spec['nested'].items():
-                    print(f"    {nest_path}:")
-                    if 'required_one_of' in nest_spec:
-                        print(f"      Required (one of): {', '.join(nest_spec['required_one_of'])}")
-                    if 'required' in nest_spec:
-                        print(f"      Required: {', '.join(nest_spec['required'])}")
-                    for nf, nf_spec in nest_spec.get('fields', {}).items():
-                        print(f"        • {nf}: {nf_spec.get('desc', '')}")
-            
-            # Show input data
             key = self._find_key(payment, [entity_name, entity_name.capitalize()])
             if key:
                 print(f"\nINPUT DATA:")
@@ -826,7 +917,6 @@ class ISO20022Validator:
             else:
                 print(f"\nINPUT DATA: ✗ NOT FOUND")
             
-            # Show validation results
             print(f"\nVALIDATION RESULTS:")
             if entity_name in self.entity_results or key in self.entity_results:
                 results = self.entity_results.get(entity_name, []) + self.entity_results.get(key, [])
@@ -855,13 +945,6 @@ class ISO20022Validator:
         else:
             print(f"{prefix}{obj}")
     
-    def _find_key(self, obj: Dict, candidates: List[str]) -> Optional[str]:
-        """Find first matching key"""
-        for key in candidates:
-            if key in obj:
-                return key
-        return None
-    
     def get_summary(self) -> Dict:
         """Get validation summary"""
         errors = [r for r in self.results if r.level == ValidationLevel.ERROR]
@@ -875,31 +958,25 @@ class ISO20022Validator:
             'error_count': len(errors),
             'warning_count': len(warnings),
             'errors': [str(e) for e in errors],
-            'warnings': [str(w) for w in warnings]
+            'warnings': [str(w) for w in warnings],
+            'repair_suggestions': len(self.repair_suggestions)
         }
 
-
-# ============================================================================
-# CLI
-# ============================================================================
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description='ISO 20022 Entity Validator')
+    parser = argparse.ArgumentParser(description='ISO 20022 Entity Validator with Repair Suggestions')
     parser.add_argument('input', help='Input JSON file')
     parser.add_argument('--discovered-spec', help='Path to discovered_spec.json')
-    parser.add_argument('--context-spec', help='Path to context_specs.json (context-aware requirements)')
-    parser.add_argument('--use-discovered', action='store_true', 
-                       help='Use discovered spec instead of ISO 20022 (requires --discovered-spec)')
-    parser.add_argument('--use-context', action='store_true',
-                       help='Use context-aware spec (requires --context-spec)')
-    parser.add_argument('--merge', action='store_true',
-                       help='Merge ISO spec with discovered/context spec')
+    parser.add_argument('--context-spec', help='Path to context_specs.json')
+    parser.add_argument('--repair-lookup', help='Path to repair_lookup.pkl')
+    parser.add_argument('--use-discovered', action='store_true')
+    parser.add_argument('--use-context', action='store_true')
+    parser.add_argument('--merge', action='store_true')
     
     args = parser.parse_args()
     
-    # Validate arguments
     if args.use_discovered and not args.discovered_spec:
         parser.error("--use-discovered requires --discovered-spec")
     
@@ -907,12 +984,11 @@ def main():
         parser.error("--use-context requires --context-spec")
     
     if args.use_discovered and args.use_context:
-        parser.error("Cannot use both --use-discovered and --use-context (choose one)")
+        parser.error("Cannot use both --use-discovered and --use-context")
     
     with open(args.input, 'r') as f:
         data = json.load(f)
     
-    # Extract payment
     if isinstance(data, dict):
         if len(data) == 1:
             payment = data[list(data.keys())[0]]
@@ -922,22 +998,22 @@ def main():
         print("Error: Invalid JSON")
         return
     
-    # Create validator with appropriate spec
     validator = ISO20022Validator(
         discovered_spec_path=args.discovered_spec,
         context_spec_path=args.context_spec,
+        repair_lookup_path=args.repair_lookup,
         use_discovered=args.use_discovered,
         use_context=args.use_context,
         merge_specs=args.merge
     )
     
-    # Validate
     summary = validator.validate_payment(payment)
-    
-    # Print entity-by-entity report
     validator.print_entity_validation(payment)
     
-    # Print summary
+    # Print repair suggestions
+    if validator.repair_lookup:
+        validator.print_repair_suggestions()
+    
     print(f"\n{'='*80}")
     print("OVERALL SUMMARY")
     print(f"{'='*80}")
@@ -946,18 +1022,10 @@ def main():
     print(f"Fields Passed: {summary['fields_passed']}")
     print(f"Errors: {summary['error_count']}")
     print(f"Warnings: {summary['warning_count']}")
-    
-    if args.use_context and validator.matched_context:
-        print(f"\nContext matched: {validator.matched_context['source']}|{validator.matched_context['clearing']}")
-    elif args.use_context and not validator.matched_context:
-        print(f"\nWarning: No matching context found, used default spec")
-    elif args.discovered_spec:
-        spec_mode = "discovered" if args.use_discovered else "merged" if args.merge else "ISO (with discovered available)"
-        print(f"Validation mode: {spec_mode}")
-    
+    if validator.repair_lookup:
+        print(f"Repair Suggestions: {summary['repair_suggestions']}")
     print(f"{'='*80}\n")
 
 
 if __name__ == "__main__":
     main()
-
