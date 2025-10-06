@@ -2,6 +2,8 @@ import json
 import os
 import glob
 import pandas as pd
+import argparse
+from collections import defaultdict
 
 # Map boolean party flags to readable Pelican party names
 PARTY_MAP = {
@@ -37,14 +39,12 @@ PARTY_ENTITY_MAP = {
     "rmtInf": "Remittance Info"
 }
 
-def parse_transaction(txn_id, txn_data):
+def parse_transaction(txn_data):
     """
-    Parse a single transaction keyed by txndid, extracting:
-    - ACE violations
-    - Entity diffs (including accounts)
+    Extract ACE violations and entity diffs from a single transaction dictionary.
+    Returns a list of row dictionaries.
     """
     rows = []
-
     source_network = txn_data.get("source")
     clearing_network = txn_data.get("clearing")
     parties_flags = txn_data.get("parties", {})
@@ -58,7 +58,6 @@ def parse_transaction(txn_id, txn_data):
 
         for party in active_parties:
             row = {
-                "transactionId": txn_id,
                 "source": source_network,
                 "clearing": clearing_network,
                 "code": code,
@@ -79,7 +78,6 @@ def parse_transaction(txn_id, txn_data):
         diffs = entity_data.get("diffs", [])
         for diff in diffs:
             row = {
-                "transactionId": txn_id,
                 "source": source_network,
                 "clearing": clearing_network,
                 "code": None,
@@ -96,27 +94,50 @@ def parse_transaction(txn_id, txn_data):
 
     return rows
 
-def parse_json_files(json_folder):
-    """Parse all JSON files in a folder and build the combined ACE violation + diff matrix."""
+def parse_json_files(data_dir):
+    """
+    Parse all JSON files recursively in a folder and return a consolidated matrix.
+    Duplicate rows are merged with a count of occurrences.
+    """
     all_rows = []
-    json_files = glob.glob(os.path.join(json_folder, "*.json"))
+    json_files = glob.glob(os.path.join(data_dir, "**/*.json"), recursive=True)
+    print(f"Found {len(json_files)} JSON files to process...")
 
     for file_path in json_files:
         with open(file_path, "r") as f:
-            data_list = json.load(f)  # top-level is a list
-            for data in data_list:
-                for txn_id, txn_data in data.items():
-                    txn_rows = parse_transaction(txn_id, txn_data)
-                    all_rows.extend(txn_rows)
+            try:
+                data_list = json.load(f)  # top-level is a list
+                for data in data_list:
+                    for txn_id, txn_data in data.items():
+                        txn_rows = parse_transaction(txn_data)
+                        all_rows.extend(txn_rows)
+            except json.JSONDecodeError:
+                print(f"Warning: failed to parse {file_path}, skipping.")
 
+    # Create DataFrame
     df = pd.DataFrame(all_rows)
-    return df
+
+    # --- Consolidate duplicates and count ---
+    grouping_cols = ["source", "clearing", "code", "field", "partyCode", "entity",
+                     "diffKey", "diffValue", "diffType", "diffDescription", "triggerCondition"]
+    df["count"] = 1
+    df_consolidated = df.groupby(grouping_cols, dropna=False, as_index=False).count()
+    df_consolidated = df_consolidated.rename(columns={"count": "occurrences"})
+
+    # Drop extra count column created by groupby
+    df_consolidated = df_consolidated[grouping_cols + ["occurrences"]]
+
+    return df_consolidated
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate ACE violation + diff matrix from production JSON files.")
+    parser.add_argument("--data_dir", type=str, required=True, help="Directory containing production JSON files.")
+    parser.add_argument("--output_csv", type=str, default="ace_violation_diff_matrix.csv", help="Output CSV file name.")
+    args = parser.parse_args()
+
+    df_matrix = parse_json_files(args.data_dir)
+    df_matrix.to_csv(args.output_csv, index=False)
+    print(f"Consolidated violation + diff matrix exported to {args.output_csv}.")
 
 if __name__ == "__main__":
-    # Folder containing your production JSON files
-    input_folder = "./prod_json"
-    output_csv = "ace_violation_diff_matrix.csv"
-
-    df_matrix = parse_json_files(input_folder)
-    df_matrix.to_csv(output_csv, index=False)
-    print(f"Violation + Diff matrix exported to {output_csv}")
+    main()
