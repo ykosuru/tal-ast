@@ -173,6 +173,11 @@ def parse_single_transaction(data, root_key):
         if audit_trail:
             print("\n--- Response: Audit Trail ---")
             msg_status_list = audit_trail.get('MsgStatus', [])
+            
+            # Handle case where single message is a dict instead of a list
+            if isinstance(msg_status_list, dict):
+                msg_status_list = [msg_status_list]
+            
             if isinstance(msg_status_list, list) and msg_status_list:
                 # Collect unique Code and info_data_preview combinations
                 unique_entries = set()
