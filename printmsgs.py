@@ -174,20 +174,20 @@ def parse_single_transaction(data, root_key):
             print("\n--- Response: Audit Trail ---")
             msg_status_list = audit_trail.get('MsgStatus', [])
             if isinstance(msg_status_list, list) and msg_status_list:
-                for i, status in enumerate(msg_status_list):
-                    print(f" Message Status [{i}]:")
-                    print(f"     Code: {status.get('Code', 'Null')}")
-                    print(f"     Severity: {status.get('Severity', 'Null')}")
-                    
-                    # Print only first 6 characters of InformationalData
+                # Collect unique Code and info_data_preview combinations
+                unique_entries = set()
+                for status in msg_status_list:
+                    code = status.get('Code', 'Null')
                     info_data = status.get('InformationalData', 'Null')
                     if info_data and info_data != 'Null':
                         info_data_preview = str(info_data)[:6]
-                        print(f"     InformationalData (first 6 chars): {info_data_preview}")
                     else:
-                        print(f"     InformationalData: Null")
-                    
-                    print("\n--- ** ---")
+                        info_data_preview = 'Null'
+                    unique_entries.add((code, info_data_preview))
+                
+                # Print unique entries, one per line
+                for code, info_preview in sorted(unique_entries):
+                    print(f"Code: {code} | Info: {info_preview}")
             else:
                 print(" MsgStatus not found or is empty in AuditTrail.")
         else:
