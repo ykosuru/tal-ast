@@ -1,7 +1,7 @@
 """
 Wire Processing Business Capability Indexer with Query Expansion
 LIGHTWEIGHT VERSION - No spaCy dependency required
-Uses regex patterns only for keyword extraction
+FIXED: Now properly extracts domain terms like 'credit', 'party', 'determination'
 """
 
 import os
@@ -542,7 +542,10 @@ class ImprovedQueryProcessor:
 
 
 class FastKeywordExtractor:
-    """Extract keywords using regex patterns only - NO spaCy required"""
+    """
+    Extract keywords using regex patterns only - NO spaCy required
+    FIXED: Now properly extracts domain terms like 'credit', 'party', 'determination'
+    """
     
     def __init__(self):
         # Domain-specific patterns
@@ -558,10 +561,38 @@ class FastKeywordExtractor:
             (r'[A-Z]{2}\d{2}[A-Z0-9]+', 'iban'),
         ]
         
+        # Important domain-specific terms (ALWAYS extract these even if lowercase)
+        self.important_terms = {
+            # Core payment terms
+            'credit', 'debit', 'party', 'determination', 'validation',
+            'payment', 'wire', 'transfer', 'transaction', 'settlement',
+            'clearing', 'posting', 'execution', 'routing', 'initiation',
+            
+            # Validation & screening
+            'screening', 'sanctions', 'ofac', 'fircosoft', 'compliance',
+            'verification', 'confirmation', 'approval', 'authorization',
+            
+            # Networks & standards
+            'fedwire', 'chips', 'swift', 'ach', 'sepa', 'target',
+            'iso20022', 'pacs', 'pain', 'camt',
+            
+            # Entities & accounts
+            'creditor', 'debtor', 'beneficiary', 'originator', 'intermediary',
+            'nostro', 'vostro', 'account', 'customer', 'client',
+            
+            # Business capabilities
+            'repair', 'enrichment', 'orchestration', 'workflow', 'processing',
+            'reconciliation', 'exception', 'investigation', 'monitoring',
+            
+            # Technical
+            'format', 'message', 'instruction', 'queue', 'endpoint',
+            'service', 'api', 'integration', 'interface', 'channel'
+        }
+        
         # Common stopwords to exclude
         self.stopwords = {
-            'process', 'system', 'data', 'information', 'service',
-            'management', 'processing', 'services', 'general', 'related',
+            'process', 'system', 'data', 'information',
+            'general', 'related',
             'based', 'using', 'including', 'provides', 'allows', 'the', 'a',
             'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
             'with', 'from', 'by', 'as', 'is', 'was', 'are', 'were', 'been',
@@ -587,32 +618,49 @@ class FastKeywordExtractor:
             for match in matches:
                 keyword_scores[match.lower()] += 3.0
         
-        # 2. Capitalized words (medium-high confidence)
+        # 2. Important domain terms (NEW: extract these even if lowercase)
+        for term in self.important_terms:
+            if term in text_lower:
+                count = text_lower.count(term)
+                keyword_scores[term] += 2.5 * math.log1p(count)
+        
+        # 3. Capitalized words (medium-high confidence)
         capitalized_words = re.findall(r'\b[A-Z][a-z]{2,}\b', text)
         for word in capitalized_words:
             if word.lower() not in self.stopwords:
                 keyword_scores[word.lower()] += 2.0
         
-        # 3. Multi-word capitalized phrases (high confidence)
+        # 4. Multi-word capitalized phrases (high confidence)
         capitalized_phrases = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b', text)
         for phrase in capitalized_phrases:
             if len(phrase) > 5:
                 keyword_scores[phrase.lower()] += 2.5
         
-        # 4. Business capability keywords (boost known terms)
+        # 5. Business capability keywords (boost known terms)
         capability_keywords = BusinessCapabilityTaxonomy.get_all_keywords()
         for kw in capability_keywords:
             if kw in text_lower:
                 count = text_lower.count(kw)
                 keyword_scores[kw] += 2.0 * math.log1p(count)
         
-        # 5. Hyphenated technical terms
+        # 6. Extract individual words from multi-word capability keywords (NEW FIX)
+        for kw in capability_keywords:
+            words = kw.split()
+            if len(words) > 1:  # Multi-word phrase
+                for word in words:
+                    if (len(word) > 3 and 
+                        word not in self.stopwords and 
+                        word in text_lower):
+                        count = text_lower.count(word)
+                        keyword_scores[word] += 1.5 * math.log1p(count)
+        
+        # 7. Hyphenated technical terms
         hyphenated = re.findall(r'\b[a-z]+-[a-z]+\b', text_lower)
         for term in hyphenated:
             if len(term) > 5:
                 keyword_scores[term] += 1.5
         
-        # 6. Acronyms (3-5 capital letters)
+        # 8. Acronyms (3-5 capital letters)
         acronyms = re.findall(r'\b[A-Z]{3,5}\b', text)
         for acronym in acronyms:
             keyword_scores[acronym.lower()] += 1.8
@@ -712,7 +760,7 @@ class WireProcessingIndexer:
         self.index_path.mkdir(parents=True, exist_ok=True)
         self.use_embeddings = use_embeddings and EMBEDDINGS_AVAILABLE and FAISS_AVAILABLE
         
-        print("Initializing keyword extractor (regex-based)...")
+        print("Initializing keyword extractor (regex-based, FIXED for domain terms)...")
         self.keyword_extractor = FastKeywordExtractor()
         
         print("Initializing capability mapper...")
@@ -828,6 +876,8 @@ class WireProcessingIndexer:
             print(f"  Extracting keywords...")
             keywords = self.keyword_extractor.extract(content["text"])
             print(f"  Found {len(keywords)} keywords")
+            if keywords:
+                print(f"  Top keywords: {', '.join([kw for kw, _ in keywords[:5]])}")
             
             print(f"  Mapping to capabilities...")
             capabilities = self.capability_mapper.map_to_capabilities(
@@ -1306,11 +1356,11 @@ class WireProcessingSearcher:
 
 
 def main():
-    """Example usage - NO SPACY VERSION"""
+    """Example usage - NO SPACY VERSION - FIXED KEYWORD EXTRACTION"""
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Wire Processing Indexer - Lightweight (No spaCy required)"
+        description="Wire Processing Indexer - Lightweight (No spaCy required) - FIXED"
     )
     parser.add_argument("--pdf-folder", required=True, help="Path to PDF folder")
     parser.add_argument("--index-path", default="./wire_index", help="Index storage path")
@@ -1323,11 +1373,13 @@ def main():
     parser.add_argument("--expansion-level", default="medium",
                        choices=["basic", "medium", "advanced"],
                        help="Query expansion level")
+    parser.add_argument("--verbose", action="store_true",
+                       help="Show detailed search process")
     
     args = parser.parse_args()
     
     print("=" * 70)
-    print("Wire Processing Indexer - LITE VERSION (No spaCy)")
+    print("Wire Processing Indexer - LITE VERSION (No spaCy) - FIXED")
     print("=" * 70)
     print()
     
@@ -1355,7 +1407,11 @@ def main():
         if args.capability:
             results = searcher.search_by_capability(args.capability, args.top_k)
         else:
-            results = searcher.search(args.query, top_k=args.top_k)
+            results = searcher.search(
+                args.query, 
+                top_k=args.top_k,
+                verbose=args.verbose
+            )
         
         print(f"\n{'='*80}")
         print(f"Found {len(results)} results")
@@ -1383,8 +1439,9 @@ if __name__ == "__main__":
     main()
 
 print("\n" + "=" * 70)
-print("✓ Wire Processing Indexer - ENHANCED LITE VERSION")
+print("✓ Wire Processing Indexer - ENHANCED LITE VERSION - FIXED")
 print("  • NO spaCy required (regex-based keyword extraction)")
+print("  • FIXED: Now extracts 'credit', 'party', 'determination' etc.")
 print("  • Enhanced query preprocessing (removes stopwords)")
 print("  • Consistent results for similar queries")
 print("  • Query expansion enabled (basic/medium/advanced)")
