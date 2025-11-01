@@ -34,6 +34,14 @@ except ImportError:
 import pickle
 from rank_bm25 import BM25Okapi
 
+# YAML for configuration (optional)
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+    print("Warning: PyYAML not available, use JSON for config files")
+
 
 class CustomKeywordTaxonomy:
     """
@@ -58,7 +66,7 @@ class CustomKeywordTaxonomy:
         print(f"Loading custom keywords from: {config_path}")
         
         with open(config_path, 'r') as f:
-            if config_path.endswith('.yaml') or config_path.endswith('.yml'):
+            if (config_path.endswith('.yaml') or config_path.endswith('.yml')) and YAML_AVAILABLE:
                 config = yaml.safe_load(f)
             else:
                 config = json.load(f)
@@ -619,6 +627,236 @@ class KeywordMappedIndexer:
             print(f"  {category:40s} - {len(found_keywords)}/{len(category_keywords)} keywords ({coverage:.1f}%)")
 
 
+class KeywordMappedSearcher:
+    """
+    Searcher with custom keyword awareness
+    Supports search by query, keyword, or category
+    """
+    
+    def __init__(
+        self, 
+        index_path: str = "./wire_index",
+        keyword_config: Optional[str] = None
+    ):
+        self.index_path = Path(index_path)
+        
+        # Load custom keywords
+        self.custom_taxonomy = CustomKeywordTaxonomy(keyword_config)
+        
+        # Load stats
+        stats_path = self.index_path / "stats.json"
+        with open(stats_path, 'r') as f:
+            self.stats = json.load(f)
+        
+        # Load metadata and documents
+        metadata_path = self.index_path / "metadata.pkl"
+        documents_path = self.index_path / "documents.pkl"
+        
+        with open(metadata_path, 'rb') as f:
+            self.metadata_store = pickle.load(f)
+        
+        with open(documents_path, 'rb') as f:
+            self.document_store = pickle.load(f)
+        
+        # Load keyword mappings
+        keyword_map_path = self.index_path / "keyword_mappings.json"
+        if keyword_map_path.exists():
+            with open(keyword_map_path, 'r') as f:
+                self.keyword_mappings = json.load(f)
+        else:
+            self.keyword_mappings = {}
+        
+        # Build BM25 index
+        tokenized_docs = [doc.lower().split() for doc in self.document_store]
+        self.bm25 = BM25Okapi(tokenized_docs)
+        
+        print(f"✓ Loaded index with {len(self.document_store)} chunks")
+        print(f"✓ Custom keywords: {len(self.custom_taxonomy.all_keywords)}")
+        print(f"✓ Categories: {len(self.custom_taxonomy.get_all_categories())}")
+    
+    def search(
+        self,
+        query: str,
+        top_k: int = 20,
+        category_filter: Optional[str] = None,
+        keyword_filter: Optional[str] = None,
+        verbose: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Search with custom keyword awareness
+        
+        Args:
+            query: Search query
+            top_k: Number of results
+            category_filter: Only return docs in this category
+            keyword_filter: Only return docs with this keyword
+            verbose: Show detailed search process
+        """
+        if verbose:
+            print(f"\n{'='*80}")
+            print(f"Query: {query}")
+            if category_filter:
+                print(f"Category Filter: {category_filter}")
+            if keyword_filter:
+                print(f"Keyword Filter: {keyword_filter}")
+            print(f"{'='*80}")
+        
+        # Tokenize query
+        query_tokens = query.lower().split()
+        
+        # Get BM25 scores
+        bm25_scores = self.bm25.get_scores(query_tokens)
+        
+        # Boost scores for custom keywords
+        for idx, metadata in enumerate(self.metadata_store):
+            # Check if doc contains custom keywords from query
+            doc_keywords = set([kw.lower() for kw in metadata.get('keywords', [])])
+            query_keywords = set(query.lower().split())
+            
+            # Boost if custom keyword match
+            for qk in query_keywords:
+                if qk in self.custom_taxonomy.all_keywords:
+                    if qk in doc_keywords:
+                        priority = self.custom_taxonomy.get_keyword_priority(qk)
+                        bm25_scores[idx] *= (1.0 + priority * 0.3)
+        
+        # Get top candidates
+        search_k = min(1000, top_k * 20) if category_filter or keyword_filter else top_k
+        top_indices = np.argsort(bm25_scores)[::-1][:search_k]
+        
+        # Format results with filtering
+        results = []
+        for idx in top_indices:
+            if bm25_scores[idx] < 0.01:
+                continue
+            
+            metadata = self.metadata_store[idx]
+            
+            # Apply category filter
+            if category_filter:
+                if category_filter not in metadata.get('categories', []):
+                    continue
+            
+            # Apply keyword filter
+            if keyword_filter:
+                if keyword_filter.lower() not in [kw.lower() for kw in metadata.get('keywords', [])]:
+                    continue
+            
+            # Normalize score
+            max_score = bm25_scores.max() if bm25_scores.max() > 0 else 1.0
+            normalized_score = bm25_scores[idx] / max_score
+            
+            results.append({
+                "text": self.document_store[idx],
+                "source_file": metadata['source_file'],
+                "chunk_index": metadata['chunk_index'],
+                "bm25_score": float(bm25_scores[idx]),
+                "normalized_score": float(normalized_score),
+                "keywords": metadata.get('keywords', [])[:10],
+                "top_keywords": metadata.get('top_keywords', []),
+                "categories": metadata.get('categories', []),
+                "category_mapping": metadata.get('category_mapping', {})
+            })
+            
+            if len(results) >= top_k:
+                break
+        
+        if verbose:
+            print(f"\n{'='*80}")
+            print(f"Found {len(results)} results")
+            print(f"{'='*80}\n")
+        
+        return results
+    
+    def search_by_keyword(
+        self,
+        keyword: str,
+        top_k: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Search documents containing a specific keyword"""
+        results = []
+        
+        keyword_lower = keyword.lower()
+        
+        for idx, metadata in enumerate(self.metadata_store):
+            doc_keywords = [kw.lower() for kw in metadata.get('keywords', [])]
+            if keyword_lower in doc_keywords:
+                results.append({
+                    "text": self.document_store[idx],
+                    "source_file": metadata['source_file'],
+                    "chunk_index": metadata['chunk_index'],
+                    "keywords": metadata.get('keywords', [])[:10],
+                    "categories": metadata.get('categories', []),
+                    "category_mapping": metadata.get('category_mapping', {})
+                })
+                
+                if len(results) >= top_k:
+                    break
+        
+        return results
+    
+    def search_by_category(
+        self,
+        category: str,
+        top_k: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Search documents in a specific category"""
+        results = []
+        
+        for idx, metadata in enumerate(self.metadata_store):
+            if category in metadata.get('categories', []):
+                results.append({
+                    "text": self.document_store[idx],
+                    "source_file": metadata['source_file'],
+                    "chunk_index": metadata['chunk_index'],
+                    "keywords": metadata.get('keywords', [])[:10],
+                    "categories": metadata.get('categories', []),
+                    "category_mapping": metadata.get('category_mapping', {})
+                })
+                
+                if len(results) >= top_k:
+                    break
+        
+        return results
+    
+    def get_keyword_documents(self, keyword: str) -> List[str]:
+        """Get list of documents containing a keyword"""
+        keyword_lower = keyword.lower()
+        if 'keyword_document_matrix' in self.keyword_mappings:
+            return self.keyword_mappings['keyword_document_matrix'].get(keyword_lower, [])
+        return []
+    
+    def get_category_documents(self, category: str) -> List[str]:
+        """Get list of documents in a category"""
+        if 'category_document_matrix' in self.keyword_mappings:
+            return self.keyword_mappings['category_document_matrix'].get(category, [])
+        return []
+    
+    def get_keyword_coverage(self) -> Dict[str, Any]:
+        """Get keyword coverage statistics"""
+        coverage = {}
+        
+        for category in self.custom_taxonomy.get_all_categories():
+            category_keywords = self.custom_taxonomy.get_keywords_by_category(category)
+            
+            found_keywords = []
+            for kw in category_keywords:
+                kw_lower = kw.lower()
+                if 'keyword_doc_counts' in self.keyword_mappings:
+                    if kw_lower in self.keyword_mappings['keyword_doc_counts']:
+                        count = self.keyword_mappings['keyword_doc_counts'][kw_lower]
+                        found_keywords.append((kw, count))
+            
+            coverage[category] = {
+                'total_keywords': len(category_keywords),
+                'found_keywords': len(found_keywords),
+                'coverage_percent': (len(found_keywords) / len(category_keywords) * 100) if category_keywords else 0,
+                'keyword_details': found_keywords
+            }
+        
+        return coverage
+
+
 def create_example_keyword_config():
     """Create an example keyword configuration file"""
     example_config = {
@@ -703,44 +941,140 @@ def create_example_keyword_config():
 
 
 def main():
-    """Example usage with custom keywords"""
+    """Example usage with custom keywords - WITH SEARCH"""
     import argparse
     
     parser = argparse.ArgumentParser(
         description="Wire Processing Indexer with Custom Keyword Mapping"
     )
-    parser.add_argument("--pdf-folder", required=True, help="Path to PDF folder")
+    parser.add_argument("--pdf-folder", help="Path to PDF folder")
     parser.add_argument("--index-path", default="./wire_index", help="Index storage path")
     parser.add_argument("--keywords", help="Path to custom keywords YAML/JSON file")
     parser.add_argument("--create-example", action="store_true",
                        help="Create example keywords.yaml file")
-    parser.add_argument("--action", choices=["index", "stats"], default="index")
+    parser.add_argument("--action", choices=["index", "search", "stats", "coverage"], 
+                       default="index", help="Action to perform")
+    
+    # Search options
+    parser.add_argument("--query", help="Search query")
+    parser.add_argument("--category", help="Filter by category")
+    parser.add_argument("--keyword", help="Search by specific keyword")
+    parser.add_argument("--top-k", type=int, default=10, help="Number of results")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
     
     args = parser.parse_args()
     
     if args.create_example:
         example = create_example_keyword_config()
-        with open("keywords_example.yaml", 'w') as f:
-            yaml.dump(example, f, default_flow_style=False, sort_keys=False)
-        print("✓ Created keywords_example.yaml")
+        if YAML_AVAILABLE:
+            with open("keywords_example.yaml", 'w') as f:
+                yaml.dump(example, f, default_flow_style=False, sort_keys=False)
+            print("✓ Created keywords_example.yaml")
+        else:
+            with open("keywords_example.json", 'w') as f:
+                json.dump(example, f, indent=2)
+            print("✓ Created keywords_example.json (PyYAML not available)")
         return
     
     print("=" * 70)
     print("Wire Processing Indexer - Custom Keyword Mapping")
     print("=" * 70)
     
-    indexer = KeywordMappedIndexer(
-        pdf_folder=args.pdf_folder,
-        index_path=args.index_path,
-        keyword_config=args.keywords,
-        use_embeddings=False
-    )
-    
     if args.action == "index":
+        if not args.pdf_folder:
+            print("Error: --pdf-folder required for indexing")
+            return
+            
+        indexer = KeywordMappedIndexer(
+            pdf_folder=args.pdf_folder,
+            index_path=args.index_path,
+            keyword_config=args.keywords,
+            use_embeddings=False
+        )
+        
         stats = indexer.index_pdfs()
         indexer.get_statistics()
+        
+    elif args.action == "search":
+        if not args.query and not args.category and not args.keyword:
+            print("Error: --query, --category, or --keyword required for search")
+            return
+        
+        searcher = KeywordMappedSearcher(
+            index_path=args.index_path,
+            keyword_config=args.keywords
+        )
+        
+        if args.keyword:
+            # Search by specific keyword
+            results = searcher.search_by_keyword(args.keyword, args.top_k)
+            print(f"\n{'='*80}")
+            print(f"Documents containing keyword: {args.keyword}")
+            print(f"{'='*80}\n")
+        elif args.category:
+            # Search by category
+            results = searcher.search_by_category(args.category, args.top_k)
+            print(f"\n{'='*80}")
+            print(f"Documents in category: {args.category}")
+            print(f"{'='*80}\n")
+        else:
+            # Regular search with optional filters
+            results = searcher.search(
+                query=args.query,
+                top_k=args.top_k,
+                category_filter=args.category if args.category else None,
+                keyword_filter=args.keyword if args.keyword else None,
+                verbose=args.verbose
+            )
+        
+        # Display results
+        print(f"Found {len(results)} results\n")
+        
+        for i, result in enumerate(results, 1):
+            score = result.get('normalized_score', result.get('bm25_score', 0))
+            print(f"[{i}] Score: {score:.3f}")
+            print(f"Source: {result['source_file']}")
+            
+            if result.get('categories'):
+                print(f"Categories: {', '.join(result['categories'][:3])}")
+            
+            if result.get('top_keywords'):
+                print(f"Keywords: {', '.join(result['top_keywords'][:5])}")
+            
+            print(f"Text: {result['text'][:200]}...")
+            print("-" * 80)
+    
     elif args.action == "stats":
+        indexer = KeywordMappedIndexer(
+            pdf_folder=".",  # Not used for stats
+            index_path=args.index_path,
+            keyword_config=args.keywords,
+            use_embeddings=False
+        )
         indexer.get_statistics()
+    
+    elif args.action == "coverage":
+        searcher = KeywordMappedSearcher(
+            index_path=args.index_path,
+            keyword_config=args.keywords
+        )
+        
+        coverage = searcher.get_keyword_coverage()
+        
+        print("\n" + "=" * 70)
+        print("KEYWORD COVERAGE REPORT")
+        print("=" * 70)
+        
+        for category, data in coverage.items():
+            print(f"\n{category}:")
+            print(f"  Coverage: {data['found_keywords']}/{data['total_keywords']} keywords ({data['coverage_percent']:.1f}%)")
+            
+            if data['keyword_details']:
+                print(f"  Found keywords:")
+                for kw, count in sorted(data['keyword_details'], key=lambda x: x[1], reverse=True)[:5]:
+                    print(f"    • {kw} - {count} chunks")
+        
+        print("\n" + "=" * 70)
 
 
 if __name__ == "__main__":
@@ -752,4 +1086,5 @@ print("  • Load your own domain keywords")
 print("  • Assign priorities (critical/high/medium/low)")
 print("  • Map documents to keyword categories")
 print("  • Track keyword coverage across documents")
+print("  • Search by query, keyword, or category")
 print("=" * 70)
