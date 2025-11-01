@@ -416,6 +416,131 @@ Format your response as JSON:
         return expansions
 
 
+class ImprovedQueryProcessor:
+    """
+    Pre-process queries to extract core terms and handle natural language
+    Ensures "how do I implement X" returns same results as "X"
+    FIXES: Issue where similar queries return different documents
+    """
+    
+    def __init__(self):
+        # Comprehensive stopwords
+        self.stopwords = {
+            # Question words
+            'how', 'what', 'when', 'where', 'why', 'who', 'which', 'whose',
+            
+            # Common verbs
+            'do', 'does', 'did', 'is', 'are', 'was', 'were', 'be', 'been',
+            'have', 'has', 'had', 'will', 'would', 'should', 'could', 'can',
+            'may', 'might', 'must', 'shall',
+            
+            # Implementation/action words
+            'implement', 'create', 'build', 'make', 'develop', 'setup', 'configure',
+            'explain', 'describe', 'show', 'tell', 'need', 'want', 'help',
+            
+            # Articles and prepositions
+            'a', 'an', 'the', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
+            'from', 'by', 'as', 'into', 'through', 'during', 'before', 'after',
+            
+            # Pronouns
+            'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her',
+            'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their',
+            
+            # Conjunctions
+            'and', 'or', 'but', 'if', 'then', 'than', 'so', 'because',
+            
+            # Other common words
+            'this', 'that', 'these', 'those', 'there', 'here',
+        }
+        
+        # Words that suggest action/question but should be removed for search
+        self.action_indicators = {
+            'how', 'implement', 'create', 'build', 'setup', 'configure',
+            'explain', 'describe', 'show', 'tell', 'need', 'want', 'help'
+        }
+    
+    def extract_core_terms(self, query: str) -> Dict[str, Any]:
+        """
+        Extract core searchable terms from query
+        
+        Returns:
+            {
+                'core_terms': ['credit', 'party', 'determination'],
+                'original_query': 'how do I implement credit party determination',
+                'cleaned_query': 'credit party determination',
+                'is_question': True,
+                'action_type': 'implement'
+            }
+        """
+        original = query.strip()
+        query_lower = query.lower()
+        
+        # Detect if it's a question
+        is_question = any(query_lower.startswith(q) for q in 
+                         ['how', 'what', 'when', 'where', 'why', 'who'])
+        
+        # Detect action type
+        action_type = None
+        for action in self.action_indicators:
+            if action in query_lower:
+                action_type = action
+                break
+        
+        # Tokenize - keep hyphenated terms together
+        tokens = re.findall(r'\b[\w-]+\b', query_lower)
+        
+        # Extract core terms (non-stopwords)
+        core_terms = []
+        for token in tokens:
+            # Skip single letters and numbers
+            if len(token) <= 1 or token.isdigit():
+                continue
+            
+            # Skip stopwords
+            if token in self.stopwords:
+                continue
+            
+            core_terms.append(token)
+        
+        # Reconstruct cleaned query
+        cleaned_query = ' '.join(core_terms)
+        
+        return {
+            'core_terms': core_terms,
+            'original_query': original,
+            'cleaned_query': cleaned_query,
+            'is_question': is_question,
+            'action_type': action_type,
+            'stopwords_removed': len(tokens) - len(core_terms)
+        }
+    
+    def extract_phrases(self, query: str) -> List[str]:
+        """Extract important multi-word phrases"""
+        phrases = []
+        
+        # Extract quoted phrases
+        quoted = re.findall(r'"([^"]+)"', query)
+        phrases.extend(quoted)
+        
+        # Extract capitalized phrases (likely important)
+        capitalized = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b', query)
+        phrases.extend(capitalized)
+        
+        # Extract technical patterns
+        technical_patterns = [
+            r'pacs\.\d+',
+            r'ISO[\s-]?\d+',
+            r'MT\d{3}',
+            r'[A-Z]{3,5}(?:\s+[A-Z]{3,5})*'  # Acronym sequences
+        ]
+        
+        for pattern in technical_patterns:
+            matches = re.findall(pattern, query, re.IGNORECASE)
+            phrases.extend(matches)
+        
+        return list(set(phrases))
+
+
 class FastKeywordExtractor:
     """Extract keywords using regex patterns only - NO spaCy required"""
     
@@ -864,16 +989,18 @@ class WireProcessingIndexer:
 
 
 class WireProcessingSearcher:
-    """Fast search using BM25 - NO SPACY VERSION"""
+    """Fast search using BM25 with enhanced query processing - NO SPACY VERSION"""
     
     def __init__(
         self, 
         index_path: str = "./wire_index",
         enable_query_expansion: bool = True,
-        expansion_level: str = "medium"
+        expansion_level: str = "medium",
+        enable_query_preprocessing: bool = True
     ):
         self.index_path = Path(index_path)
         self.enable_query_expansion = enable_query_expansion
+        self.enable_query_preprocessing = enable_query_preprocessing
         
         stats_path = self.index_path / "stats.json"
         with open(stats_path, 'r') as f:
@@ -908,6 +1035,8 @@ class WireProcessingSearcher:
         tokenized_docs = [doc.lower().split() for doc in self.document_store]
         self.bm25 = BM25Okapi(tokenized_docs)
         
+        # Enhanced query processing
+        self.query_processor = ImprovedQueryProcessor()
         self.keyword_extractor = FastKeywordExtractor()
         self.capability_mapper = CapabilityMapper()
         
@@ -920,6 +1049,9 @@ class WireProcessingSearcher:
             print(f"✓ Query expansion enabled (level: {expansion_level})")
         else:
             self.query_expander = None
+        
+        if self.enable_query_preprocessing:
+            print(f"✓ Enhanced query preprocessing enabled (removes stopwords)")
     
     def search(
         self,
@@ -927,84 +1059,170 @@ class WireProcessingSearcher:
         top_k: int = 20,
         capability_filter: Optional[List[str]] = None,
         min_capability_score: float = 0.3,
-        use_query_expansion: Optional[bool] = None
+        use_query_expansion: Optional[bool] = None,
+        verbose: bool = False
     ) -> List[Dict[str, Any]]:
-        """Search with optional query expansion"""
-        query_keywords = self.keyword_extractor.extract(query)
+        """
+        Enhanced search with query preprocessing and expansion
+        Handles natural language queries consistently
+        """
+        if verbose:
+            print(f"\n{'='*80}")
+            print(f"Query: {query}")
+            print(f"{'='*80}")
+        
+        # Step 1: Preprocess query (remove stopwords, extract core terms)
+        original_query = query
+        search_query = query
+        core_terms = []
+        phrases = []
+        
+        if self.enable_query_preprocessing:
+            query_analysis = self.query_processor.extract_core_terms(query)
+            search_query = query_analysis['cleaned_query']
+            core_terms = query_analysis['core_terms']
+            
+            if verbose:
+                print(f"\nQuery Preprocessing:")
+                print(f"  Original: {query}")
+                print(f"  Cleaned: {search_query}")
+                print(f"  Core terms: {core_terms}")
+                print(f"  Stopwords removed: {query_analysis['stopwords_removed']}")
+            
+            # Extract phrases
+            phrases = self.query_processor.extract_phrases(query)
+            if phrases and verbose:
+                print(f"  Phrases: {phrases}")
+        
+        # Step 2: Extract keywords and capabilities
+        query_keywords = self.keyword_extractor.extract(search_query)
         query_capabilities = self.capability_mapper.map_to_capabilities(
             query_keywords,
-            query
+            search_query
         )
         
-        print(f"\nQuery Analysis:")
-        print(f"  Original query: {query}")
-        print(f"  Keywords: {[kw for kw, _ in query_keywords[:5]]}")
-        print(f"  Capabilities: {[cap for cap, _ in query_capabilities[:3]]}")
+        if verbose:
+            print(f"\nKeywords: {[kw for kw, _ in query_keywords[:5]]}")
+            if query_capabilities:
+                print(f"Capabilities: {[cap for cap, _ in query_capabilities[:3]]}")
         
+        # Step 3: Query expansion
         expanded_info = None
         if use_query_expansion is None:
             use_query_expansion = self.enable_query_expansion
         
         if use_query_expansion and self.query_expander:
-            print(f"  Expanding query...")
-            expanded_info = self.query_expander.expand_query(query, query_capabilities)
+            if verbose:
+                print(f"\nQuery Expansion:")
             
-            print(f"  Expanded queries ({len(expanded_info['expanded_queries'])}):")
-            for eq in expanded_info['expanded_queries'][:3]:
-                print(f"    - {eq}")
+            expanded_info = self.query_expander.expand_query(
+                search_query,  # Use cleaned query
+                query_capabilities
+            )
             
-            if expanded_info['expanded_terms']:
-                print(f"  Expanded terms: {expanded_info['expanded_terms'][:5]}")
+            if verbose:
+                print(f"  Expanded queries: {expanded_info['expanded_queries'][:3]}")
+                if expanded_info['expanded_terms']:
+                    print(f"  Expanded terms: {expanded_info['expanded_terms'][:5]}")
         
+        # Step 4: Auto-select capabilities
         if not capability_filter and query_capabilities:
             capability_filter = [cap for cap, score in query_capabilities 
                                if score >= min_capability_score][:3]
-            print(f"  Auto-selected capabilities: {capability_filter}")
+            if verbose and capability_filter:
+                print(f"  Auto-selected capabilities: {capability_filter}")
         
-        return self._search_with_bm25(
-            query, query_capabilities, capability_filter, top_k, expanded_info
+        # Step 5: Execute search
+        results = self._enhanced_bm25_search(
+            search_query=search_query,
+            core_terms=core_terms,
+            phrases=phrases,
+            query_capabilities=query_capabilities,
+            capability_filter=capability_filter,
+            expanded_info=expanded_info,
+            top_k=top_k
         )
+        
+        if verbose:
+            print(f"\n{'='*80}")
+            print(f"Found {len(results)} results")
+            print(f"{'='*80}\n")
+        
+        return results
     
-    def _search_with_bm25(
+    def _enhanced_bm25_search(
         self,
-        query: str,
+        search_query: str,
+        core_terms: List[str],
+        phrases: List[str],
         query_capabilities: List[Tuple[str, float]],
         capability_filter: Optional[List[str]],
-        top_k: int,
-        expanded_info: Optional[Dict[str, Any]] = None
+        expanded_info: Optional[Dict[str, Any]],
+        top_k: int
     ) -> List[Dict[str, Any]]:
-        """Search using BM25 with query expansion"""
-        print("  Using keyword search (BM25)")
+        """Enhanced BM25 search with better scoring"""
         
-        query_variants = [query]
+        # Collect all query variants
+        query_variants = [search_query]
+        
         if expanded_info:
             query_variants.extend(expanded_info.get('expanded_queries', []))
             if expanded_info.get('expanded_terms'):
                 for term in expanded_info['expanded_terms'][:5]:
                     query_variants.append(term)
         
-        print(f"  Searching with {len(query_variants)} query variations")
+        # Add core terms as individual queries
+        for term in core_terms:
+            if len(term) > 3:  # Only substantial terms
+                query_variants.append(term)
         
+        # Aggregate scores across all variants
         aggregated_scores = np.zeros(len(self.document_store))
         
         for variant_idx, variant in enumerate(query_variants):
             query_tokens = variant.lower().split()
             variant_scores = self.bm25.get_scores(query_tokens)
-            weight = 1.0 if variant_idx == 0 else 0.5
+            
+            # Smart weighting:
+            # - Cleaned query: 1.0 (highest)
+            # - Core terms: 0.8
+            # - Expanded queries: 0.5
+            # - Expanded terms: 0.3
+            if variant_idx == 0:
+                weight = 1.0  # Cleaned query
+            elif variant in core_terms:
+                weight = 0.8  # Core terms
+            elif expanded_info and variant in expanded_info.get('expanded_queries', []):
+                weight = 0.5  # Expanded queries
+            else:
+                weight = 0.3  # Expanded terms
+            
             aggregated_scores += variant_scores * weight
         
+        # Add phrase matching bonus
+        if phrases:
+            phrase_bonuses = self._compute_phrase_bonuses(phrases)
+            aggregated_scores += phrase_bonuses * 0.3
+        
+        # Get top candidates
         search_k = min(1000, top_k * 20) if capability_filter else top_k
         top_indices = np.argsort(aggregated_scores)[::-1][:search_k]
         
+        # Format results
         formatted_results = []
         for idx in top_indices:
+            if aggregated_scores[idx] < 0.01:  # Skip very low scores
+                continue
+            
             metadata = self.metadata_store[idx]
             
+            # Filter by capability
             if capability_filter:
                 if metadata['primary_capability'] not in capability_filter:
                     if not any(cap in capability_filter for cap in metadata['capabilities']):
                         continue
             
+            # Compute capability overlap
             if query_capabilities:
                 query_caps = set([cap for cap, _ in query_capabilities[:5]])
                 doc_caps = set(metadata['capabilities'])
@@ -1013,8 +1231,16 @@ class WireProcessingSearcher:
             else:
                 capability_overlap = 1.0
             
+            # Normalize score
             max_score = aggregated_scores.max() if aggregated_scores.max() > 0 else 1.0
             normalized_score = aggregated_scores[idx] / max_score
+            
+            # Check for exact phrase matches
+            doc_text_lower = self.document_store[idx].lower()
+            phrase_match_bonus = 0.0
+            for phrase in phrases:
+                if phrase.lower() in doc_text_lower:
+                    phrase_match_bonus += 0.1
             
             formatted_results.append({
                 "text": self.document_store[idx],
@@ -1025,18 +1251,34 @@ class WireProcessingSearcher:
                 "capabilities": metadata['capabilities'],
                 "keywords": metadata['keywords'],
                 "capability_overlap": capability_overlap,
-                "primary_capability": metadata['primary_capability']
+                "primary_capability": metadata['primary_capability'],
+                "phrase_match_bonus": phrase_match_bonus
             })
         
+        # Re-rank by combined score
         for result in formatted_results:
             result['combined_score'] = (
-                result['normalized_score'] * 0.6 +
-                result['capability_overlap'] * 0.4
+                result['normalized_score'] * 0.5 +
+                result['capability_overlap'] * 0.3 +
+                result['phrase_match_bonus'] * 0.2
             )
         
         formatted_results.sort(key=lambda x: x['combined_score'], reverse=True)
         
         return formatted_results[:top_k]
+    
+    def _compute_phrase_bonuses(self, phrases: List[str]) -> np.ndarray:
+        """Compute bonus scores for documents containing exact phrases"""
+        bonuses = np.zeros(len(self.document_store))
+        
+        for phrase in phrases:
+            phrase_lower = phrase.lower()
+            for idx, doc in enumerate(self.document_store):
+                if phrase_lower in doc.lower():
+                    count = doc.lower().count(phrase_lower)
+                    bonuses[idx] += np.log1p(count)
+        
+        return bonuses
     
     def search_by_capability(
         self,
@@ -1141,6 +1383,9 @@ if __name__ == "__main__":
     main()
 
 print("\n" + "=" * 70)
-print("✓ Lightweight version loaded - NO spaCy required!")
-print("  Uses regex-based keyword extraction instead")
+print("✓ Wire Processing Indexer - ENHANCED LITE VERSION")
+print("  • NO spaCy required (regex-based keyword extraction)")
+print("  • Enhanced query preprocessing (removes stopwords)")
+print("  • Consistent results for similar queries")
+print("  • Query expansion enabled (basic/medium/advanced)")
 print("=" * 70)
