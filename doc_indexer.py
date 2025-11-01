@@ -1,7 +1,7 @@
 """
 Wire Processing Business Capability Indexer with Query Expansion
-Fast, non-LLM approach with optional LLM-based query expansion for improved BM25 search
-Processes PDFs (text, tables, images) and maps to business capabilities
+LIGHTWEIGHT VERSION - No spaCy dependency required
+Uses regex patterns only for keyword extraction
 """
 
 import os
@@ -26,16 +26,23 @@ except ImportError:
     OCR_AVAILABLE = False
     print("Warning: pytesseract not available, image OCR disabled")
 
-# NLP
-import spacy
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-# Vector embeddings
+# Vector embeddings (optional)
 import numpy as np
-from sentence_transformers import SentenceTransformer
+try:
+    from sentence_transformers import SentenceTransformer
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+    print("Warning: sentence_transformers not available, embeddings disabled")
 
-# Vector database (FAISS)
-import faiss
+# Vector database (optional)
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+    print("Warning: faiss not available, using keyword search only")
+
 import pickle
 
 # BM25 for fast keyword search
@@ -216,29 +223,8 @@ class QueryExpander:
             
         Returns:
             LLM response as string
-            
-        Example implementation:
-            def call_llm(self, prompt, system_prompt=None):
-                # Using OpenAI
-                response = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content": system_prompt or "You are a helpful assistant"},
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-                return response.choices[0].message.content
-                
-                # Or using Anthropic Claude
-                response = anthropic.Anthropic().messages.create(
-                    model="claude-3-sonnet-20240229",
-                    system=system_prompt or "",
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.content[0].text
         """
         # TODO: Implement actual LLM call
-        # For now, return empty string to maintain compatibility
         print(f"[STUB] call_llm() called with prompt: {prompt[:100]}...")
         return ""
     
@@ -249,22 +235,10 @@ class QueryExpander:
     ) -> Dict[str, Any]:
         """
         Expand query using multi-level expansion strategy
-        
-        Args:
-            query: Original search query
-            detected_capabilities: List of (capability, score) tuples from query analysis
-            
-        Returns:
-            Dictionary with:
-                - original_query: Original query
-                - expanded_queries: List of expanded query variations
-                - expanded_terms: List of individual expanded terms
-                - capabilities_context: Relevant capabilities identified
-                - expansion_metadata: Details about expansion process
         """
         result = {
             "original_query": query,
-            "expanded_queries": [query],  # Always include original
+            "expanded_queries": [query],
             "expanded_terms": [],
             "capabilities_context": [],
             "expansion_metadata": {
@@ -309,22 +283,19 @@ class QueryExpander:
         return result
     
     def _basic_expansion(self, query: str) -> List[str]:
-        """
-        Level 1: Basic rule-based expansion using synonyms
-        Handles common typos and variations
-        """
+        """Level 1: Basic rule-based expansion using synonyms"""
         expansions = []
         query_lower = query.lower()
         
         # Apply synonym expansions
         for term, synonyms in self.taxonomy.SYNONYMS.items():
             if term in query_lower:
-                for synonym in synonyms[:2]:  # Limit to 2 synonyms per term
+                for synonym in synonyms[:2]:
                     expanded = query_lower.replace(term, synonym)
                     if expanded != query_lower:
                         expansions.append(expanded)
         
-        # Common typo corrections (wire processing specific)
+        # Common typo corrections
         typo_corrections = {
             "ofac": ["ofac screening", "sanctions"],
             "bic": ["swift code", "bank identifier"],
@@ -340,17 +311,14 @@ class QueryExpander:
                 for correction in corrections[:2]:
                     expansions.append(f"{query_lower} {correction}")
         
-        return expansions[:3]  # Limit basic expansions
+        return expansions[:3]
     
     def _domain_expansion(
         self,
         query: str,
         detected_capabilities: Optional[List[Tuple[str, float]]]
     ) -> Dict[str, Any]:
-        """
-        Level 2: Domain-specific expansion using business capabilities
-        Leverages the capabilities[] array to add related terms
-        """
+        """Level 2: Domain-specific expansion using business capabilities"""
         expansions = {
             "queries": [],
             "terms": [],
@@ -388,10 +356,7 @@ class QueryExpander:
         detected_capabilities: Optional[List[Tuple[str, float]]],
         capabilities_context: List[str]
     ) -> Dict[str, Any]:
-        """
-        Level 3: LLM-based adaptive expansion
-        Uses LLM to generate contextually relevant expansions
-        """
+        """Level 3: LLM-based adaptive expansion"""
         expansions = {
             "queries": [],
             "terms": [],
@@ -403,7 +368,6 @@ class QueryExpander:
         if capabilities_context:
             capability_info = f"\n\nRelevant business capabilities:\n- " + "\n- ".join(capabilities_context)
         
-        # Build domain vocabulary context
         domain_terms = []
         if detected_capabilities:
             for cap, _ in detected_capabilities[:3]:
@@ -414,17 +378,8 @@ class QueryExpander:
         if domain_terms:
             domain_context = f"\n\nDomain-specific terms to consider:\n- " + "\n- ".join(set(domain_terms))
         
-        # Construct LLM prompt
         system_prompt = """You are an expert in wire processing, payment systems, and financial transaction processing. 
-Your task is to expand search queries with relevant synonyms, related terms, and corrections for better document retrieval.
-
-Focus on:
-- Wire transfer and payment processing terminology
-- ISO 20022 standards (pacs, pain, camt messages)
-- SWIFT, FedWire, CHIPS networks
-- Sanctions screening (OFAC)
-- Payment validation and repair
-- Business capabilities in payment processing"""
+Your task is to expand search queries with relevant synonyms, related terms, and corrections for better document retrieval."""
 
         user_prompt = f"""Expand this search query for a wire processing document search system:
 
@@ -435,7 +390,6 @@ Original query: "{query}"
 Provide:
 1. 3-5 expanded query variations that include synonyms and related terms
 2. 5-10 relevant individual terms that should boost matching documents
-3. Correct any potential typos or abbreviations
 
 Format your response as JSON:
 {{
@@ -445,16 +399,14 @@ Format your response as JSON:
 }}"""
 
         try:
-            # Call LLM (stub for now)
             llm_response = self.call_llm(user_prompt, system_prompt)
             expansions["llm_response"] = llm_response
             
-            # Parse JSON response
             if llm_response:
                 try:
                     parsed = json.loads(llm_response)
                     expansions["queries"] = parsed.get("expanded_queries", [])
-                    expansions["terms"] = parsed.get("expanded_terms", [])
+                    expansions["expanded_terms"] = parsed.get("expanded_terms", [])
                 except json.JSONDecodeError:
                     print("Warning: Could not parse LLM response as JSON")
         
@@ -462,47 +414,12 @@ Format your response as JSON:
             print(f"Warning: LLM expansion failed: {e}")
         
         return expansions
-    
-    def detect_query_complexity(self, query: str) -> str:
-        """
-        Detect query complexity to determine expansion strategy
-        
-        Returns: "simple", "medium", or "complex"
-        """
-        words = query.split()
-        
-        # Simple: 1-3 words, common terms
-        if len(words) <= 3:
-            return "simple"
-        
-        # Complex: technical terms, specific codes, multi-part
-        technical_patterns = [
-            r'ISO[\s-]?\d+',
-            r'pacs\.\d+',
-            r'[A-Z]{6}[A-Z0-9]{2}',
-            r'ACE[\s-]?\d+',
-        ]
-        
-        for pattern in technical_patterns:
-            if re.search(pattern, query, re.IGNORECASE):
-                return "complex"
-        
-        # Medium: everything else
-        return "medium"
 
 
 class FastKeywordExtractor:
-    """Extract keywords without LLM using NER, patterns, and TF-IDF"""
+    """Extract keywords using regex patterns only - NO spaCy required"""
     
     def __init__(self):
-        # Load spaCy model
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-        except:
-            print("Downloading spaCy model...")
-            os.system("python -m spacy download en_core_web_sm")
-            self.nlp = spacy.load("en_core_web_sm")
-        
         # Domain-specific patterns
         self.patterns = [
             (r'ISO[\s-]?\d+', 'iso_standard'),
@@ -520,19 +437,24 @@ class FastKeywordExtractor:
         self.stopwords = {
             'process', 'system', 'data', 'information', 'service',
             'management', 'processing', 'services', 'general', 'related',
-            'based', 'using', 'including', 'provides', 'allows'
+            'based', 'using', 'including', 'provides', 'allows', 'the', 'a',
+            'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
+            'with', 'from', 'by', 'as', 'is', 'was', 'are', 'were', 'been',
+            'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+            'should', 'could', 'may', 'might', 'must', 'can', 'this', 'that',
+            'these', 'those', 'it', 'its', 'they', 'their', 'them'
         }
     
     def extract(self, text: str, max_keywords: int = 20) -> List[Tuple[str, float]]:
         """
-        Extract keywords with confidence scores
+        Extract keywords with confidence scores using regex only
         Returns: List of (keyword, confidence) tuples
         """
         if not text or len(text.strip()) < 10:
             return []
         
-        doc = self.nlp(text[:5000])  # Limit for speed
         keyword_scores = defaultdict(float)
+        text_lower = text.lower()
         
         # 1. Domain-specific patterns (highest confidence)
         for pattern, pattern_type in self.patterns:
@@ -540,30 +462,35 @@ class FastKeywordExtractor:
             for match in matches:
                 keyword_scores[match.lower()] += 3.0
         
-        # 2. Named entities (high confidence)
-        for ent in doc.ents:
-            if ent.label_ in ['ORG', 'PRODUCT', 'GPE', 'LAW', 'MONEY']:
-                keyword_scores[ent.text.lower()] += 2.5
+        # 2. Capitalized words (medium-high confidence)
+        capitalized_words = re.findall(r'\b[A-Z][a-z]{2,}\b', text)
+        for word in capitalized_words:
+            if word.lower() not in self.stopwords:
+                keyword_scores[word.lower()] += 2.0
         
-        # 3. Noun phrases (medium confidence)
-        for chunk in doc.noun_chunks:
-            if len(chunk.text.split()) <= 3 and chunk.root.pos_ in ['NOUN', 'PROPN']:
-                keyword_scores[chunk.text.lower()] += 1.5
+        # 3. Multi-word capitalized phrases (high confidence)
+        capitalized_phrases = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b', text)
+        for phrase in capitalized_phrases:
+            if len(phrase) > 5:
+                keyword_scores[phrase.lower()] += 2.5
         
-        # 4. Capitalized terms (medium confidence)
-        for token in doc:
-            if (token.is_alpha and token.text[0].isupper() and 
-                len(token.text) > 2 and not token.is_stop):
-                keyword_scores[token.text.lower()] += 1.0
-        
-        # 5. Business capability keywords (boost known terms)
+        # 4. Business capability keywords (boost known terms)
         capability_keywords = BusinessCapabilityTaxonomy.get_all_keywords()
-        text_lower = text.lower()
         for kw in capability_keywords:
             if kw in text_lower:
-                # Count occurrences
                 count = text_lower.count(kw)
                 keyword_scores[kw] += 2.0 * math.log1p(count)
+        
+        # 5. Hyphenated technical terms
+        hyphenated = re.findall(r'\b[a-z]+-[a-z]+\b', text_lower)
+        for term in hyphenated:
+            if len(term) > 5:
+                keyword_scores[term] += 1.5
+        
+        # 6. Acronyms (3-5 capital letters)
+        acronyms = re.findall(r'\b[A-Z]{3,5}\b', text)
+        for acronym in acronyms:
+            keyword_scores[acronym.lower()] += 1.8
         
         # Filter and normalize
         filtered = []
@@ -598,21 +525,16 @@ class CapabilityMapper:
         keywords: List[Tuple[str, float]], 
         text: str
     ) -> List[Tuple[str, float]]:
-        """
-        Map extracted keywords to business capabilities
-        Returns: List of (capability_name, confidence_score) tuples
-        """
+        """Map extracted keywords to business capabilities"""
         capability_scores = defaultdict(float)
         text_lower = text.lower()
         
         # Score each capability based on keyword matches
         for keyword, kw_score in keywords:
-            # Direct matches
             if keyword in self.capability_keywords:
                 for capability in self.capability_keywords[keyword]:
                     capability_scores[capability] += kw_score
             
-            # Expanded matches (synonyms)
             expanded = self.taxonomy.expand_with_synonyms(keyword)
             for exp_kw in expanded:
                 if exp_kw in self.capability_keywords:
@@ -645,7 +567,7 @@ class CapabilityMapper:
 
 
 class WireProcessingIndexer:
-    """Fast PDF indexer for wire processing documents"""
+    """Fast PDF indexer for wire processing documents - NO SPACY VERSION"""
     
     def __init__(
         self,
@@ -655,42 +577,26 @@ class WireProcessingIndexer:
         chunk_size: int = 512,
         chunk_overlap: int = 128,
         enable_ocr: bool = False,
-        use_embeddings: bool = True
+        use_embeddings: bool = False  # Default False for lite version
     ):
-        """
-        Initialize Wire Processing Indexer
-        
-        Args:
-            pdf_folder: Path to folder containing PDFs
-            index_path: Path to store index
-            embedding_model: Sentence transformer model name (only used if use_embeddings=True)
-            chunk_size: Words per chunk
-            chunk_overlap: Overlap between chunks
-            enable_ocr: Enable OCR for images
-            use_embeddings: If False, use pure keyword/BM25 search (faster, no model download)
-        """
         self.pdf_folder = Path(pdf_folder)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.enable_ocr = enable_ocr and OCR_AVAILABLE
         self.index_path = Path(index_path)
         self.index_path.mkdir(parents=True, exist_ok=True)
-        self.use_embeddings = use_embeddings
+        self.use_embeddings = use_embeddings and EMBEDDINGS_AVAILABLE and FAISS_AVAILABLE
         
-        # Initialize keyword extractor
-        print("Initializing keyword extractor...")
+        print("Initializing keyword extractor (regex-based)...")
         self.keyword_extractor = FastKeywordExtractor()
         
         print("Initializing capability mapper...")
         self.capability_mapper = CapabilityMapper()
         
-        # Initialize embeddings only if needed
         if self.use_embeddings:
             print(f"Loading embedding model: {embedding_model}")
             self.embedder = SentenceTransformer(embedding_model)
             self.embedding_dim = self.embedder.get_sentence_embedding_dimension()
-            
-            # Initialize FAISS index
             self.faiss_index = faiss.IndexFlatIP(self.embedding_dim)
         else:
             print("⚡ Embeddings disabled - using pure keyword/BM25 search (faster!)")
@@ -698,20 +604,14 @@ class WireProcessingIndexer:
             self.embedding_dim = None
             self.faiss_index = None
         
-        # Metadata storage (works for both modes)
         self.metadata_store = []
         self.document_store = []
-        
-        # Statistics
         self.keyword_doc_counts = Counter()
         self.capability_doc_counts = Counter()
         self.total_chunks = 0
     
     def extract_text_from_pdf(self, pdf_path: Path) -> Dict[str, Any]:
-        """
-        Extract text, tables, and images from PDF
-        Returns structured content
-        """
+        """Extract text, tables, and images from PDF"""
         content = {
             "text": "",
             "tables": [],
@@ -719,34 +619,23 @@ class WireProcessingIndexer:
         }
         
         try:
-            # Use pdfplumber for better table extraction
             with pdfplumber.open(pdf_path) as pdf:
                 for page_num, page in enumerate(pdf.pages):
-                    # Extract text
                     page_text = page.extract_text() or ""
                     content["text"] += page_text + "\n"
                     
-                    # Extract tables
                     tables = page.extract_tables()
                     if tables:
                         for table in tables:
-                            # Convert table to text representation
                             table_text = self._table_to_text(table)
                             content["tables"].append({
                                 "page": page_num + 1,
                                 "text": table_text
                             })
                             content["text"] += f"\n[TABLE]\n{table_text}\n[/TABLE]\n"
-            
-            # Extract images if OCR enabled
-            if self.enable_ocr:
-                content["images"] = self._extract_images_with_ocr(pdf_path)
-                for img in content["images"]:
-                    content["text"] += f"\n[IMAGE]\n{img['text']}\n[/IMAGE]\n"
         
         except Exception as e:
             print(f"Error extracting from {pdf_path}: {e}")
-            # Fallback to PyPDF2
             try:
                 with open(pdf_path, 'rb') as file:
                     pdf_reader = PyPDF2.PdfReader(file)
@@ -764,18 +653,10 @@ class WireProcessingIndexer:
         
         text_rows = []
         for row in table:
-            # Filter out None values
             cleaned_row = [str(cell) if cell else "" for cell in row]
             text_rows.append(" | ".join(cleaned_row))
         
         return "\n".join(text_rows)
-    
-    def _extract_images_with_ocr(self, pdf_path: Path) -> List[Dict]:
-        """Extract images and perform OCR"""
-        images = []
-        # Implementation would use pdf2image + pytesseract
-        # Skipping for brevity - can add if needed
-        return images
     
     def chunk_text(self, text: str, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Split text into overlapping chunks"""
@@ -803,30 +684,26 @@ class WireProcessingIndexer:
         return chunks
     
     def index_pdfs(self, batch_size: int = 32):
-        """Main indexing pipeline - no LLM needed"""
+        """Main indexing pipeline"""
         print(f"Scanning PDF folder: {self.pdf_folder}")
         pdf_files = list(self.pdf_folder.glob("**/*.pdf"))
         print(f"Found {len(pdf_files)} PDF files")
         
         all_chunks = []
         
-        # Phase 1: Extract and analyze documents
         print("\n=== Phase 1: Extracting Content ===")
         for idx, pdf_path in enumerate(pdf_files, 1):
             print(f"Processing [{idx}/{len(pdf_files)}]: {pdf_path.name}")
             
-            # Extract content (text, tables, images)
             content = self.extract_text_from_pdf(pdf_path)
             if not content["text"].strip():
                 print(f"  ⚠ No text extracted, skipping")
                 continue
             
-            # Extract keywords (no LLM)
             print(f"  Extracting keywords...")
             keywords = self.keyword_extractor.extract(content["text"])
             print(f"  Found {len(keywords)} keywords")
             
-            # Map to business capabilities
             print(f"  Mapping to capabilities...")
             capabilities = self.capability_mapper.map_to_capabilities(
                 keywords, 
@@ -839,7 +716,6 @@ class WireProcessingIndexer:
                 for cap, score in top_3:
                     print(f"    - {cap}: {score:.2f}")
             
-            # Create chunks
             doc_metadata = {
                 "source_file": str(pdf_path.name),
                 "source_path": str(pdf_path),
@@ -850,14 +726,12 @@ class WireProcessingIndexer:
             
             chunks = self.chunk_text(content["text"], doc_metadata)
             
-            # Add keywords and capabilities to each chunk
             for chunk in chunks:
                 chunk["keywords"] = [kw for kw, score in keywords]
                 chunk["keyword_scores"] = dict(keywords)
                 chunk["capabilities"] = [cap for cap, score in capabilities]
                 chunk["capability_scores"] = dict(capabilities)
                 
-                # Update statistics
                 self.keyword_doc_counts.update(set(chunk["keywords"]))
                 self.capability_doc_counts.update(set(chunk["capabilities"]))
             
@@ -867,7 +741,6 @@ class WireProcessingIndexer:
         self.total_chunks = len(all_chunks)
         print(f"\nTotal chunks created: {self.total_chunks}")
         
-        # Phase 2: Compute IDF scores
         print("\n=== Phase 2: Computing TF-IDF Scores ===")
         idf_scores = {}
         for keyword, doc_count in self.keyword_doc_counts.items():
@@ -877,7 +750,6 @@ class WireProcessingIndexer:
         
         print(f"Computed IDF for {len(idf_scores)} unique keywords")
         
-        # Add IDF weights to chunks
         for chunk in all_chunks:
             keyword_weights = {}
             for kw in chunk["keywords"]:
@@ -885,7 +757,6 @@ class WireProcessingIndexer:
                     keyword_weights[kw] = idf_scores[kw]
             chunk["keyword_weights"] = keyword_weights
             
-            # Top weighted keywords
             sorted_kw = sorted(
                 keyword_weights.items(),
                 key=lambda x: x[1],
@@ -893,27 +764,17 @@ class WireProcessingIndexer:
             )
             chunk["top_keywords"] = [kw for kw, _ in sorted_kw[:5]]
         
-        # Phase 3: Generate embeddings and store (optional)
         if self.use_embeddings:
-            print("\n=== Phase 3: Generating Embeddings and Indexing ===")
+            print("\n=== Phase 3: Generating Embeddings ===")
             for i in range(0, len(all_chunks), batch_size):
                 batch = all_chunks[i:i + batch_size]
-                
-                # Generate embeddings
                 texts = [chunk["text"] for chunk in batch]
                 embeddings = self.embedder.encode(texts, show_progress_bar=False)
-                
-                # Normalize embeddings for cosine similarity with inner product
                 faiss.normalize_L2(embeddings)
-                
-                # Add to FAISS index
                 self.faiss_index.add(embeddings.astype('float32'))
                 
-                # Store metadata and documents
                 for chunk in batch:
-                    # Top 3 capabilities only (for faster filtering)
                     top_capabilities = chunk["capabilities"][:3]
-                    
                     metadata = {
                         "source_file": chunk["source_file"],
                         "chunk_index": chunk["chunk_index"],
@@ -929,20 +790,10 @@ class WireProcessingIndexer:
                     self.document_store.append(chunk["text"])
                 
                 print(f"  Indexed batch {i//batch_size + 1}/{(len(all_chunks)-1)//batch_size + 1}")
-            
-            print(f"\n✓ Indexing complete!")
-            
-            # Save FAISS index
-            print("\n=== Saving Index to Disk ===")
-            faiss_index_path = self.index_path / "faiss.index"
-            faiss.write_index(self.faiss_index, str(faiss_index_path))
-            print(f"✓ Saved FAISS index to: {faiss_index_path}")
         else:
             print("\n=== Phase 3: Storing Metadata (No Embeddings) ===")
-            # Store metadata and documents without embeddings
             for chunk in all_chunks:
                 top_capabilities = chunk["capabilities"][:3]
-                
                 metadata = {
                     "source_file": chunk["source_file"],
                     "chunk_index": chunk["chunk_index"],
@@ -958,9 +809,14 @@ class WireProcessingIndexer:
                 self.document_store.append(chunk["text"])
             
             print(f"✓ Stored {len(all_chunks)} chunks (keyword search only)")
-            print("\n=== Saving Index to Disk ===")
         
-        # Save metadata and documents (both modes)
+        print("\n=== Saving Index to Disk ===")
+        
+        if self.use_embeddings:
+            faiss_index_path = self.index_path / "faiss.index"
+            faiss.write_index(self.faiss_index, str(faiss_index_path))
+            print(f"✓ Saved FAISS index to: {faiss_index_path}")
+        
         metadata_path = self.index_path / "metadata.pkl"
         documents_path = self.index_path / "documents.pkl"
         
@@ -972,7 +828,6 @@ class WireProcessingIndexer:
             pickle.dump(self.document_store, f)
         print(f"✓ Saved documents to: {documents_path}")
         
-        # Save statistics
         stats_path = self.index_path / "stats.json"
         stats = {
             "total_chunks": len(all_chunks),
@@ -1009,7 +864,7 @@ class WireProcessingIndexer:
 
 
 class WireProcessingSearcher:
-    """Fast search using capability filtering + FAISS/BM25 search with query expansion"""
+    """Fast search using BM25 - NO SPACY VERSION"""
     
     def __init__(
         self, 
@@ -1017,25 +872,15 @@ class WireProcessingSearcher:
         enable_query_expansion: bool = True,
         expansion_level: str = "medium"
     ):
-        """
-        Initialize searcher with optional query expansion
-        
-        Args:
-            index_path: Path to index files
-            enable_query_expansion: Enable LLM-based query expansion
-            expansion_level: "basic", "medium", or "advanced"
-        """
         self.index_path = Path(index_path)
         self.enable_query_expansion = enable_query_expansion
         
-        # Load statistics first to check mode
         stats_path = self.index_path / "stats.json"
         with open(stats_path, 'r') as f:
             self.stats = json.load(f)
         
-        self.use_embeddings = self.stats.get('use_embeddings', True)
+        self.use_embeddings = self.stats.get('use_embeddings', False)
         
-        # Load metadata and documents
         metadata_path = self.index_path / "metadata.pkl"
         documents_path = self.index_path / "documents.pkl"
         
@@ -1045,15 +890,13 @@ class WireProcessingSearcher:
         with open(documents_path, 'rb') as f:
             self.document_store = pickle.load(f)
         
-        # Load FAISS index only if using embeddings
-        if self.use_embeddings:
+        if self.use_embeddings and EMBEDDINGS_AVAILABLE and FAISS_AVAILABLE:
             faiss_index_path = self.index_path / "faiss.index"
             if faiss_index_path.exists():
                 self.faiss_index = faiss.read_index(str(faiss_index_path))
                 self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
                 print("✓ Loaded FAISS index for semantic search")
             else:
-                print("⚠ FAISS index not found, falling back to keyword search")
                 self.use_embeddings = False
                 self.faiss_index = None
                 self.embedder = None
@@ -1062,14 +905,12 @@ class WireProcessingSearcher:
             self.faiss_index = None
             self.embedder = None
         
-        # Initialize BM25 for keyword search (always available)
         tokenized_docs = [doc.lower().split() for doc in self.document_store]
         self.bm25 = BM25Okapi(tokenized_docs)
         
         self.keyword_extractor = FastKeywordExtractor()
         self.capability_mapper = CapabilityMapper()
         
-        # Initialize query expander if enabled
         if self.enable_query_expansion:
             self.query_expander = QueryExpander(
                 taxonomy=BusinessCapabilityTaxonomy,
@@ -1079,7 +920,6 @@ class WireProcessingSearcher:
             print(f"✓ Query expansion enabled (level: {expansion_level})")
         else:
             self.query_expander = None
-            print("⚠ Query expansion disabled")
     
     def search(
         self,
@@ -1089,17 +929,7 @@ class WireProcessingSearcher:
         min_capability_score: float = 0.3,
         use_query_expansion: Optional[bool] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Fast search using capability-based filtering with optional query expansion
-        
-        Args:
-            query: Search query
-            top_k: Number of results
-            capability_filter: Filter by specific capabilities
-            min_capability_score: Minimum capability match score (0-1)
-            use_query_expansion: Override instance setting for this query
-        """
-        # Extract keywords and map to capabilities from query
+        """Search with optional query expansion"""
         query_keywords = self.keyword_extractor.extract(query)
         query_capabilities = self.capability_mapper.map_to_capabilities(
             query_keywords,
@@ -1111,7 +941,6 @@ class WireProcessingSearcher:
         print(f"  Keywords: {[kw for kw, _ in query_keywords[:5]]}")
         print(f"  Capabilities: {[cap for cap, _ in query_capabilities[:3]]}")
         
-        # Query expansion (if enabled)
         expanded_info = None
         if use_query_expansion is None:
             use_query_expansion = self.enable_query_expansion
@@ -1126,26 +955,15 @@ class WireProcessingSearcher:
             
             if expanded_info['expanded_terms']:
                 print(f"  Expanded terms: {expanded_info['expanded_terms'][:5]}")
-            
-            if expanded_info['capabilities_context']:
-                print(f"  Capability context: {expanded_info['capabilities_context'][:3]}")
         
-        # Use top capabilities for filtering if not specified
         if not capability_filter and query_capabilities:
             capability_filter = [cap for cap, score in query_capabilities 
                                if score >= min_capability_score][:3]
             print(f"  Auto-selected capabilities: {capability_filter}")
         
-        if self.use_embeddings and self.faiss_index is not None:
-            # Semantic search with FAISS
-            return self._search_with_faiss(
-                query, query_capabilities, capability_filter, top_k, expanded_info
-            )
-        else:
-            # Keyword search with BM25 (with expansion)
-            return self._search_with_bm25(
-                query, query_capabilities, capability_filter, top_k, expanded_info
-            )
+        return self._search_with_bm25(
+            query, query_capabilities, capability_filter, top_k, expanded_info
+        )
     
     def _search_with_bm25(
         self,
@@ -1155,54 +973,38 @@ class WireProcessingSearcher:
         top_k: int,
         expanded_info: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Search using BM25 keyword search with query expansion
-        This is the key improvement - multiple query variations
-        """
-        print("  Using keyword search (BM25) with query expansion")
+        """Search using BM25 with query expansion"""
+        print("  Using keyword search (BM25)")
         
-        # Collect all query variations
         query_variants = [query]
         if expanded_info:
             query_variants.extend(expanded_info.get('expanded_queries', []))
-        
-        # Also add expanded terms as individual queries
-        if expanded_info and expanded_info.get('expanded_terms'):
-            for term in expanded_info['expanded_terms'][:5]:
-                query_variants.append(term)
+            if expanded_info.get('expanded_terms'):
+                for term in expanded_info['expanded_terms'][:5]:
+                    query_variants.append(term)
         
         print(f"  Searching with {len(query_variants)} query variations")
         
-        # Aggregate scores across all query variants
         aggregated_scores = np.zeros(len(self.document_store))
         
         for variant_idx, variant in enumerate(query_variants):
-            # Tokenize query variant
             query_tokens = variant.lower().split()
-            
-            # Get BM25 scores for this variant
             variant_scores = self.bm25.get_scores(query_tokens)
-            
-            # Weight: Original query gets full weight, expansions get reduced weight
             weight = 1.0 if variant_idx == 0 else 0.5
             aggregated_scores += variant_scores * weight
         
-        # Get top candidates
         search_k = min(1000, top_k * 20) if capability_filter else top_k
         top_indices = np.argsort(aggregated_scores)[::-1][:search_k]
         
-        # Format results
         formatted_results = []
         for idx in top_indices:
             metadata = self.metadata_store[idx]
             
-            # Filter by capability if specified
             if capability_filter:
                 if metadata['primary_capability'] not in capability_filter:
                     if not any(cap in capability_filter for cap in metadata['capabilities']):
                         continue
             
-            # Compute capability overlap score
             if query_capabilities:
                 query_caps = set([cap for cap, _ in query_capabilities[:5]])
                 doc_caps = set(metadata['capabilities'])
@@ -1211,7 +1013,6 @@ class WireProcessingSearcher:
             else:
                 capability_overlap = 1.0
             
-            # Normalize BM25 score to 0-1 range
             max_score = aggregated_scores.max() if aggregated_scores.max() > 0 else 1.0
             normalized_score = aggregated_scores[idx] / max_score
             
@@ -1227,84 +1028,9 @@ class WireProcessingSearcher:
                 "primary_capability": metadata['primary_capability']
             })
         
-        # Re-rank by combined score
         for result in formatted_results:
             result['combined_score'] = (
                 result['normalized_score'] * 0.6 +
-                result['capability_overlap'] * 0.4
-            )
-        
-        formatted_results.sort(key=lambda x: x['combined_score'], reverse=True)
-        
-        return formatted_results[:top_k]
-    
-    def _search_with_faiss(
-        self,
-        query: str,
-        query_capabilities: List[Tuple[str, float]],
-        capability_filter: Optional[List[str]],
-        top_k: int,
-        expanded_info: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """Search using FAISS semantic search (with optional expansion)"""
-        print("  Using semantic search (FAISS)")
-        
-        # For FAISS, we'll just use the original query
-        # (expansion is more beneficial for keyword search)
-        query_embedding = self.embedder.encode([query])
-        
-        # Normalize for cosine similarity
-        faiss.normalize_L2(query_embedding)
-        
-        # Search FAISS index
-        search_k = min(1000, top_k * 20) if capability_filter else top_k
-        distances, indices = self.faiss_index.search(
-            query_embedding.astype('float32'), 
-            search_k
-        )
-        
-        # Format results
-        formatted_results = []
-        for idx, distance in zip(indices[0], distances[0]):
-            if idx == -1:  # FAISS returns -1 for empty slots
-                continue
-            
-            metadata = self.metadata_store[idx]
-            
-            # Filter by capability if specified
-            if capability_filter:
-                if metadata['primary_capability'] not in capability_filter:
-                    if not any(cap in capability_filter for cap in metadata['capabilities']):
-                        continue
-            
-            # Compute capability overlap score
-            if query_capabilities:
-                query_caps = set([cap for cap, _ in query_capabilities[:5]])
-                doc_caps = set(metadata['capabilities'])
-                overlap = len(query_caps & doc_caps)
-                capability_overlap = overlap / len(query_caps) if query_caps else 0
-            else:
-                capability_overlap = 1.0
-            
-            # Convert distance to similarity
-            similarity = distance
-            
-            formatted_results.append({
-                "text": self.document_store[idx],
-                "source_file": metadata['source_file'],
-                "chunk_index": metadata['chunk_index'],
-                "distance": 1 - similarity,
-                "similarity": similarity,
-                "capabilities": metadata['capabilities'],
-                "keywords": metadata['keywords'],
-                "capability_overlap": capability_overlap,
-                "primary_capability": metadata['primary_capability']
-            })
-        
-        # Re-rank by combined score
-        for result in formatted_results:
-            result['combined_score'] = (
-                result['similarity'] * 0.6 +
                 result['capability_overlap'] * 0.4
             )
         
@@ -1320,7 +1046,6 @@ class WireProcessingSearcher:
         """Search documents by specific capability"""
         formatted = []
         
-        # Iterate through metadata to find matching capabilities
         for idx, metadata in enumerate(self.metadata_store):
             if metadata['primary_capability'] == capability or capability in metadata['capabilities']:
                 formatted.append({
@@ -1336,23 +1061,14 @@ class WireProcessingSearcher:
                     break
         
         return formatted
-    
-    def get_capability_statistics(self):
-        """Show capability distribution"""
-        print("\n=== Capability Distribution ===")
-        cap_dist = self.stats.get('capability_distribution', {})
-        
-        sorted_caps = sorted(cap_dist.items(), key=lambda x: x[1], reverse=True)
-        for cap, count in sorted_caps:
-            print(f"  {cap:40s} - {count:4d} chunks")
 
 
 def main():
-    """Example usage with query expansion"""
+    """Example usage - NO SPACY VERSION"""
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Index wire processing PDFs with query expansion support"
+        description="Wire Processing Indexer - Lightweight (No spaCy required)"
     )
     parser.add_argument("--pdf-folder", required=True, help="Path to PDF folder")
     parser.add_argument("--index-path", default="./wire_index", help="Index storage path")
@@ -1360,9 +1076,6 @@ def main():
     parser.add_argument("--query", help="Search query")
     parser.add_argument("--capability", help="Filter by capability")
     parser.add_argument("--top-k", type=int, default=10, help="Number of results")
-    parser.add_argument("--enable-ocr", action="store_true", help="Enable OCR for images")
-    parser.add_argument("--no-embeddings", action="store_true", 
-                       help="Disable embeddings (use pure keyword/BM25 search - faster)")
     parser.add_argument("--disable-expansion", action="store_true",
                        help="Disable query expansion")
     parser.add_argument("--expansion-level", default="medium",
@@ -1371,12 +1084,16 @@ def main():
     
     args = parser.parse_args()
     
+    print("=" * 70)
+    print("Wire Processing Indexer - LITE VERSION (No spaCy)")
+    print("=" * 70)
+    print()
+    
     if args.action == "index":
         indexer = WireProcessingIndexer(
             pdf_folder=args.pdf_folder,
             index_path=args.index_path,
-            enable_ocr=args.enable_ocr,
-            use_embeddings=not args.no_embeddings
+            use_embeddings=False  # Lite version
         )
         
         stats = indexer.index_pdfs()
@@ -1413,8 +1130,17 @@ def main():
     
     elif args.action == "stats":
         searcher = WireProcessingSearcher(index_path=args.index_path)
-        searcher.get_capability_statistics()
+        print("\n=== Capability Distribution ===")
+        cap_dist = searcher.stats.get('capability_distribution', {})
+        sorted_caps = sorted(cap_dist.items(), key=lambda x: x[1], reverse=True)
+        for cap, count in sorted_caps:
+            print(f"  {cap:40s} - {count:4d} chunks")
 
 
 if __name__ == "__main__":
     main()
+
+print("\n" + "=" * 70)
+print("✓ Lightweight version loaded - NO spaCy required!")
+print("  Uses regex-based keyword extraction instead")
+print("=" * 70)
