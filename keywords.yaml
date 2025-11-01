@@ -1,0 +1,187 @@
+# Custom Wire Processing Keywords Configuration
+# Define your domain-specific keywords with priorities and categories
+
+# Payment Processing Core
+payment_processing:
+  priority: high
+  keywords:
+    - credit party determination
+    - debit party determination
+    - payment routing logic
+    - payment execution
+    - liquidity management
+    - fee determination
+    - payment enrichment
+    - payment repair
+    - payment validation
+    - straight through processing
+    - STP
+    - cover payments
+    - preadvising
+    - split advising
+
+# Compliance & Screening (Highest Priority)
+compliance_screening:
+  priority: critical
+  keywords:
+    - OFAC screening
+    - sanctions screening
+    - Fircosoft
+    - watchlist screening
+    - AML checks
+    - anti-money laundering
+    - KYC validation
+    - party validation
+    - account validation
+    - BIC validation
+    - IBAN validation
+    - name screening
+    - address validation
+
+# ISO Standards & Message Types
+standards_formats:
+  priority: high
+  keywords:
+    - ISO20022
+    - pacs.008.01.08
+    - pacs.009.01.08
+    - pacs.002.01.10
+    - pain.001.001.09
+    - camt.053.001.08
+    - MT103
+    - MT202
+    - MT199
+    - Fedwire format
+    - CHIPS format
+    - SWIFT format
+
+# Your Specific Systems/Platforms
+internal_systems:
+  priority: high
+  keywords:
+    - GFIMTS
+    - PSTW
+    - treasury workstation
+    - OPICS
+    - AXCIS
+    - Newton
+    - RCS
+    - risk control system
+    - TMS
+    - GABS
+    - global services
+    - IntelliTracs
+    - PEGA
+    - 1BKR
+    - bank reconciliation
+    - OLW
+    - online wires
+
+# Business Processes
+business_processes:
+  priority: medium
+  keywords:
+    - ACE repair
+    - automated clearing enhancement
+    - exception handling
+    - payment reconciliation
+    - intraday liquidity
+    - cutoff processing
+    - EOD processing
+    - end of day
+    - SOD releasing
+    - start of day
+    - warehousing
+    - preadvising
+    - hard posting
+    - memo posting
+    - debit confirmation
+    - credit confirmation
+
+# Networks & Clearing
+networks_clearing:
+  priority: high
+  keywords:
+    - Fedwire
+    - CHIPS
+    - clearing house interbank
+    - SWIFT network
+    - ACH network
+    - real-time gross settlement
+    - RTGS
+    - clearing house
+    - network gateways
+    - network connectivity
+
+# Risk & Controls
+risk_controls:
+  priority: critical
+  keywords:
+    - fraud detection
+    - duplicate checking
+    - debit authority
+    - debit blocks
+    - credit blocks
+    - anomaly detection
+    - funds control
+    - CEO fraud
+    - CFM
+    - controls services
+
+# Data & Reporting
+data_reporting:
+  priority: medium
+  keywords:
+    - general ledger
+    - GL feeds
+    - financial crimes reporting
+    - risk analysis reporting
+    - account activity reporting
+    - reconciliation reporting
+    - client billing
+    - statements
+    - transaction information
+    - balance information
+
+# Entities & Parties
+entities_parties:
+  priority: high
+  keywords:
+    - creditor
+    - debtor
+    - beneficiary
+    - originator
+    - intermediary
+    - Nostro account
+    - Vostro account
+    - ordering customer
+    - beneficiary customer
+
+# Validation Rules
+validation_rules:
+  priority: medium
+  keywords:
+    - date validation
+    - time validation
+    - amount validation
+    - currency validation
+    - routing validation
+    - ABA routing
+    - sort code
+    - standing orders
+    - repetitive orders
+
+# Integration & Channels
+integration_channels:
+  priority: medium
+  keywords:
+    - API integration
+    - service invocation
+    - endpoint publishing
+    - format transformation
+    - data encryption
+    - data decryption
+    - channel connectivity
+    - client authentication
+    - canonical management
+    - middleware integration
