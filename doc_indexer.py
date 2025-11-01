@@ -589,16 +589,36 @@ class FastKeywordExtractor:
             'service', 'api', 'integration', 'interface', 'channel'
         }
         
-        # Common stopwords to exclude
+        # Common stopwords to exclude (EXPANDED to filter generic business terms)
         self.stopwords = {
+            # Basic stopwords
             'process', 'system', 'data', 'information',
-            'general', 'related',
-            'based', 'using', 'including', 'provides', 'allows', 'the', 'a',
-            'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
-            'with', 'from', 'by', 'as', 'is', 'was', 'are', 'were', 'been',
-            'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-            'should', 'could', 'may', 'might', 'must', 'can', 'this', 'that',
-            'these', 'those', 'it', 'its', 'they', 'their', 'them'
+            'general', 'related', 'based', 'using', 'including', 'provides',
+            'allows', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at',
+            'to', 'for', 'of', 'with', 'from', 'by', 'as', 'is', 'was', 'are',
+            'were', 'been', 'be', 'have', 'has', 'had', 'do', 'does', 'did',
+            'will', 'would', 'should', 'could', 'may', 'might', 'must', 'can',
+            'this', 'that', 'these', 'those', 'it', 'its', 'they', 'their', 'them',
+            
+            # Generic business terms that pollute results
+            'business', 'approved', 'technical', 'approval', 'requirement',
+            'requirements', 'document', 'documentation', 'section', 'page',
+            'table', 'figure', 'example', 'note', 'reference', 'description',
+            'overview', 'summary', 'details', 'detail', 'status', 'type',
+            'item', 'value', 'field', 'name', 'number', 'date', 'time',
+            'version', 'change', 'update', 'new', 'old', 'current', 'previous',
+            'next', 'first', 'last', 'high', 'low', 'medium', 'level', 'phase',
+            'step', 'procedure', 'method', 'function', 'operation', 'activity',
+            'action', 'result', 'output', 'input', 'parameter', 'attribute',
+            'property', 'component', 'element', 'module', 'application',
+            'user', 'source', 'target', 'object', 'entity', 'record', 'entry',
+            'list', 'set', 'group', 'class', 'category', 'code', 'identifier',
+            'key', 'index', 'flag', 'option', 'setting', 'configuration',
+            'setup', 'installation', 'deployment', 'implementation', 'definition',
+            'specification', 'standard', 'policy', 'rule', 'guideline', 'principle',
+            'practice', 'pattern', 'model', 'template', 'structure', 'schema',
+            'design', 'architecture', 'framework', 'platform', 'technology',
+            'tool', 'utility', 'helper', 'support', 'control', 'manage'
         }
     
     def extract(self, text: str, max_keywords: int = 20) -> List[Tuple[str, float]]:
@@ -622,19 +642,23 @@ class FastKeywordExtractor:
         for term in self.important_terms:
             if term in text_lower:
                 count = text_lower.count(term)
-                keyword_scores[term] += 2.5 * math.log1p(count)
+                # BOOSTED: Important terms get highest priority
+                keyword_scores[term] += 3.0 * math.log1p(count)
         
-        # 3. Capitalized words (medium-high confidence)
+        # 3. Capitalized words (medium-high confidence, but LOWER than important terms)
         capitalized_words = re.findall(r'\b[A-Z][a-z]{2,}\b', text)
         for word in capitalized_words:
-            if word.lower() not in self.stopwords:
-                keyword_scores[word.lower()] += 2.0
+            word_lower = word.lower()
+            # Only add if NOT stopword and NOT already in important_terms
+            if (word_lower not in self.stopwords and 
+                word_lower not in self.important_terms):
+                keyword_scores[word_lower] += 1.5
         
         # 4. Multi-word capitalized phrases (high confidence)
         capitalized_phrases = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b', text)
         for phrase in capitalized_phrases:
             if len(phrase) > 5:
-                keyword_scores[phrase.lower()] += 2.5
+                keyword_scores[phrase.lower()] += 2.0
         
         # 5. Business capability keywords (boost known terms)
         capability_keywords = BusinessCapabilityTaxonomy.get_all_keywords()
