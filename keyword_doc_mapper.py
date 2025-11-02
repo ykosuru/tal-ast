@@ -751,12 +751,19 @@ def main():
         with open(most_recent, 'r') as f:
             data = json.load(f)
         
-        if args.query_keyword in data['mappings']:
-            keyword_data = data['mappings'][args.query_keyword]
+        # Case-insensitive keyword lookup
+        matched_keyword = None
+        for kw in data['mappings'].keys():
+            if kw.lower() == args.query_keyword.lower():
+                matched_keyword = kw
+                break
+        
+        if matched_keyword:
+            keyword_data = data['mappings'][matched_keyword]
             top_files = keyword_data['top_files']
             
             print(f"\n{'='*80}")
-            print(f"TOP 5 FILES FOR: '{args.query_keyword}'")
+            print(f"TOP 5 FILES FOR: '{matched_keyword}'")
             print(f"Category: {keyword_data['category']}")
             print(f"Priority: {keyword_data['priority']}")
             print(f"{'='*80}\n")
@@ -776,10 +783,18 @@ def main():
             print(f"\n❌ Keyword '{args.query_keyword}' not found in mappings")
             print(f"Available keywords: {len(data['mappings'])}")
             print("\nTry one of these similar keywords:")
+            # Case-insensitive partial matching
             similar = [k for k in data['mappings'].keys() 
-                      if args.query_keyword.lower() in k.lower()][:5]
-            for kw in similar:
-                print(f"  - {kw}")
+                      if args.query_keyword.lower() in k.lower()][:10]
+            if similar:
+                for kw in similar:
+                    print(f"  - {kw}")
+            else:
+                # Show first 10 keywords as examples
+                print("\nSome available keywords:")
+                for kw in list(data['mappings'].keys())[:10]:
+                    print(f"  - {kw}")
+                print(f"  ... and {len(data['mappings']) - 10} more")
         
         return
     
@@ -808,4 +823,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()x
