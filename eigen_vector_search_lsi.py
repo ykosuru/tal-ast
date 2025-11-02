@@ -1,12 +1,7 @@
 """
-Universal File Indexer with LSI/SVD (Eigenvector-Based Semantic Search)
-Combines: BM25 + Stemming + Latent Semantic Indexing for optimal results
-
-LSI Benefits:
-- Semantic matching: "payment" matches "transaction" automatically
-- Dimensionality reduction: 10,000 terms → 300 dimensions (faster search)
-- Discovers synonyms from usage patterns
-- Handles polysemy (same word, different meanings)
+Hybrid Search with LSI/SVD + Line Number Tracking
+Returns: filename, chunk#, line numbers for precise code/doc snippet retrieval
+Perfect for RAG-based code generation!
 """
 
 import os
@@ -109,18 +104,6 @@ class TextStemmer:
 class LatentSemanticIndexer:
     """
     Latent Semantic Indexing using SVD (Singular Value Decomposition)
-    
-    Theory:
-    - Term-Document matrix: A (terms × documents)
-    - SVD: A = U * Σ * V^T
-    - U: term-concept matrix (eigenvectors of A*A^T)
-    - Σ: singular values (strength of concepts)
-    - V^T: concept-document matrix (eigenvectors of A^T*A)
-    
-    Benefits:
-    - Reduces from 10k terms to 300 concepts (faster)
-    - Captures semantic relationships (synonyms, related terms)
-    - Noise reduction (low singular values discarded)
     """
     
     def __init__(
@@ -129,36 +112,21 @@ class LatentSemanticIndexer:
         min_df: int = 2,
         max_df: float = 0.8
     ):
-        """
-        Initialize LSI
-        
-        Args:
-            n_components: Number of latent concepts (dimensions after SVD)
-            min_df: Minimum document frequency (ignore rare terms)
-            max_df: Maximum document frequency (ignore common terms like "the")
-        """
         self.n_components = n_components
         self.min_df = min_df
         self.max_df = max_df
         
-        # Will be populated during fit
-        self.vocabulary_ = {}  # term -> index
-        self.idf_ = {}  # term -> IDF score
-        self.U = None  # term-concept matrix
-        self.sigma = None  # singular values
-        self.Vt = None  # concept-document matrix
+        self.vocabulary_ = {}
+        self.idf_ = {}
+        self.U = None
+        self.sigma = None
+        self.Vt = None
         
         self.n_documents = 0
         self.n_terms = 0
     
     def build_vocabulary(self, documents: List[str]) -> Dict[str, int]:
-        """
-        Build vocabulary with document frequency filtering
-        
-        Returns:
-            vocabulary: {term: index}
-        """
-        # Count document frequencies
+        """Build vocabulary with document frequency filtering"""
         df = Counter()
         for doc in documents:
             unique_terms = set(doc.split())
@@ -166,7 +134,6 @@ class LatentSemanticIndexer:
         
         self.n_documents = len(documents)
         
-        # Filter by min_df and max_df
         max_doc_freq = int(self.max_df * self.n_documents)
         
         vocabulary = {}
@@ -174,7 +141,6 @@ class LatentSemanticIndexer:
         for term, doc_freq in df.items():
             if self.min_df <= doc_freq <= max_doc_freq:
                 vocabulary[term] = idx
-                # Compute IDF
                 self.idf_[term] = math.log(self.n_documents / doc_freq)
                 idx += 1
         
@@ -184,18 +150,12 @@ class LatentSemanticIndexer:
         return vocabulary
     
     def build_tfidf_matrix(self, documents: List[str]) -> csr_matrix:
-        """
-        Build TF-IDF term-document matrix
-        
-        Returns:
-            Sparse matrix of shape (n_terms, n_documents)
-        """
+        """Build TF-IDF term-document matrix"""
         rows = []
         cols = []
         data = []
         
         for doc_idx, doc in enumerate(documents):
-            # Count term frequencies in this document
             tf = Counter(doc.split())
             doc_length = sum(tf.values())
             
@@ -203,7 +163,6 @@ class LatentSemanticIndexer:
                 if term in self.vocabulary_:
                     term_idx = self.vocabulary_[term]
                     
-                    # TF-IDF score
                     tf_score = count / doc_length
                     idf_score = self.idf_.get(term, 0)
                     tfidf = tf_score * idf_score
@@ -212,7 +171,6 @@ class LatentSemanticIndexer:
                     cols.append(doc_idx)
                     data.append(tfidf)
         
-        # Create sparse matrix
         matrix = csr_matrix(
             (data, (rows, cols)),
             shape=(self.n_terms, self.n_documents)
@@ -222,20 +180,12 @@ class LatentSemanticIndexer:
         return matrix
     
     def fit(self, documents: List[str]):
-        """
-        Fit LSI model using SVD
-        
-        This computes the eigenvectors:
-        - U contains term eigenvectors (semantic term relationships)
-        - V contains document eigenvectors (semantic document relationships)
-        """
+        """Fit LSI model using SVD"""
         print("\n=== Computing LSI (SVD Decomposition) ===")
         
-        # Build vocabulary and TF-IDF matrix
         self.vocabulary_ = self.build_vocabulary(documents)
         tfidf_matrix = self.build_tfidf_matrix(documents)
         
-        # Determine actual n_components (can't exceed matrix dimensions)
         actual_components = min(
             self.n_components,
             min(tfidf_matrix.shape) - 1
@@ -245,19 +195,14 @@ class LatentSemanticIndexer:
             print(f"  Reducing n_components from {self.n_components} to {actual_components}")
             self.n_components = actual_components
         
-        # Compute SVD (Singular Value Decomposition)
         print(f"  Computing SVD with {self.n_components} components...")
-        print(f"  This finds the {self.n_components} most important 'concepts' (eigenvectors)")
         
-        # svds computes the k largest singular values/vectors
-        # Returns: U, sigma, Vt where A ≈ U @ diag(sigma) @ Vt
         self.U, self.sigma, self.Vt = svds(
             tfidf_matrix,
             k=self.n_components,
-            which='LM'  # Largest Magnitude
+            which='LM'
         )
         
-        # Sort by singular values (descending)
         idx = np.argsort(self.sigma)[::-1]
         self.sigma = self.sigma[idx]
         self.U = self.U[:, idx]
@@ -265,25 +210,17 @@ class LatentSemanticIndexer:
         
         print(f"  ✓ SVD complete!")
         print(f"  Top 5 singular values: {self.sigma[:5]}")
-        print(f"  Explained variance ratio: {self.sigma[:10].sum() / self.sigma.sum():.2%} (top 10)")
         
         return self
     
     def transform_documents(self, documents: List[str]) -> np.ndarray:
-        """
-        Transform documents to concept space (dimensionality reduction)
-        
-        Returns:
-            Document vectors in concept space: (n_documents, n_components)
-        """
-        # Build TF-IDF vectors for documents
+        """Transform documents to concept space"""
         doc_vectors = []
         
         for doc in documents:
             tf = Counter(doc.split())
             doc_length = sum(tf.values())
             
-            # Create TF-IDF vector
             vec = np.zeros(self.n_terms)
             for term, count in tf.items():
                 if term in self.vocabulary_:
@@ -295,25 +232,16 @@ class LatentSemanticIndexer:
             doc_vectors.append(vec)
         
         doc_vectors = np.array(doc_vectors)
-        
-        # Project to concept space: doc_concept = doc_tfidf @ U
         doc_concept = doc_vectors @ self.U
         
         return doc_concept
     
     def transform_query(self, query: str) -> np.ndarray:
-        """
-        Transform query to concept space
-        
-        Returns:
-            Query vector in concept space: (n_components,)
-        """
-        # Tokenize query
+        """Transform query to concept space"""
         terms = query.split()
         tf = Counter(terms)
         query_length = len(terms)
         
-        # Build TF-IDF vector
         vec = np.zeros(self.n_terms)
         for term, count in tf.items():
             if term in self.vocabulary_:
@@ -322,25 +250,18 @@ class LatentSemanticIndexer:
                 idf_score = self.idf_.get(term, 0)
                 vec[term_idx] = tf_score * idf_score
         
-        # Project to concept space
         query_concept = vec @ self.U
         
         return query_concept
     
     def get_similar_terms(self, term: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """
-        Find semantically similar terms using eigenvector similarity
-        
-        This uses the term-concept matrix (U) to find terms that appear
-        in similar contexts (similar eigenvector patterns)
-        """
+        """Find semantically similar terms using eigenvector similarity"""
         if term not in self.vocabulary_:
             return []
         
         term_idx = self.vocabulary_[term]
         term_vector = self.U[term_idx, :]
         
-        # Compute cosine similarity with all terms
         similarities = []
         for other_term, other_idx in self.vocabulary_.items():
             if other_term == term:
@@ -348,14 +269,12 @@ class LatentSemanticIndexer:
             
             other_vector = self.U[other_idx, :]
             
-            # Cosine similarity
             cos_sim = np.dot(term_vector, other_vector) / (
                 np.linalg.norm(term_vector) * np.linalg.norm(other_vector) + 1e-10
             )
             
             similarities.append((other_term, cos_sim))
         
-        # Sort by similarity
         similarities.sort(key=lambda x: x[1], reverse=True)
         
         return similarities[:top_k]
@@ -409,7 +328,7 @@ class UniversalFileExtractor:
         return 'unknown'
     
     def extract(self, file_path: Path) -> Dict[str, Any]:
-        """Universal file extraction"""
+        """Universal file extraction with line-by-line tracking"""
         file_type = self.get_file_type(file_path)
         
         if file_type == 'pdf' and self.pdf_available:
@@ -419,33 +338,48 @@ class UniversalFileExtractor:
     
     def _extract_pdf(self, pdf_path: Path) -> Dict[str, Any]:
         """Extract text from PDF"""
-        content = {"text": "", "file_type": "pdf", "line_count": 0}
+        content = {
+            "text": "",
+            "file_type": "pdf",
+            "line_count": 0,
+            "lines": []  # NEW: Track individual lines
+        }
         
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 for page in pdf.pages:
                     page_text = page.extract_text() or ""
                     content["text"] += page_text + "\n"
+                    
+                    # Track lines
+                    page_lines = page_text.split('\n')
+                    content["lines"].extend(page_lines)
         except Exception as e:
             print(f"Error: {e}")
         
-        content["line_count"] = content["text"].count('\n')
+        content["line_count"] = len(content["lines"])
         return content
     
     def _extract_text(self, text_path: Path) -> Dict[str, Any]:
-        """Extract text from text/code files"""
-        content = {"text": "", "file_type": "text", "line_count": 0}
+        """Extract text from text/code files with line tracking"""
+        content = {
+            "text": "",
+            "file_type": "text",
+            "line_count": 0,
+            "lines": []  # NEW: Track individual lines
+        }
         
         encodings = ['utf-8', 'latin-1', 'cp1252']
         for encoding in encodings:
             try:
                 with open(text_path, 'r', encoding=encoding) as f:
-                    content["text"] = f.read()
+                    content["lines"] = f.readlines()
+                    content["text"] = ''.join(content["lines"])
                 break
             except UnicodeDecodeError:
                 continue
         
-        content["line_count"] = content["text"].count('\n')
+        content["line_count"] = len(content["lines"])
         return content
 
 
@@ -505,12 +439,79 @@ class FastKeywordExtractor:
         return filtered[:max_keywords]
 
 
+class LineAwareChunker:
+    """
+    Chunk text while tracking line numbers
+    CRITICAL for code generation: Know exactly where each chunk comes from
+    """
+    
+    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 128):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+    
+    def chunk_by_lines(
+        self,
+        lines: List[str],
+        metadata: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Chunk text by lines, maintaining line number tracking
+        
+        Returns chunks with:
+        - text: The actual chunk text
+        - start_line: Starting line number (1-indexed)
+        - end_line: Ending line number (1-indexed)
+        - chunk_index: Sequential chunk number
+        """
+        chunks = []
+        
+        # Estimate words per line
+        total_words = sum(len(line.split()) for line in lines)
+        avg_words_per_line = total_words / len(lines) if lines else 10
+        
+        # Calculate lines per chunk
+        lines_per_chunk = max(1, int(self.chunk_size / avg_words_per_line))
+        lines_overlap = max(1, int(self.chunk_overlap / avg_words_per_line))
+        
+        current_line = 0
+        chunk_index = 0
+        
+        while current_line < len(lines):
+            # Get chunk lines
+            end_line = min(current_line + lines_per_chunk, len(lines))
+            chunk_lines = lines[current_line:end_line]
+            
+            # Skip if too small
+            chunk_text = ''.join(chunk_lines)
+            if len(chunk_text.strip()) < 50:
+                current_line = end_line
+                continue
+            
+            # Create chunk with line tracking
+            chunk = {
+                "text": chunk_text,
+                "start_line": current_line + 1,  # 1-indexed
+                "end_line": end_line,  # 1-indexed
+                "chunk_index": chunk_index,
+                "total_lines": len(chunk_lines),
+                **metadata
+            }
+            
+            chunks.append(chunk)
+            chunk_index += 1
+            
+            # Move to next chunk with overlap
+            current_line = end_line - lines_overlap
+            if current_line <= 0:
+                current_line = end_line
+        
+        return chunks
+
+
 class HybridSearchEngine:
     """
-    Hybrid search combining:
-    1. BM25 (keyword matching)
-    2. LSI (semantic/eigenvector matching)
-    3. Stemming (word variation handling)
+    Hybrid search with LINE NUMBER TRACKING
+    Perfect for RAG-based code generation!
     """
     
     def __init__(
@@ -520,7 +521,9 @@ class HybridSearchEngine:
         file_extensions: Optional[List[str]] = None,
         use_stemming: bool = True,
         use_lsi: bool = True,
-        lsi_components: int = 300
+        lsi_components: int = 300,
+        chunk_size: int = 512,
+        chunk_overlap: int = 128
     ):
         self.files_folder = Path(files_folder)
         self.index_path = Path(index_path)
@@ -541,6 +544,7 @@ class HybridSearchEngine:
         self.file_extractor = UniversalFileExtractor()
         self.stemmer = TextStemmer(use_stemming=use_stemming)
         self.keyword_extractor = FastKeywordExtractor(stemmer=self.stemmer)
+        self.chunker = LineAwareChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         
         # Will be populated
         self.metadata_store = []
@@ -551,7 +555,7 @@ class HybridSearchEngine:
         self.lsi_doc_vectors = None
     
     def index_files(self):
-        """Index all files with BM25 + LSI"""
+        """Index all files with BM25 + LSI + LINE TRACKING"""
         print(f"Scanning folder: {self.files_folder}")
         
         # Find all files
@@ -566,34 +570,34 @@ class HybridSearchEngine:
             print("No files found!")
             return None
         
-        print("\n=== Phase 1: Extracting Content ===")
+        print("\n=== Phase 1: Extracting Content (WITH LINE TRACKING) ===")
         all_chunks = []
         
         for idx, file_path in enumerate(files, 1):
             print(f"[{idx}/{len(files)}] {file_path.name}")
             
+            # Extract with line tracking
             content = self.file_extractor.extract(file_path)
-            if not content.get("text") or len(content["text"].strip()) < 10:
+            if not content.get("lines") or len(content["lines"]) < 1:
                 continue
             
-            # Simple chunking
-            text = content["text"]
-            words = text.split()
+            # Chunk with line tracking
+            file_metadata = {
+                "source_file": str(file_path.name),
+                "source_path": str(file_path.absolute()),
+                "file_type": content.get("file_type", "unknown"),
+                "total_file_lines": content.get("line_count", 0)
+            }
             
-            chunk_size = 512
-            for i in range(0, len(words), chunk_size - 128):
-                chunk_text = " ".join(words[i:i + chunk_size])
-                if len(chunk_text.strip()) < 50:
-                    continue
-                
-                keywords = self.keyword_extractor.extract(chunk_text)
-                
-                all_chunks.append({
-                    "text": chunk_text,
-                    "source_file": str(file_path.name),
-                    "file_type": content.get("file_type", "unknown"),
-                    "keywords": [kw for kw, _ in keywords[:10]]
-                })
+            chunks = self.chunker.chunk_by_lines(content["lines"], file_metadata)
+            
+            # Add keywords to each chunk
+            for chunk in chunks:
+                keywords = self.keyword_extractor.extract(chunk["text"])
+                chunk["keywords"] = [kw for kw, _ in keywords[:10]]
+            
+            all_chunks.extend(chunks)
+            print(f"  Created {len(chunks)} chunks with line tracking")
         
         print(f"\nTotal chunks: {len(all_chunks)}")
         
@@ -601,7 +605,13 @@ class HybridSearchEngine:
         for chunk in all_chunks:
             self.metadata_store.append({
                 "source_file": chunk["source_file"],
+                "source_path": chunk["source_path"],
                 "file_type": chunk["file_type"],
+                "chunk_index": chunk["chunk_index"],
+                "start_line": chunk["start_line"],
+                "end_line": chunk["end_line"],
+                "total_lines": chunk["total_lines"],
+                "total_file_lines": chunk["total_file_lines"],
                 "keywords": chunk["keywords"]
             })
             self.document_store.append(chunk["text"])
@@ -617,7 +627,7 @@ class HybridSearchEngine:
         self.bm25 = BM25Okapi(tokenized)
         print("✓ BM25 index complete")
         
-        # Build LSI index (eigenvector approach)
+        # Build LSI index
         if self.use_lsi:
             print(f"\n=== Phase 3: Building LSI Index (Eigenvectors) ===")
             self.lsi = LatentSemanticIndexer(
@@ -628,7 +638,6 @@ class HybridSearchEngine:
             
             self.lsi.fit(docs_for_bm25)
             
-            # Transform all documents to concept space
             print("  Transforming documents to concept space...")
             self.lsi_doc_vectors = self.lsi.transform_documents(docs_for_bm25)
             print(f"  ✓ Document vectors: {self.lsi_doc_vectors.shape}")
@@ -663,101 +672,15 @@ class HybridSearchEngine:
         with open(self.index_path / "stats.json", 'w') as f:
             json.dump(stats, f, indent=2)
         
-        print("✓ Index saved")
+        print("✓ Index saved with line number tracking!")
         return stats
-    
-    def search(
-        self,
-        query: str,
-        top_k: int = 20,
-        use_lsi: bool = True,
-        bm25_weight: float = 0.5,
-        lsi_weight: float = 0.5,
-        verbose: bool = False
-    ) -> List[Dict[str, Any]]:
-        """
-        Hybrid search combining BM25 and LSI
-        
-        Args:
-            query: Search query
-            top_k: Number of results
-            use_lsi: Use LSI semantic matching
-            bm25_weight: Weight for BM25 scores (0-1)
-            lsi_weight: Weight for LSI scores (0-1)
-            verbose: Show details
-        """
-        if verbose:
-            print(f"\nQuery: {query}")
-            print(f"Hybrid search: BM25 ({bm25_weight:.1f}) + LSI ({lsi_weight:.1f})")
-        
-        # Prepare query
-        query_processed = self.stemmer.stem_text(query) if self.use_stemming else query
-        query_tokens = query_processed.split()
-        
-        # BM25 scores
-        bm25_scores = self.bm25.get_scores(query_tokens)
-        bm25_scores = bm25_scores / (bm25_scores.max() + 1e-10)  # Normalize
-        
-        if verbose:
-            print(f"BM25: max={bm25_scores.max():.3f}, mean={bm25_scores.mean():.3f}")
-        
-        # LSI scores (semantic similarity using eigenvectors)
-        if use_lsi and self.lsi is not None:
-            query_vector = self.lsi.transform_query(query_processed)
-            
-            # Cosine similarity with all documents
-            lsi_scores = np.zeros(len(self.document_store))
-            for idx in range(len(self.document_store)):
-                doc_vector = self.lsi_doc_vectors[idx]
-                
-                cos_sim = np.dot(query_vector, doc_vector) / (
-                    np.linalg.norm(query_vector) * np.linalg.norm(doc_vector) + 1e-10
-                )
-                lsi_scores[idx] = cos_sim
-            
-            # Normalize to [0, 1]
-            lsi_scores = (lsi_scores - lsi_scores.min()) / (lsi_scores.max() - lsi_scores.min() + 1e-10)
-            
-            if verbose:
-                print(f"LSI: max={lsi_scores.max():.3f}, mean={lsi_scores.mean():.3f}")
-        else:
-            lsi_scores = np.zeros(len(self.document_store))
-        
-        # Combine scores
-        combined_scores = bm25_weight * bm25_scores + lsi_weight * lsi_scores
-        
-        # Get top results
-        top_indices = np.argsort(combined_scores)[::-1][:top_k]
-        
-        results = []
-        for idx in top_indices:
-            if combined_scores[idx] < 0.01:
-                break
-            
-            metadata = self.metadata_store[idx]
-            
-            results.append({
-                "text": self.document_store[idx],
-                "source_file": metadata["source_file"],
-                "file_type": metadata["file_type"],
-                "keywords": metadata["keywords"],
-                "bm25_score": float(bm25_scores[idx]),
-                "lsi_score": float(lsi_scores[idx]),
-                "combined_score": float(combined_scores[idx])
-            })
-        
-        return results
-    
-    def find_similar_terms(self, term: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Find semantically similar terms using LSI eigenvectors"""
-        if not self.lsi:
-            return []
-        
-        return self.lsi.get_similar_terms(term, top_k)
 
 
 class HybridSearcher:
-    """Load and search existing index"""
+    """
+    Load and search with LINE NUMBER RESULTS
+    Perfect for code generation: Get exact file:line references!
+    """
     
     def __init__(self, index_path: str = "./hybrid_index"):
         self.index_path = Path(index_path)
@@ -800,7 +723,20 @@ class HybridSearcher:
         lsi_weight: float = 0.5,
         verbose: bool = False
     ) -> List[Dict[str, Any]]:
-        """Search with BM25 + LSI hybrid"""
+        """
+        Search with LINE NUMBER TRACKING
+        
+        Returns:
+            List of results with:
+            - source_file: filename
+            - source_path: full path
+            - chunk_index: chunk number
+            - start_line: starting line (1-indexed)
+            - end_line: ending line (1-indexed)
+            - location: formatted as "file.py:10-25"
+            - text: chunk content
+            - scores: BM25, LSI, combined
+        """
         
         # Prepare query
         query_processed = self.stemmer.stem_text(query) if self.use_stemming else query
@@ -836,16 +772,80 @@ class HybridSearcher:
                 break
             
             metadata = self.metadata_store[idx]
+            
+            # Format location string
+            location = f"{metadata['source_file']}:{metadata['start_line']}-{metadata['end_line']}"
+            
             results.append({
-                "text": self.document_store[idx],
                 "source_file": metadata["source_file"],
+                "source_path": metadata["source_path"],
                 "file_type": metadata["file_type"],
+                "chunk_index": metadata["chunk_index"],
+                "start_line": metadata["start_line"],
+                "end_line": metadata["end_line"],
+                "total_lines": metadata["total_lines"],
+                "location": location,  # NEW: formatted location
+                "text": self.document_store[idx],
+                "keywords": metadata.get("keywords", []),
                 "bm25_score": float(bm25_scores[idx]),
                 "lsi_score": float(lsi_scores[idx]),
                 "combined_score": float(combined_scores[idx])
             })
         
         return results
+    
+    def get_full_file_context(self, file_path: str) -> str:
+        """
+        Get full file content for context
+        Useful when generating code based on search results
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            print(f"Error reading {file_path}: {e}")
+            return ""
+    
+    def get_surrounding_lines(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        context_lines: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Get chunk with surrounding context
+        
+        Returns:
+            {
+                'before': lines before chunk,
+                'chunk': the actual chunk lines,
+                'after': lines after chunk,
+                'full_text': combined text
+            }
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                all_lines = f.readlines()
+            
+            # Adjust for 0-indexed
+            start_idx = max(0, start_line - 1 - context_lines)
+            end_idx = min(len(all_lines), end_line + context_lines)
+            
+            chunk_start = max(0, start_line - 1)
+            chunk_end = min(len(all_lines), end_line)
+            
+            return {
+                'before': all_lines[start_idx:chunk_start],
+                'chunk': all_lines[chunk_start:chunk_end],
+                'after': all_lines[chunk_end:end_idx],
+                'full_text': ''.join(all_lines[start_idx:end_idx]),
+                'context_start_line': start_idx + 1,
+                'context_end_line': end_idx
+            }
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
     
     def find_similar_terms(self, term: str, top_k: int = 10):
         """Find similar terms using eigenvectors"""
@@ -858,13 +858,15 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Hybrid Search with LSI/SVD (Eigenvector Approach)"
+        description="Hybrid Search with Line Number Tracking (Perfect for RAG!)"
     )
     parser.add_argument("--folder", required=True)
     parser.add_argument("--index-path", default="./hybrid_index")
-    parser.add_argument("--action", choices=["index", "search", "similar"], default="index")
+    parser.add_argument("--action", choices=["index", "search", "context"], default="index")
     parser.add_argument("--query", help="Search query")
-    parser.add_argument("--term", help="Term for similarity search")
+    parser.add_argument("--file", help="File path for context")
+    parser.add_argument("--start-line", type=int, help="Start line")
+    parser.add_argument("--end-line", type=int, help="End line")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--bm25-weight", type=float, default=0.5)
     parser.add_argument("--lsi-weight", type=float, default=0.5)
@@ -873,9 +875,10 @@ def main():
     
     args = parser.parse_args()
     
-    print("=" * 70)
-    print("Hybrid Search Engine: BM25 + LSI (Eigenvector-Based)")
-    print("=" * 70)
+    print("=" * 80)
+    print("Hybrid Search with Line Number Tracking")
+    print("Perfect for RAG-based Code Generation!")
+    print("=" * 80)
     
     if args.action == "index":
         engine = HybridSearchEngine(
@@ -900,33 +903,65 @@ def main():
             verbose=args.verbose
         )
         
-        print(f"\nFound {len(results)} results\n")
+        print(f"\n{'='*80}")
+        print(f"Found {len(results)} results")
+        print(f"{'='*80}\n")
+        
         for i, result in enumerate(results, 1):
-            print(f"[{i}] {result['source_file']}")
-            print(f"BM25: {result['bm25_score']:.3f} | LSI: {result['lsi_score']:.3f} | Combined: {result['combined_score']:.3f}")
-            print(f"{result['text'][:200]}...")
-            print("-" * 70)
+            print(f"[{i}] {result['location']}")
+            print(f"    File: {result['source_file']}")
+            print(f"    Lines: {result['start_line']}-{result['end_line']} ({result['total_lines']} lines)")
+            print(f"    Chunk: #{result['chunk_index']}")
+            print(f"    Scores: BM25={result['bm25_score']:.3f} | LSI={result['lsi_score']:.3f} | Combined={result['combined_score']:.3f}")
+            print(f"    Keywords: {', '.join(result['keywords'][:5])}")
+            print(f"    Preview: {result['text'][:150]}...")
+            print("-" * 80)
+        
+        # Show how to use for code generation
+        if results:
+            print("\n" + "="*80)
+            print("RAG Code Generation Example:")
+            print("="*80)
+            best_result = results[0]
+            print(f"\n# To generate code based on this snippet:")
+            print(f"# File: {best_result['source_path']}")
+            print(f"# Lines: {best_result['start_line']}-{best_result['end_line']}")
+            print(f"\n# Get surrounding context:")
+            context = searcher.get_surrounding_lines(
+                best_result['source_path'],
+                best_result['start_line'],
+                best_result['end_line'],
+                context_lines=5
+            )
+            if context:
+                print(f"\n# Context (lines {context['context_start_line']}-{context['context_end_line']}):")
+                print(context['full_text'][:500])
     
-    elif args.action == "similar":
-        if not args.term:
-            print("Error: --term required")
+    elif args.action == "context":
+        if not args.file or not args.start_line or not args.end_line:
+            print("Error: --file, --start-line, --end-line required")
             return
         
         searcher = HybridSearcher(index_path=args.index_path)
-        similar = searcher.find_similar_terms(args.term, args.top_k)
+        context = searcher.get_surrounding_lines(
+            args.file,
+            args.start_line,
+            args.end_line,
+            context_lines=10
+        )
         
-        print(f"\nTerms similar to '{args.term}':\n")
-        for term, score in similar:
-            print(f"  {term:30s} - {score:.3f}")
+        if context:
+            print(f"\n=== Context for {args.file}:{args.start_line}-{args.end_line} ===\n")
+            print(context['full_text'])
 
 
 if __name__ == "__main__":
     main()
 
-print("\n" + "=" * 70)
-print("✓ Hybrid Search with LSI/SVD (Eigenvector-Based)")
-print("  • BM25: Fast keyword matching")
-print("  • LSI/SVD: Semantic matching using eigenvectors")
-print("  • Discovers synonyms automatically from usage patterns")
-print("  • Dimensionality reduction: 10k terms → 300 concepts")
-print("=" * 70)
+print("\n" + "=" * 80)
+print("✓ Hybrid Search with Line Number Tracking")
+print("  • Returns: filename, chunk#, line numbers")
+print("  • Perfect for RAG-based code generation")
+print("  • Get surrounding context for better prompts")
+print("  • Eigenvector-based semantic search (LSI/SVD)")
+print("=" * 80)
