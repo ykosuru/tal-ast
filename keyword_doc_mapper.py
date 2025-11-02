@@ -69,6 +69,7 @@ class KeywordDocumentMapper:
         
         # Storage for mappings
         self.keyword_mappings = defaultdict(list)
+        self.keyword_top_files = {}  # NEW: Store top 5 files per keyword
         self.document_keywords = defaultdict(list)
         self.category_stats = {}
         
@@ -135,6 +136,71 @@ class KeywordDocumentMapper:
         else:
             return 1
     
+    def _aggregate_chunks_to_files(
+        self,
+        mappings: List[Dict[str, Any]],
+        top_n: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Aggregate chunk-level mappings to file-level with combined scores
+        
+        Args:
+            mappings: List of chunk-level mappings
+            top_n: Number of top files to return
+            
+        Returns:
+            List of file-level aggregates with scores
+        """
+        if not mappings:
+            return []
+        
+        # Group by file
+        file_data = defaultdict(lambda: {
+            'chunks': [],
+            'relevance_scores': [],
+            'raw_scores': [],
+            'capabilities': set(),
+            'text_previews': []
+        })
+        
+        for mapping in mappings:
+            doc = mapping['document']
+            file_data[doc]['chunks'].append(mapping['chunk_index'])
+            file_data[doc]['relevance_scores'].append(mapping['relevance_score'])
+            file_data[doc]['raw_scores'].append(mapping['raw_score'])
+            file_data[doc]['capabilities'].update(mapping['capabilities'])
+            file_data[doc]['text_previews'].append(mapping['text_preview'])
+        
+        # Compute file-level scores
+        file_aggregates = []
+        for doc, data in file_data.items():
+            # Use maximum relevance score (best chunk in file)
+            max_relevance = max(data['relevance_scores'])
+            
+            # Average raw score across chunks
+            avg_raw_score = np.mean(data['raw_scores'])
+            
+            # Combined score: 70% max relevance + 30% chunk count bonus
+            chunk_count_bonus = min(len(data['chunks']) / 10.0, 0.5)  # Cap at 0.5
+            combined_file_score = max_relevance + chunk_count_bonus
+            
+            file_aggregates.append({
+                'document': doc,
+                'max_relevance_score': max_relevance,
+                'avg_raw_score': avg_raw_score,
+                'chunk_count': len(data['chunks']),
+                'chunk_indices': sorted(data['chunks']),
+                'combined_file_score': combined_file_score,
+                'capabilities': list(data['capabilities']),
+                'best_text_preview': data['text_previews'][
+                    data['relevance_scores'].index(max_relevance)
+                ]
+            })
+        
+        # Sort by combined file score and return top N
+        file_aggregates.sort(key=lambda x: x['combined_file_score'], reverse=True)
+        return file_aggregates[:top_n]
+    
     def map_keyword(
         self,
         keyword: str,
@@ -142,7 +208,7 @@ class KeywordDocumentMapper:
         priority: str,
         max_docs: int = 20,
         min_score_threshold: float = 0.05
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Map a single keyword to relevant documents
         
@@ -154,7 +220,7 @@ class KeywordDocumentMapper:
             min_score_threshold: Minimum relevance score to include
             
         Returns:
-            List of document mappings with scores
+            Tuple of (chunk_mappings, top_5_files)
         """
         # Search for keyword
         results = self.searcher.search(
@@ -164,12 +230,12 @@ class KeywordDocumentMapper:
         )
         
         if not results:
-            return []
+            return [], []
         
         # Extract all scores for normalization
         all_scores = [r.get('combined_score', 0) for r in results]
         
-        # Map each result
+        # Map each result (chunk-level)
         mappings = []
         for result in results:
             raw_score = result.get('combined_score', 0)
@@ -202,7 +268,10 @@ class KeywordDocumentMapper:
             
             mappings.append(mapping)
         
-        return mappings
+        # Aggregate to file level and get top 5
+        top_5_files = self._aggregate_chunks_to_files(mappings, top_n=5)
+        
+        return mappings, top_5_files
     
     def generate_all_mappings(
         self,
@@ -240,7 +309,7 @@ class KeywordDocumentMapper:
                 current_keyword += 1
                 print(f"  [{current_keyword}/{total_keywords}] Mapping: '{keyword}'", end=" ")
                 
-                mappings = self.map_keyword(
+                mappings, top_files = self.map_keyword(
                     keyword=keyword,
                     category=category,
                     priority=priority,
@@ -249,10 +318,13 @@ class KeywordDocumentMapper:
                 )
                 
                 if mappings:
-                    print(f"✓ Found {len(mappings)} relevant docs")
+                    print(f"✓ Found {len(mappings)} chunks in {len(top_files)} files")
                     
-                    # Store in keyword_mappings
+                    # Store chunk-level mappings
                     self.keyword_mappings[keyword] = mappings
+                    
+                    # Store top 5 files
+                    self.keyword_top_files[keyword] = top_files
                     
                     # Build reverse index: document -> keywords
                     for mapping in mappings:
@@ -442,6 +514,84 @@ class KeywordDocumentMapper:
         
         print(f"✓ Saved high-relevance only: {high_relevance_path}")
         
+        # 6. Save top 5 files per keyword (NEW)
+        top_files_path = self.output_dir / f"top_5_files_per_keyword_{timestamp}.json"
+        top_files_data = {}
+        
+        for keyword, top_files in self.keyword_top_files.items():
+            if top_files:
+                # Find category and priority for this keyword
+                category = None
+                priority = None
+                for cat, data in self.keywords_config.items():
+                    if keyword in data.get('keywords', []):
+                        category = cat
+                        priority = data.get('priority', 'medium')
+                        break
+                
+                top_files_data[keyword] = {
+                    'category': category,
+                    'priority': priority,
+                    'top_files': top_files
+                }
+        
+        with open(top_files_path, 'w') as f:
+            json.dump({
+                'metadata': {
+                    'description': 'Top 5 files per keyword (aggregated from chunks)',
+                    'generated_at': datetime.now().isoformat(),
+                    'total_keywords': len(top_files_data),
+                    'scoring_method': 'max_relevance + chunk_count_bonus'
+                },
+                'mappings': top_files_data
+            }, f, indent=2)
+        
+        print(f"✓ Saved top 5 files per keyword: {top_files_path}")
+        
+        # 7. Save top 5 files CSV (easy to view in Excel)
+        top_files_csv_path = self.output_dir / f"top_5_files_per_keyword_{timestamp}.csv"
+        with open(top_files_csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'Keyword',
+                'Category',
+                'Priority',
+                'Rank',
+                'Document',
+                'Max_Relevance_Score',
+                'Chunk_Count',
+                'Combined_File_Score',
+                'Chunk_Indices',
+                'Best_Text_Preview'
+            ])
+            
+            for keyword in sorted(self.keyword_top_files.keys()):
+                top_files = self.keyword_top_files[keyword]
+                
+                # Find category and priority
+                category = priority = None
+                for cat, data in self.keywords_config.items():
+                    if keyword in data.get('keywords', []):
+                        category = cat
+                        priority = data.get('priority', 'medium')
+                        break
+                
+                for rank, file_data in enumerate(top_files, 1):
+                    writer.writerow([
+                        keyword,
+                        category,
+                        priority,
+                        rank,
+                        file_data['document'],
+                        file_data['max_relevance_score'],
+                        file_data['chunk_count'],
+                        f"{file_data['combined_file_score']:.2f}",
+                        '; '.join(map(str, file_data['chunk_indices'][:5])),  # First 5 chunks
+                        file_data['best_text_preview']
+                    ])
+        
+        print(f"✓ Saved top 5 files CSV: {top_files_csv_path}")
+        
         print("\n" + "="*80)
         print("✓ All mappings saved successfully!")
         print("="*80)
@@ -481,6 +631,49 @@ class KeywordDocumentMapper:
             print(f"  {category:30s} - {stats['total_mappings']:4d} mappings, "
                   f"{stats['unique_documents']:3d} docs, "
                   f"avg score: {stats['avg_relevance_score']:.2f}")
+    
+    def get_top_files_for_keyword(
+        self,
+        keyword: str,
+        top_n: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Get top N files for a specific keyword
+        
+        Args:
+            keyword: The keyword to look up
+            top_n: Number of top files to return (default: 5)
+            
+        Returns:
+            List of top files with scores
+        """
+        if keyword not in self.keyword_top_files:
+            return []
+        
+        return self.keyword_top_files[keyword][:top_n]
+    
+    def print_top_files_for_keyword(self, keyword: str):
+        """Print top 5 files for a specific keyword"""
+        top_files = self.get_top_files_for_keyword(keyword)
+        
+        if not top_files:
+            print(f"\nNo files found for keyword: '{keyword}'")
+            return
+        
+        print(f"\n{'='*80}")
+        print(f"TOP 5 FILES FOR KEYWORD: '{keyword}'")
+        print(f"{'='*80}\n")
+        
+        for rank, file_data in enumerate(top_files, 1):
+            print(f"[{rank}] {file_data['document']}")
+            print(f"    Max Relevance: {file_data['max_relevance_score']}/5")
+            print(f"    Chunks Found: {file_data['chunk_count']}")
+            print(f"    Combined Score: {file_data['combined_file_score']:.2f}")
+            print(f"    Chunk Indices: {', '.join(map(str, file_data['chunk_indices'][:10]))}")
+            if len(file_data['chunk_indices']) > 10:
+                print(f"                   ... and {len(file_data['chunk_indices']) - 10} more")
+            print(f"    Best Match: {file_data['best_text_preview'][:150]}...")
+            print()
 
 
 def main():
@@ -517,6 +710,10 @@ def main():
         default=0.05,
         help="Minimum relevance score threshold (default: 0.05)"
     )
+    parser.add_argument(
+        "--query-keyword",
+        help="Query for top 5 files for a specific keyword (use after mapping)"
+    )
     
     args = parser.parse_args()
     
@@ -532,6 +729,61 @@ def main():
         output_dir=args.output_dir
     )
     
+    # If query mode, just show top files for the keyword
+    if args.query_keyword:
+        print(f"Query mode: Looking for keyword '{args.query_keyword}'")
+        print("Loading existing mappings...")
+        
+        # Try to load from most recent output
+        import glob
+        top_files_pattern = str(mapper.output_dir / "top_5_files_per_keyword_*.json")
+        matching_files = glob.glob(top_files_pattern)
+        
+        if not matching_files:
+            print(f"\n❌ No mapping files found in {mapper.output_dir}")
+            print("Please run the mapper first without --query-keyword to generate mappings")
+            return
+        
+        # Load most recent
+        most_recent = sorted(matching_files)[-1]
+        print(f"Loading from: {most_recent}")
+        
+        with open(most_recent, 'r') as f:
+            data = json.load(f)
+        
+        if args.query_keyword in data['mappings']:
+            keyword_data = data['mappings'][args.query_keyword]
+            top_files = keyword_data['top_files']
+            
+            print(f"\n{'='*80}")
+            print(f"TOP 5 FILES FOR: '{args.query_keyword}'")
+            print(f"Category: {keyword_data['category']}")
+            print(f"Priority: {keyword_data['priority']}")
+            print(f"{'='*80}\n")
+            
+            for rank, file_data in enumerate(top_files, 1):
+                print(f"[{rank}] {file_data['document']}")
+                print(f"    Max Relevance Score: {file_data['max_relevance_score']}/5")
+                print(f"    Chunks Found: {file_data['chunk_count']}")
+                print(f"    Combined File Score: {file_data['combined_file_score']:.2f}")
+                print(f"    Chunk Indices: {', '.join(map(str, file_data['chunk_indices'][:10]))}")
+                if len(file_data['chunk_indices']) > 10:
+                    print(f"                   ... and {len(file_data['chunk_indices']) - 10} more chunks")
+                print(f"    Best Match Preview:")
+                print(f"        {file_data['best_text_preview'][:200]}...")
+                print()
+        else:
+            print(f"\n❌ Keyword '{args.query_keyword}' not found in mappings")
+            print(f"Available keywords: {len(data['mappings'])}")
+            print("\nTry one of these similar keywords:")
+            similar = [k for k in data['mappings'].keys() 
+                      if args.query_keyword.lower() in k.lower()][:5]
+            for kw in similar:
+                print(f"  - {kw}")
+        
+        return
+    
+    # Normal mapping mode
     # Generate mappings
     mapper.generate_all_mappings(
         max_docs_per_keyword=args.max_docs,
@@ -547,6 +799,11 @@ def main():
     print("\n" + "="*80)
     print("✓ MAPPING COMPLETE!")
     print(f"✓ Check output directory: {args.output_dir}")
+    print("\n💡 TIP: Query top files for a keyword using:")
+    print(f"   python keyword_document_mapper.py \\")
+    print(f"     --index-path {args.index_path} \\")
+    print(f"     --keywords-yaml {args.keywords_yaml} \\")
+    print(f"     --query-keyword 'OFAC screening'")
     print("="*80 + "\n")
 
 
