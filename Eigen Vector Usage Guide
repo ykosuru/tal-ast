@@ -1,0 +1,531 @@
+# Using Search Results for RAG-Based Code Generation
+
+## Overview
+
+The enhanced hybrid search now returns **exact line numbers** for each code snippet, making it perfect for RAG (Retrieval-Augmented Generation) workflows.
+
+## Search Result Format
+
+Each search result now includes:
+
+```python
+{
+    "source_file": "payment_processor.py",
+    "source_path": "/full/path/to/payment_processor.py",
+    "file_type": "code",
+    "chunk_index": 3,
+    "start_line": 45,        # ← NEW: Starting line (1-indexed)
+    "end_line": 72,          # ← NEW: Ending line (1-indexed)
+    "total_lines": 28,       # ← NEW: Number of lines in chunk
+    "location": "payment_processor.py:45-72",  # ← NEW: Formatted location
+    "text": "def validate_payment(...)...",
+    "keywords": ["payment", "validation", "credit"],
+    "bm25_score": 0.856,
+    "lsi_score": 0.712,
+    "combined_score": 0.784
+}
+```
+
+---
+
+## Usage Examples
+
+### 1. Basic Search with Line Numbers
+
+```bash
+python hybrid_search_with_lines.py \
+  --folder ./codebase \
+  --action search \
+  --query "OFAC screening validation" \
+  --top-k 5
+```
+
+**Output:**
+```
+[1] payment_validator.py:145-178
+    File: payment_validator.py
+    Lines: 145-178 (34 lines)
+    Chunk: #12
+    Scores: BM25=0.892 | LSI=0.745 | Combined=0.819
+    Keywords: ofac, screening, validation, party, sanctions
+    Preview: def validate_ofac_screening(party_data):
+        """Validate party against OFAC sanctions list...
+```
+
+### 2. Get Surrounding Context
+
+```python
+from hybrid_search_with_lines import HybridSearcher
+
+searcher = HybridSearcher(index_path="./hybrid_index")
+
+# Search for relevant code
+results = searcher.search("OFAC party validation", top_k=5)
+
+best_match = results[0]
+print(f"Found: {best_match['location']}")
+
+# Get surrounding context (5 lines before/after)
+context = searcher.get_surrounding_lines(
+    file_path=best_match['source_path'],
+    start_line=best_match['start_line'],
+    end_line=best_match['end_line'],
+    context_lines=5
+)
+
+print("\n=== Context with surrounding lines ===")
+print(context['full_text'])
+```
+
+**Output:**
+```
+Found: payment_validator.py:145-178
+
+=== Context with surrounding lines ===
+140: # Helper functions for validation
+141: 
+142: def _format_party_name(name: str) -> str:
+143:     return name.strip().upper()
+144: 
+145: def validate_ofac_screening(party_data):
+146:     """Validate party against OFAC sanctions list
+147:     
+148:     Args:
+149:         party_data: Dict with party information
+...
+178:     return validation_result
+179: 
+180: def validate_bic_code(bic: str) -> bool:
+181:     """Validate BIC/SWIFT code format"""
+182:     return len(bic) in [8, 11]
+```
+
+---
+
+## RAG Code Generation Workflow
+
+### Step 1: Search for Relevant Code
+
+```python
+from hybrid_search_with_lines import HybridSearcher
+
+searcher = HybridSearcher(index_path="./hybrid_index")
+
+# User's request
+user_query = "How do I implement credit party determination?"
+
+# Find relevant code snippets
+results = searcher.search(user_query, top_k=5)
+```
+
+### Step 2: Build Context for LLM
+
+```python
+def build_rag_context(results, max_snippets=3):
+    """Build context from search results for LLM prompt"""
+    
+    context_parts = []
+    
+    for i, result in enumerate(results[:max_snippets], 1):
+        # Get surrounding context
+        full_context = searcher.get_surrounding_lines(
+            file_path=result['source_path'],
+            start_line=result['start_line'],
+            end_line=result['end_line'],
+            context_lines=10  # Include 10 lines before/after
+        )
+        
+        context_part = f"""
+### Reference {i}: {result['location']}
+File: {result['source_file']}
+Lines: {result['start_line']}-{result['end_line']}
+Relevance Score: {result['combined_score']:.2f}
+
+```
+{full_context['full_text'] if full_context else result['text']}
+```
+
+Key Concepts: {', '.join(result['keywords'][:5])}
+"""
+        context_parts.append(context_part)
+    
+    return "\n".join(context_parts)
+
+# Build context
+rag_context = build_rag_context(results)
+```
+
+### Step 3: Generate LLM Prompt
+
+```python
+def create_code_generation_prompt(user_query, rag_context):
+    """Create prompt for code generation using RAG context"""
+    
+    prompt = f"""You are an expert programmer helping to implement new functionality based on existing codebase patterns.
+
+User Request:
+{user_query}
+
+Relevant Code Examples from Codebase:
+{rag_context}
+
+Instructions:
+1. Analyze the provided code examples to understand the patterns and style
+2. Generate NEW code that follows similar patterns
+3. Include proper error handling and documentation
+4. Make sure the code is production-ready
+
+Generate the implementation:"""
+    
+    return prompt
+
+prompt = create_code_generation_prompt(user_query, rag_context)
+```
+
+### Step 4: Send to LLM (e.g., Claude)
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(api_key="your-api-key")
+
+response = client.messages.create(
+    model="claude-sonnet-4-5-20250929",
+    max_tokens=4096,
+    messages=[{
+        "role": "user",
+        "content": prompt
+    }]
+)
+
+generated_code = response.content[0].text
+print(generated_code)
+```
+
+---
+
+## Complete RAG Example
+
+```python
+#!/usr/bin/env python3
+"""
+Complete RAG-based Code Generation Example
+"""
+
+from hybrid_search_with_lines import HybridSearcher
+import anthropic
+
+def generate_code_with_rag(
+    user_request: str,
+    index_path: str = "./hybrid_index",
+    top_k: int = 3,
+    claude_api_key: str = None
+):
+    """
+    Generate code using RAG (Retrieval-Augmented Generation)
+    
+    Args:
+        user_request: What the user wants to implement
+        index_path: Path to search index
+        top_k: Number of reference snippets to retrieve
+        claude_api_key: Anthropic API key
+    """
+    
+    # Step 1: Search for relevant code
+    print(f"🔍 Searching codebase for: {user_request}")
+    searcher = HybridSearcher(index_path=index_path)
+    results = searcher.search(user_request, top_k=top_k)
+    
+    print(f"✓ Found {len(results)} relevant code snippets\n")
+    
+    # Step 2: Build RAG context
+    print("📚 Building context from search results...")
+    context_parts = []
+    
+    for i, result in enumerate(results, 1):
+        print(f"  [{i}] {result['location']} (score: {result['combined_score']:.2f})")
+        
+        # Get surrounding context
+        full_context = searcher.get_surrounding_lines(
+            file_path=result['source_path'],
+            start_line=result['start_line'],
+            end_line=result['end_line'],
+            context_lines=5
+        )
+        
+        context_part = f"""
+### Reference {i}: {result['location']}
+Relevance: {result['combined_score']:.2f}
+
+```{result.get('language', 'python')}
+{full_context['full_text'] if full_context else result['text']}
+```
+
+Key Patterns: {', '.join(result['keywords'][:5])}
+"""
+        context_parts.append(context_part)
+    
+    rag_context = "\n".join(context_parts)
+    
+    # Step 3: Create prompt
+    print("\n✍️  Generating code with Claude...\n")
+    
+    prompt = f"""You are an expert programmer analyzing an existing codebase and implementing new functionality.
+
+User Request:
+{user_request}
+
+Relevant Code Examples from Codebase:
+{rag_context}
+
+Task:
+1. Analyze the provided code examples to understand:
+   - Coding style and conventions
+   - Common patterns and practices
+   - Error handling approaches
+   - Documentation style
+
+2. Generate NEW production-ready code that:
+   - Follows the same patterns as the examples
+   - Implements the user's request
+   - Includes proper error handling
+   - Has clear documentation
+   - Is consistent with the codebase style
+
+3. Explain:
+   - Which patterns you borrowed from the examples
+   - Any important design decisions
+   - How the code fits into the existing architecture
+
+Generate the implementation:"""
+
+    # Step 4: Send to Claude
+    if not claude_api_key:
+        print("⚠️  No API key provided. Here's the prompt that would be sent:\n")
+        print(prompt)
+        return None
+    
+    client = anthropic.Anthropic(api_key=claude_api_key)
+    
+    response = client.messages.create(
+        model="claude-sonnet-4-5-20250929",
+        max_tokens=4096,
+        messages=[{
+            "role": "user",
+            "content": prompt
+        }]
+    )
+    
+    generated_code = response.content[0].text
+    
+    print("=" * 80)
+    print("GENERATED CODE")
+    print("=" * 80)
+    print(generated_code)
+    print("=" * 80)
+    
+    return {
+        "code": generated_code,
+        "references": results,
+        "prompt": prompt
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="RAG-based Code Generation")
+    parser.add_argument("--request", required=True, help="What to implement")
+    parser.add_argument("--index-path", default="./hybrid_index")
+    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--api-key", help="Anthropic API key")
+    
+    args = parser.parse_args()
+    
+    result = generate_code_with_rag(
+        user_request=args.request,
+        index_path=args.index_path,
+        top_k=args.top_k,
+        claude_api_key=args.api_key
+    )
+```
+
+### Usage:
+
+```bash
+# Generate code with RAG
+python rag_code_generator.py \
+  --request "Implement credit party determination with OFAC screening" \
+  --api-key "your-api-key" \
+  --top-k 5
+```
+
+---
+
+## Advanced: Multi-File Context
+
+```python
+def get_multi_file_context(searcher, results, include_related=True):
+    """
+    Build context from multiple related files
+    Useful when implementation spans multiple modules
+    """
+    
+    context = {
+        "primary_snippets": [],
+        "related_files": {},
+        "function_definitions": [],
+        "imports": []
+    }
+    
+    seen_files = set()
+    
+    for result in results:
+        file_path = result['source_path']
+        
+        # Get primary snippet with context
+        snippet_context = searcher.get_surrounding_lines(
+            file_path=file_path,
+            start_line=result['start_line'],
+            end_line=result['end_line'],
+            context_lines=10
+        )
+        
+        context["primary_snippets"].append({
+            "location": result['location'],
+            "text": snippet_context['full_text'] if snippet_context else result['text'],
+            "score": result['combined_score']
+        })
+        
+        # Get full file content if not seen before
+        if include_related and file_path not in seen_files:
+            full_content = searcher.get_full_file_context(file_path)
+            
+            # Extract function definitions
+            functions = re.findall(r'def\s+(\w+)\s*\(', full_content)
+            context["function_definitions"].extend(functions)
+            
+            # Extract imports
+            imports = re.findall(r'^import\s+(.+)$|^from\s+(.+)\s+import', 
+                               full_content, re.MULTILINE)
+            context["imports"].extend([i for imp in imports for i in imp if i])
+            
+            seen_files.add(file_path)
+            
+            # Store summary of related file
+            context["related_files"][result['source_file']] = {
+                "path": file_path,
+                "functions": functions[:10],  # Top 10 functions
+                "lines": full_content.count('\n')
+            }
+    
+    return context
+```
+
+---
+
+## Best Practices for RAG Code Generation
+
+### 1. **Use Appropriate Context Window**
+
+```python
+# For simple functions: 5 lines context
+context = searcher.get_surrounding_lines(..., context_lines=5)
+
+# For complex logic: 10-15 lines context
+context = searcher.get_surrounding_lines(..., context_lines=15)
+
+# For full understanding: Get entire file
+full_file = searcher.get_full_file_context(file_path)
+```
+
+### 2. **Include Multiple Examples**
+
+Retrieve 3-5 similar code snippets to give LLM variety:
+
+```python
+results = searcher.search(query, top_k=5)
+```
+
+### 3. **Filter by File Type**
+
+```python
+# Only get code files for code generation
+code_results = [r for r in results if r['file_type'] == 'code']
+
+# Get documentation for understanding
+doc_results = [r for r in results if r['file_type'] in ['pdf', 'text', 'markdown']]
+```
+
+### 4. **Combine BM25 and LSI Weights**
+
+```python
+# For exact keyword matching (finding specific functions)
+results = searcher.search(query, bm25_weight=0.8, lsi_weight=0.2)
+
+# For semantic/conceptual matching (finding similar patterns)
+results = searcher.search(query, bm25_weight=0.3, lsi_weight=0.7)
+```
+
+### 5. **Validate Generated Code**
+
+After generation, search again to verify consistency:
+
+```python
+# Generate code
+generated = generate_code_with_rag(user_request)
+
+# Verify it matches codebase patterns
+verification_results = searcher.search(
+    f"{user_request} implementation patterns",
+    top_k=10
+)
+
+# Check if generated code uses similar patterns
+```
+
+---
+
+## Benefits of Line Number Tracking
+
+### ✅ **Precise Attribution**
+- Know exactly where code came from
+- Easy to verify in source
+- Proper credit/licensing
+
+### ✅ **Better Context**
+- Get surrounding code for understanding
+- See imports and dependencies
+- Understand full implementation
+
+### ✅ **Easier Debugging**
+- Jump directly to source line
+- Compare generated vs reference
+- Trace logic flow
+
+### ✅ **Version Control Integration**
+```python
+# Can integrate with git blame
+import subprocess
+
+def get_git_info(file_path, line_number):
+    result = subprocess.run(
+        ['git', 'blame', '-L', f'{line_number},{line_number}', file_path],
+        capture_output=True, text=True
+    )
+    return result.stdout
+```
+
+---
+
+## Conclusion
+
+With **line number tracking**, you can now:
+
+1. 🔍 **Search** your codebase semantically (LSI/SVD)
+2. 📍 **Pinpoint** exact code locations (file:line)
+3. 📚 **Extract** context for better understanding
+4. 🤖 **Generate** new code using RAG patterns
+5. ✅ **Verify** consistency with existing code
+
+Perfect for building AI coding assistants that understand your codebase!
