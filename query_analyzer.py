@@ -82,6 +82,7 @@ class QueryKeywordAnalyzer:
     def match_keywords_in_query(self, query: str) -> List[Dict[str, Any]]:
         """
         Find all keywords from keywords.yaml that appear in the query
+        Case-insensitive matching
         
         Args:
             query: User's search query
@@ -95,11 +96,11 @@ class QueryKeywordAnalyzer:
         for kw_data in self.all_keywords:
             keyword = kw_data['keyword']
             
-            # Check for exact match or word boundary match
+            # Check for exact match or word boundary match (case-insensitive)
             # Use word boundaries to avoid partial matches
             pattern = r'\b' + re.escape(keyword) + r'\b'
             
-            if re.search(pattern, query_lower):
+            if re.search(pattern, query_lower, re.IGNORECASE):
                 matched.append(kw_data.copy())
         
         # Sort by priority and length (longer matches first)
