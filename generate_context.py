@@ -1,614 +1,672 @@
 """
-Practical Integration Example: Query → Search → Compress → LLM Code Generation
+Extended Context Extractor for LLM
+Extracts 200 lines before/after each search match from original source files
+Constructs optimized input context for LLM code generation
 
-This shows the complete workflow for your use case:
-1. Query for functionality (e.g., "drawdown processing")
-2. Search both indexers
-3. Combine and deduplicate results
-4. Compress context for LLM
-5. Generate code using LLM
-
-Assumes you've applied the critical patches from code_patches.py
+Usage:
+    extractor = ExtendedContextExtractor(
+        universal_index="./universal_index",
+        hybrid_index="./hybrid_index"
+    )
+    
+    context = extractor.extract_and_format(
+        query="payment drawdown processing",
+        lines_before=200,
+        lines_after=200,
+        max_matches=10
+    )
+    
+    # Send context to LLM
+    llm.generate(context)
 """
 
-import sys
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
-import json
-
-# Import your indexers (adjust paths as needed)
-# from universal_file_indexer import UniversalFileSearcher
-# from lsi_indexer import HybridSearcher
-from unified_code_search import UnifiedCodeSearch, SearchResult
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
+from unified_search_v2 import UnifiedCodeSearch, SearchResult
+import re
 
 
-class CodeGenerationPipeline:
-    """
-    End-to-end pipeline: Query → Search → Compress → Generate Code
+@dataclass
+class ExtendedContext:
+    """Extended context with file location and surrounding lines"""
+    source_file: str
+    source_path: Path
+    file_type: str
+    language: str
     
-    Example:
-        pipeline = CodeGenerationPipeline(
-            universal_index="./universal_index",
-            lsi_index="./hybrid_index"
-        )
+    # Match location
+    match_line_start: int
+    match_line_end: int
+    match_text: str
+    
+    # Extended context
+    lines_before: List[str]
+    lines_after: List[str]
+    
+    # Metadata
+    score: float
+    capabilities: List[str]
+    keywords: List[str]
+    
+    def get_full_context(self) -> str:
+        """Get full context as single string"""
+        lines = []
         
-        code = pipeline.generate_code(
-            functionality="drawdown processing",
-            language="tal",
-            requirements="Must handle ACE repair codes and OFAC screening"
+        # Lines before
+        start_line = self.match_line_start - len(self.lines_before)
+        for i, line in enumerate(self.lines_before):
+            lines.append(f"{start_line + i:4d} | {line}")
+        
+        # Match lines (highlighted)
+        lines.append(f"{'='*70}")
+        lines.append(f">>> MATCH (score: {self.score:.3f})")
+        lines.append(f"{'='*70}")
+        for i, line in enumerate(self.match_text.split('\n')[:20]):  # Limit match display
+            lines.append(f"{self.match_line_start + i:4d} | {line}")
+        lines.append(f"{'='*70}")
+        
+        # Lines after
+        for i, line in enumerate(self.lines_after):
+            lines.append(f"{self.match_line_end + i + 1:4d} | {line}")
+        
+        return '\n'.join(lines)
+    
+    def get_summary(self) -> str:
+        """Get summary of this context"""
+        return (
+            f"{self.source_file} (lines {self.match_line_start}-{self.match_line_end})\n"
+            f"  Type: {self.file_type}, Language: {self.language}\n"
+            f"  Score: {self.score:.3f}\n"
+            f"  Capabilities: {', '.join(self.capabilities[:2])}\n"
         )
+
+
+class SourceFileReader:
+    """Read source files and extract line-based context"""
+    
+    def __init__(self):
+        self.file_cache = {}  # Cache file contents
+    
+    def read_file_lines(self, file_path: Path) -> List[str]:
+        """Read file and return lines (with caching)"""
+        file_path_str = str(file_path)
+        
+        if file_path_str in self.file_cache:
+            return self.file_cache[file_path_str]
+        
+        try:
+            # Try different encodings
+            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        lines = f.readlines()
+                    
+                    # Remove trailing newlines but keep content
+                    lines = [line.rstrip('\n\r') for line in lines]
+                    
+                    self.file_cache[file_path_str] = lines
+                    return lines
+                except UnicodeDecodeError:
+                    continue
+        except Exception as e:
+            print(f"Error reading {file_path}: {e}")
+            return []
+        
+        return []
+    
+    def find_match_location(
+        self,
+        lines: List[str],
+        match_text: str,
+        chunk_index: int = 0
+    ) -> Tuple[int, int]:
+        """
+        Find where match_text appears in the file
+        
+        Returns:
+            (start_line, end_line) - 0-indexed
+        """
+        # Clean match text
+        match_lines = [line.strip() for line in match_text.split('\n') if line.strip()]
+        
+        if not match_lines:
+            return (0, 0)
+        
+        # Search for first few lines of match
+        search_lines = match_lines[:min(3, len(match_lines))]
+        
+        for i in range(len(lines) - len(search_lines) + 1):
+            # Check if lines match (fuzzy)
+            match_count = 0
+            for j, search_line in enumerate(search_lines):
+                file_line = lines[i + j].strip()
+                # Fuzzy match: check if search line is substring or very similar
+                if search_line in file_line or file_line in search_line:
+                    match_count += 1
+                elif self._line_similarity(search_line, file_line) > 0.8:
+                    match_count += 1
+            
+            if match_count >= len(search_lines) * 0.7:  # 70% match
+                start_line = i
+                end_line = min(i + len(match_lines), len(lines))
+                return (start_line, end_line)
+        
+        # If not found, estimate based on chunk_index
+        lines_per_chunk = 100  # Rough estimate
+        estimated_start = chunk_index * lines_per_chunk
+        estimated_end = estimated_start + len(match_lines)
+        
+        return (estimated_start, min(estimated_end, len(lines)))
+    
+    def _line_similarity(self, line1: str, line2: str) -> float:
+        """Compute similarity between two lines"""
+        words1 = set(line1.lower().split())
+        words2 = set(line2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def extract_context(
+        self,
+        file_path: Path,
+        match_text: str,
+        chunk_index: int,
+        lines_before: int = 200,
+        lines_after: int = 200
+    ) -> Tuple[int, int, List[str], List[str]]:
+        """
+        Extract context around a match
+        
+        Returns:
+            (match_start, match_end, lines_before_list, lines_after_list)
+        """
+        lines = self.read_file_lines(file_path)
+        
+        if not lines:
+            return (0, 0, [], [])
+        
+        # Find match location
+        match_start, match_end = self.find_match_location(lines, match_text, chunk_index)
+        
+        # Extract before context
+        before_start = max(0, match_start - lines_before)
+        before_lines = lines[before_start:match_start]
+        
+        # Extract after context
+        after_end = min(len(lines), match_end + lines_after)
+        after_lines = lines[match_end:after_end]
+        
+        return (match_start, match_end, before_lines, after_lines)
+
+
+class ExtendedContextExtractor:
+    """
+    Extract extended context (200 lines before/after) for LLM consumption
+    
+    Workflow:
+    1. Search both indexes
+    2. Get top matches
+    3. Go back to source files
+    4. Extract 200 lines before/after each match
+    5. Format for LLM
     """
     
     def __init__(
         self,
-        universal_index: str,
-        lsi_index: str,
-        universal_weight: float = 0.6,  # Prefer docs slightly
-        lsi_weight: float = 0.4
+        universal_index: str = "./universal_index",
+        hybrid_index: str = "./hybrid_index"
     ):
-        # Initialize unified search
+        # Initialize search
         self.search = UnifiedCodeSearch(
             universal_index_path=universal_index,
-            lsi_index_path=lsi_index,
-            universal_weight=universal_weight,
-            lsi_weight=lsi_weight
+            hybrid_index_path=hybrid_index
         )
         
-        print("✓ Code generation pipeline initialized")
+        # Initialize file reader
+        self.file_reader = SourceFileReader()
+        
+        print("✓ Extended context extractor initialized")
     
-    def generate_code(
+    def extract_contexts(
         self,
-        functionality: str,
-        language: str = "python",
-        requirements: str = "",
-        context_tokens: int = 4000,
-        top_k_results: int = 20,
-        verbose: bool = True
-    ) -> Dict[str, Any]:
+        query: str,
+        max_matches: int = 10,
+        lines_before: int = 200,
+        lines_after: int = 200,
+        file_type_filter: Optional[str] = None,
+        verbose: bool = False
+    ) -> List[ExtendedContext]:
         """
-        Generate code for a given functionality
+        Extract extended contexts for all matches
         
         Args:
-            functionality: What to implement (e.g., "drawdown processing")
-            language: Target language (python, tal, java, etc.)
-            requirements: Additional requirements or constraints
-            context_tokens: Max tokens for context
-            top_k_results: Number of search results to consider
+            query: Search query
+            max_matches: Max number of matches to extract
+            lines_before: Lines to extract before match
+            lines_after: Lines to extract after match
+            file_type_filter: Filter by file type ('code', 'pdf', etc.)
             verbose: Show progress
         
         Returns:
-            {
-                'generated_code': str,
-                'explanation': str,
-                'sources': List[str],
-                'context_used': str,
-                'search_results': List[SearchResult]
-            }
+            List of ExtendedContext objects
         """
         if verbose:
-            print(f"\n{'='*80}")
-            print(f"Generating {language} code for: {functionality}")
-            print(f"{'='*80}\n")
+            print(f"\n{'='*70}")
+            print(f"Extracting Extended Context for: {query}")
+            print(f"{'='*70}")
         
-        # Step 1: Search for relevant code/docs
+        # Step 1: Search indexes
         if verbose:
-            print("[Step 1/4] Searching codebase...")
+            print(f"\n[1/3] Searching indexes...")
         
-        results, compressed_context = self.search.search_and_compress(
-            query=functionality,
-            top_k=top_k_results,
-            max_tokens=context_tokens,
+        results = self.search.search(
+            query=query,
+            top_k=max_matches,
+            file_type_filter=file_type_filter,
+            verbose=False
+        )
+        
+        if verbose:
+            print(f"  Found {len(results)} matches")
+        
+        # Step 2: Extract contexts from source files
+        if verbose:
+            print(f"\n[2/3] Extracting contexts from source files...")
+        
+        contexts = []
+        
+        for i, result in enumerate(results, 1):
+            if verbose:
+                print(f"  [{i}/{len(results)}] {result.source_file}")
+            
+            # Find source file path
+            source_path = self._find_source_file(result)
+            
+            if not source_path or not source_path.exists():
+                if verbose:
+                    print(f"    ⚠ Source file not found: {result.source_file}")
+                continue
+            
+            # Extract context
+            match_start, match_end, before_lines, after_lines = self.file_reader.extract_context(
+                file_path=source_path,
+                match_text=result.text,
+                chunk_index=result.chunk_index,
+                lines_before=lines_before,
+                lines_after=lines_after
+            )
+            
+            # Create ExtendedContext
+            context = ExtendedContext(
+                source_file=result.source_file,
+                source_path=source_path,
+                file_type=result.file_type,
+                language=result.language,
+                match_line_start=match_start,
+                match_line_end=match_end,
+                match_text=result.text,
+                lines_before=before_lines,
+                lines_after=after_lines,
+                score=result.score,
+                capabilities=result.capabilities,
+                keywords=result.keywords
+            )
+            
+            contexts.append(context)
+            
+            if verbose:
+                print(f"    ✓ Lines {match_start}-{match_end} (+{len(before_lines)} before, +{len(after_lines)} after)")
+        
+        if verbose:
+            print(f"\n[3/3] Extracted {len(contexts)} contexts")
+        
+        return contexts
+    
+    def _find_source_file(self, result: SearchResult) -> Optional[Path]:
+        """Find the actual source file path"""
+        # Try to get from metadata (stored during indexing)
+        # First try the search system's metadata
+        try:
+            # Check universal indexer
+            if result.source_indexer == 'universal':
+                index_path = Path(self.search.universal_searcher.index_path)
+            else:
+                index_path = Path(self.search.hybrid_searcher.index_path)
+            
+            # Load metadata to find source path
+            import pickle
+            with open(index_path / "metadata.pkl", 'rb') as f:
+                metadata_store = pickle.load(f)
+            
+            # Find matching metadata
+            for metadata in metadata_store:
+                if metadata.get('source_file') == result.source_file:
+                    source_path = metadata.get('source_path')
+                    if source_path:
+                        return Path(source_path)
+                    break
+        except Exception as e:
+            pass
+        
+        # Fallback: search common locations
+        search_paths = [
+            Path("./your_docs") / result.source_file,
+            Path("./your_code") / result.source_file,
+            Path(result.source_file),
+        ]
+        
+        for path in search_paths:
+            if path.exists():
+                return path
+        
+        return None
+    
+    def format_for_llm(
+        self,
+        contexts: List[ExtendedContext],
+        query: str,
+        include_line_numbers: bool = True,
+        group_by_file: bool = True
+    ) -> str:
+        """
+        Format extracted contexts for LLM consumption
+        
+        Args:
+            contexts: List of ExtendedContext objects
+            query: Original query
+            include_line_numbers: Include line numbers in output
+            group_by_file: Group contexts from same file together
+        
+        Returns:
+            Formatted string ready for LLM
+        """
+        if not contexts:
+            return "No contexts found."
+        
+        output_parts = []
+        
+        # Header
+        output_parts.append(f"# Code Context for Query: {query}\n")
+        output_parts.append(f"Found {len(contexts)} relevant code sections\n")
+        
+        # Group by file if requested
+        if group_by_file:
+            file_groups = {}
+            for ctx in contexts:
+                if ctx.source_file not in file_groups:
+                    file_groups[ctx.source_file] = []
+                file_groups[ctx.source_file].append(ctx)
+            
+            # Process each file
+            for file_name, file_contexts in file_groups.items():
+                output_parts.append(f"\n{'='*70}")
+                output_parts.append(f"## File: {file_name}")
+                output_parts.append(f"{'='*70}\n")
+                
+                for ctx in file_contexts:
+                    output_parts.append(self._format_single_context(ctx, include_line_numbers))
+        else:
+            # Output contexts in score order
+            for i, ctx in enumerate(contexts, 1):
+                output_parts.append(f"\n{'='*70}")
+                output_parts.append(f"## Match {i}: {ctx.source_file}")
+                output_parts.append(f"Score: {ctx.score:.3f}, Type: {ctx.file_type}")
+                output_parts.append(f"{'='*70}\n")
+                
+                output_parts.append(self._format_single_context(ctx, include_line_numbers))
+        
+        # Summary
+        output_parts.append(f"\n{'='*70}")
+        output_parts.append("## Summary")
+        output_parts.append(f"{'='*70}")
+        output_parts.append(f"Total contexts: {len(contexts)}")
+        output_parts.append(f"Unique files: {len(set(ctx.source_file for ctx in contexts))}")
+        output_parts.append(f"Total lines: {sum(len(ctx.lines_before) + len(ctx.lines_after) for ctx in contexts)}")
+        
+        return '\n'.join(output_parts)
+    
+    def _format_single_context(
+        self,
+        ctx: ExtendedContext,
+        include_line_numbers: bool
+    ) -> str:
+        """Format a single context"""
+        parts = []
+        
+        # Context info
+        parts.append(f"Location: Lines {ctx.match_line_start}-{ctx.match_line_end}")
+        if ctx.capabilities:
+            parts.append(f"Capabilities: {', '.join(ctx.capabilities[:3])}")
+        parts.append("")
+        
+        # Code block
+        parts.append(f"```{ctx.language or 'text'}")
+        
+        if include_line_numbers:
+            # Lines before
+            start_line = ctx.match_line_start - len(ctx.lines_before)
+            for i, line in enumerate(ctx.lines_before[-50:]):  # Last 50 lines before
+                parts.append(f"{start_line + len(ctx.lines_before) - 50 + i:4d} | {line}")
+            
+            # Match (highlighted)
+            parts.append("")
+            parts.append(">>> RELEVANT MATCH <<<")
+            parts.append("")
+            for i, line in enumerate(ctx.match_text.split('\n')[:30]):  # First 30 lines
+                parts.append(f"{ctx.match_line_start + i:4d} | {line}")
+            parts.append("")
+            parts.append(">>> END MATCH <<<")
+            parts.append("")
+            
+            # Lines after
+            for i, line in enumerate(ctx.lines_after[:50]):  # First 50 lines after
+                parts.append(f"{ctx.match_line_end + i + 1:4d} | {line}")
+        else:
+            # Without line numbers
+            parts.append('\n'.join(ctx.lines_before[-50:]))
+            parts.append("")
+            parts.append(">>> RELEVANT MATCH <<<")
+            parts.append(ctx.match_text[:1000])  # Limit match size
+            parts.append(">>> END MATCH <<<")
+            parts.append("")
+            parts.append('\n'.join(ctx.lines_after[:50]))
+        
+        parts.append("```")
+        parts.append("")
+        
+        return '\n'.join(parts)
+    
+    def extract_and_format(
+        self,
+        query: str,
+        max_matches: int = 10,
+        lines_before: int = 200,
+        lines_after: int = 200,
+        file_type_filter: Optional[str] = None,
+        verbose: bool = True
+    ) -> str:
+        """
+        One-shot: Extract contexts and format for LLM
+        
+        Returns:
+            Formatted string ready to send to LLM
+        """
+        # Extract contexts
+        contexts = self.extract_contexts(
+            query=query,
+            max_matches=max_matches,
+            lines_before=lines_before,
+            lines_after=lines_after,
+            file_type_filter=file_type_filter,
             verbose=verbose
         )
         
-        if not results:
-            return {
-                'generated_code': '',
-                'explanation': 'No relevant examples found in codebase',
-                'sources': [],
-                'context_used': compressed_context,
-                'search_results': []
-            }
+        # Format for LLM
+        formatted = self.format_for_llm(contexts, query)
         
-        # Step 2: Build LLM prompt
-        if verbose:
-            print("\n[Step 2/4] Building LLM prompt...")
-        
-        prompt = self._build_code_generation_prompt(
-            functionality=functionality,
-            language=language,
-            requirements=requirements,
-            context=compressed_context,
-            results=results
-        )
-        
-        if verbose:
-            print(f"  Prompt length: {len(prompt)} chars")
-            print(f"  Using {len(results)} code examples")
-        
-        # Step 3: Call LLM (placeholder - use your actual LLM)
-        if verbose:
-            print("\n[Step 3/4] Calling LLM...")
-        
-        generated_code, explanation = self._call_llm(prompt, language)
-        
-        # Step 4: Post-process and return
-        if verbose:
-            print("\n[Step 4/4] Post-processing...")
-        
-        sources = list(set(r.source_file for r in results[:10]))
-        
-        result = {
-            'generated_code': generated_code,
-            'explanation': explanation,
-            'sources': sources,
-            'context_used': compressed_context,
-            'search_results': results,
-            'prompt': prompt  # For debugging
-        }
-        
-        if verbose:
-            print(f"\n{'='*80}")
-            print("✓ Code generation complete!")
-            print(f"  Lines of code: {len(generated_code.splitlines())}")
-            print(f"  Sources used: {len(sources)}")
-            print(f"{'='*80}\n")
-        
-        return result
-    
-    def _build_code_generation_prompt(
-        self,
-        functionality: str,
-        language: str,
-        requirements: str,
-        context: str,
-        results: List[SearchResult]
-    ) -> str:
-        """Build comprehensive prompt for LLM"""
-        
-        # Extract key patterns from results
-        key_functions = set()
-        key_imports = set()
-        key_variables = set()
-        
-        for result in results[:10]:
-            if result.metadata.get('functions'):
-                key_functions.update(result.metadata['functions'][:5])
-            if result.metadata.get('imports'):
-                key_imports.update(result.metadata['imports'][:3])
-        
-        # Build prompt
-        prompt_parts = []
-        
-        # Header
-        prompt_parts.append(f"# Code Generation Task: {functionality}")
-        prompt_parts.append(f"Target Language: {language.upper()}")
-        if requirements:
-            prompt_parts.append(f"Requirements: {requirements}")
-        prompt_parts.append("")
-        
-        # Context from codebase
-        prompt_parts.append("## Relevant Code Examples from Codebase")
-        prompt_parts.append(context)
-        prompt_parts.append("")
-        
-        # Key patterns observed
-        if key_functions:
-            prompt_parts.append("## Key Functions/Procedures Found")
-            for func in list(key_functions)[:10]:
-                prompt_parts.append(f"- {func}")
-            prompt_parts.append("")
-        
-        if key_imports:
-            prompt_parts.append("## Common Imports/Dependencies")
-            for imp in list(key_imports)[:5]:
-                prompt_parts.append(f"- {imp}")
-            prompt_parts.append("")
-        
-        # Instructions
-        prompt_parts.append("## Instructions")
-        prompt_parts.append(f"Based on the code examples above, generate {language} code that implements: {functionality}")
-        prompt_parts.append("")
-        prompt_parts.append("Requirements:")
-        prompt_parts.append("1. Follow the patterns and style from the examples")
-        prompt_parts.append("2. Reuse existing functions/procedures where applicable")
-        prompt_parts.append("3. Include appropriate error handling")
-        prompt_parts.append("4. Add comments explaining key logic")
-        
-        if language.lower() == 'tal':
-            prompt_parts.append("5. Use TAL-specific patterns (PROC, SUBPROC, system calls)")
-            prompt_parts.append("6. Handle error codes appropriately")
-        elif language.lower() == 'python':
-            prompt_parts.append("5. Use type hints")
-            prompt_parts.append("6. Follow PEP 8 style guidelines")
-        
-        if requirements:
-            prompt_parts.append(f"7. {requirements}")
-        
-        prompt_parts.append("")
-        prompt_parts.append("## Generated Code")
-        prompt_parts.append(f"```{language}")
-        
-        return "\n".join(prompt_parts)
-    
-    def _call_llm(self, prompt: str, language: str) -> Tuple[str, str]:
-        """
-        Call LLM to generate code
-        
-        This is a placeholder - replace with your actual LLM call
-        """
-        # PLACEHOLDER: Replace with your actual LLM integration
-        # Examples:
-        # - OpenAI API: openai.ChatCompletion.create(...)
-        # - Anthropic Claude: anthropic.messages.create(...)
-        # - Local model: your_model.generate(...)
-        
-        # For demonstration, return a template
-        template_code = f"""
-# Generated {language} code for functionality
-# This is a PLACEHOLDER - replace _call_llm() with actual LLM integration
-
-def placeholder_implementation():
-    \"\"\"
-    TODO: Implement the actual functionality here
-    
-    Based on the context provided in the prompt, this should:
-    1. Follow patterns from the codebase
-    2. Reuse existing functions
-    3. Handle errors appropriately
-    \"\"\"
-    pass
-"""
-        
-        explanation = """
-This is a placeholder response. To use this pipeline with a real LLM:
-
-1. Integrate with OpenAI:
-   import openai
-   response = openai.ChatCompletion.create(
-       model="gpt-4",
-       messages=[{"role": "user", "content": prompt}]
-   )
-   code = response.choices[0].message.content
-
-2. Or integrate with Anthropic Claude:
-   import anthropic
-   client = anthropic.Anthropic(api_key="...")
-   response = client.messages.create(
-       model="claude-3-5-sonnet-20241022",
-       messages=[{"role": "user", "content": prompt}]
-   )
-   code = response.content[0].text
-
-3. Or use a local model via API
-"""
-        
-        print("\n⚠️  Using placeholder LLM response")
-        print("    Replace _call_llm() method with your actual LLM integration\n")
-        
-        return template_code, explanation
-    
-    def batch_generate(
-        self,
-        functionalities: List[str],
-        language: str = "python",
-        output_dir: str = "./generated_code"
-    ) -> List[Dict[str, Any]]:
-        """
-        Generate code for multiple functionalities at once
-        
-        Useful for generating a complete module or set of related functions
-        """
-        output_path = Path(output_dir)
-        output_path.mkdir(exist_ok=True)
-        
-        results = []
-        
-        for i, functionality in enumerate(functionalities, 1):
-            print(f"\n{'='*80}")
-            print(f"[{i}/{len(functionalities)}] Processing: {functionality}")
-            print(f"{'='*80}")
-            
-            result = self.generate_code(
-                functionality=functionality,
-                language=language,
-                verbose=True
-            )
-            
-            results.append(result)
-            
-            # Save to file
-            safe_name = "".join(c if c.isalnum() else "_" for c in functionality)
-            file_ext = self._get_file_extension(language)
-            output_file = output_path / f"{safe_name}{file_ext}"
-            
-            with open(output_file, 'w') as f:
-                f.write(f"# Generated code for: {functionality}\n")
-                f.write(f"# Sources: {', '.join(result['sources'][:3])}\n\n")
-                f.write(result['generated_code'])
-            
-            print(f"✓ Saved to: {output_file}")
-        
-        # Save summary
-        summary_file = output_path / "generation_summary.json"
-        with open(summary_file, 'w') as f:
-            summary = [
-                {
-                    'functionality': functionalities[i],
-                    'sources': r['sources'],
-                    'lines_of_code': len(r['generated_code'].splitlines())
-                }
-                for i, r in enumerate(results)
-            ]
-            json.dump(summary, f, indent=2)
-        
-        print(f"\n{'='*80}")
-        print(f"✓ Batch generation complete!")
-        print(f"  Generated {len(results)} files")
-        print(f"  Output directory: {output_path}")
-        print(f"  Summary: {summary_file}")
-        print(f"{'='*80}\n")
-        
-        return results
-    
-    def _get_file_extension(self, language: str) -> str:
-        """Get file extension for language"""
-        extensions = {
-            'python': '.py',
-            'tal': '.tal',
-            'java': '.java',
-            'c': '.c',
-            'cpp': '.cpp',
-            'javascript': '.js',
-            'typescript': '.ts',
-            'go': '.go',
-            'rust': '.rs',
-            'sql': '.sql'
-        }
-        return extensions.get(language.lower(), '.txt')
+        return formatted
 
 
 # ============================================================================
 # Example Usage
 # ============================================================================
 
-def example_single_function():
-    """Example: Generate a single function"""
+def example_basic_usage():
+    """Example 1: Basic usage"""
     
-    pipeline = CodeGenerationPipeline(
+    print("="*70)
+    print("EXAMPLE 1: Basic Extended Context Extraction")
+    print("="*70)
+    
+    # Initialize
+    extractor = ExtendedContextExtractor(
         universal_index="./universal_index",
-        lsi_index="./hybrid_index",
-        universal_weight=0.6,
-        lsi_weight=0.4
+        hybrid_index="./hybrid_index"
     )
     
-    result = pipeline.generate_code(
-        functionality="payment drawdown processing with ACE repair",
-        language="tal",
-        requirements="Must validate OFAC screening before processing",
-        context_tokens=4000,
+    # Extract and format
+    context = extractor.extract_and_format(
+        query="payment drawdown processing",
+        max_matches=5,
+        lines_before=200,
+        lines_after=200,
         verbose=True
     )
     
-    print("\n" + "="*80)
-    print("GENERATED CODE:")
-    print("="*80)
-    print(result['generated_code'])
-    print("\n" + "="*80)
-    print("EXPLANATION:")
-    print("="*80)
-    print(result['explanation'])
-    print("\n" + "="*80)
-    print("SOURCES USED:")
-    print("="*80)
-    for source in result['sources']:
-        print(f"  - {source}")
-
-
-def example_batch_generation():
-    """Example: Generate multiple related functions"""
+    # Print result
+    print("\n" + "="*70)
+    print("FORMATTED CONTEXT (Ready for LLM)")
+    print("="*70)
+    print(context)
     
-    pipeline = CodeGenerationPipeline(
-        universal_index="./universal_index",
-        lsi_index="./hybrid_index"
+    # Save to file
+    with open("llm_context.txt", 'w') as f:
+        f.write(context)
+    
+    print("\n✓ Context saved to llm_context.txt")
+    print(f"  Length: {len(context)} chars")
+
+
+def example_send_to_llm():
+    """Example 2: Extract and send to LLM"""
+    
+    print("="*70)
+    print("EXAMPLE 2: Extract Context and Send to LLM")
+    print("="*70)
+    
+    # Initialize
+    extractor = ExtendedContextExtractor()
+    
+    # Extract context
+    context = extractor.extract_and_format(
+        query="OFAC screening validation",
+        max_matches=3,
+        lines_before=100,
+        lines_after=100
     )
     
-    functionalities = [
-        "payment drawdown initiation",
-        "OFAC party screening validation",
-        "ACE repair code determination",
-        "wire transfer cutoff checking",
-        "credit party validation",
-        "ISO 20022 message formatting"
-    ]
+    # Build LLM prompt
+    llm_prompt = f"""
+Based on this codebase context:
+
+{context}
+
+Task: Implement a new function that performs OFAC screening validation with the following requirements:
+1. Use existing patterns from the codebase
+2. Handle both party and transaction screening
+3. Include error handling
+4. Add logging for audit trail
+5. Follow the coding style shown in the examples
+
+Generate the complete implementation in TAL.
+"""
     
-    results = pipeline.batch_generate(
-        functionalities=functionalities,
-        language="python",
-        output_dir="./generated_payment_processing"
-    )
+    print("\n" + "="*70)
+    print("LLM PROMPT (Ready to Send)")
+    print("="*70)
+    print(llm_prompt[:500] + "...")
     
-    print(f"\n✓ Generated {len(results)} functions")
+    # Send to your LLM
+    # response = your_llm.generate(llm_prompt)
+    # print(response)
 
 
-def example_with_context_analysis():
-    """Example: Analyze search results before generating"""
+def example_filter_by_file_type():
+    """Example 3: Extract only from code files"""
     
-    pipeline = CodeGenerationPipeline(
-        universal_index="./universal_index",
-        lsi_index="./hybrid_index"
-    )
+    print("="*70)
+    print("EXAMPLE 3: Extract from Code Files Only")
+    print("="*70)
     
-    # Step 1: Search first
-    print("Step 1: Searching codebase...")
-    results = pipeline.search.search(
-        query="drawdown processing",
-        top_k=20,
+    extractor = ExtendedContextExtractor()
+    
+    # Extract only from code
+    context = extractor.extract_and_format(
+        query="wire transfer validation",
+        max_matches=10,
+        lines_before=150,
+        lines_after=150,
+        file_type_filter="code",  # Only code files
         verbose=True
     )
     
-    # Step 2: Analyze what was found
-    print("\n" + "="*80)
-    print("SEARCH ANALYSIS:")
-    print("="*80)
-    
-    print("\nTop 5 Results:")
-    for i, result in enumerate(results[:5], 1):
-        print(f"\n[{i}] {result.source_file} (score: {result.score:.3f})")
-        print(f"    Type: {result.file_type}")
-        if result.capabilities:
-            print(f"    Capabilities: {', '.join(result.capabilities[:2])}")
-        if result.keywords:
-            print(f"    Keywords: {', '.join(result.keywords[:5])}")
-        print(f"    Snippet: {result.text[:150]}...")
-    
-    # Step 3: Generate if satisfied with results
-    decision = input("\nProceed with code generation? (y/n): ")
-    
-    if decision.lower() == 'y':
-        compressed = pipeline.search.get_compressed_context(
-            results,
-            query="drawdown processing",
-            max_tokens=4000
-        )
-        
-        print("\n" + "="*80)
-        print("COMPRESSED CONTEXT (for LLM):")
-        print("="*80)
-        print(compressed)
-        
-        # Now generate
-        result = pipeline.generate_code(
-            functionality="drawdown processing",
-            language="python",
-            verbose=True
-        )
+    print(f"\n✓ Context length: {len(context)} chars")
 
 
-def example_compare_indexers():
-    """Example: Compare results from both indexers"""
+def example_custom_formatting():
+    """Example 4: Custom formatting"""
     
-    pipeline = CodeGenerationPipeline(
-        universal_index="./universal_index",
-        lsi_index="./hybrid_index"
+    print("="*70)
+    print("EXAMPLE 4: Custom Context Formatting")
+    print("="*70)
+    
+    extractor = ExtendedContextExtractor()
+    
+    # Extract contexts
+    contexts = extractor.extract_contexts(
+        query="ACE repair codes",
+        max_matches=5,
+        lines_before=100,
+        lines_after=100,
+        verbose=True
     )
     
-    query = "OFAC screening validation"
+    # Custom formatting
+    print("\n" + "="*70)
+    print("CUSTOM FORMAT")
+    print("="*70)
     
-    print(f"Query: {query}\n")
-    
-    # Get results from both
-    results = pipeline.search.search(query, top_k=10, verbose=False)
-    
-    # Separate by source
-    universal_results = [r for r in results if r.source_indexer == 'universal']
-    lsi_results = [r for r in results if r.source_indexer == 'lsi']
-    
-    print("="*80)
-    print("RESULTS COMPARISON:")
-    print("="*80)
-    
-    print(f"\nFrom Universal Indexer (PDFs/Docs): {len(universal_results)}")
-    for r in universal_results[:3]:
-        print(f"  - {r.source_file} (score: {r.score:.3f})")
-    
-    print(f"\nFrom LSI Indexer (Code): {len(lsi_results)}")
-    for r in lsi_results[:3]:
-        print(f"  - {r.source_file} (score: {r.score:.3f})")
-    
-    print(f"\nTotal unique results: {len(results)}")
-    print(f"Coverage: {len(set(r.source_file for r in results))} unique files")
+    for i, ctx in enumerate(contexts, 1):
+        print(f"\n[{i}] {ctx.source_file}")
+        print(f"    Lines: {ctx.match_line_start}-{ctx.match_line_end}")
+        print(f"    Score: {ctx.score:.3f}")
+        print(f"    Context: {len(ctx.lines_before)} lines before, {len(ctx.lines_after)} lines after")
+        print(f"    Snippet: {ctx.match_text[:100]}...")
 
-
-# ============================================================================
-# Main Entry Point
-# ============================================================================
 
 if __name__ == "__main__":
-    import argparse
+    import sys
     
-    parser = argparse.ArgumentParser(
-        description="Code Generation Pipeline using Unified Search"
-    )
-    parser.add_argument(
-        "--universal-index",
-        default="./universal_index",
-        help="Path to universal file index"
-    )
-    parser.add_argument(
-        "--lsi-index",
-        default="./hybrid_index",
-        help="Path to LSI/hybrid index"
-    )
-    parser.add_argument(
-        "--functionality",
-        required=True,
-        help="What to implement (e.g., 'payment drawdown processing')"
-    )
-    parser.add_argument(
-        "--language",
-        default="python",
-        choices=['python', 'tal', 'java', 'c', 'cpp', 'sql'],
-        help="Target programming language"
-    )
-    parser.add_argument(
-        "--requirements",
-        default="",
-        help="Additional requirements or constraints"
-    )
-    parser.add_argument(
-        "--output",
-        help="Output file for generated code"
-    )
-    parser.add_argument(
-        "--batch",
-        nargs='+',
-        help="List of functionalities for batch generation"
-    )
-    
-    args = parser.parse_args()
-    
-    # Initialize pipeline
-    pipeline = CodeGenerationPipeline(
-        universal_index=args.universal_index,
-        lsi_index=args.lsi_index
-    )
-    
-    if args.batch:
-        # Batch generation
-        results = pipeline.batch_generate(
-            functionalities=args.batch,
-            language=args.language,
-            output_dir="./generated_code"
-        )
-    else:
-        # Single function generation
-        result = pipeline.generate_code(
-            functionality=args.functionality,
-            language=args.language,
-            requirements=args.requirements,
-            verbose=True
-        )
+    if len(sys.argv) > 1 and sys.argv[1] == "--example":
+        example_num = int(sys.argv[2]) if len(sys.argv) > 2 else 1
         
-        # Save if output specified
-        if args.output:
-            with open(args.output, 'w') as f:
-                f.write(result['generated_code'])
-            print(f"\n✓ Saved to: {args.output}")
+        examples = {
+            1: example_basic_usage,
+            2: example_send_to_llm,
+            3: example_filter_by_file_type,
+            4: example_custom_formatting
+        }
+        
+        if example_num in examples:
+            examples[example_num]()
         else:
-            print("\n" + "="*80)
-            print("GENERATED CODE:")
-            print("="*80)
-            print(result['generated_code'])
-
-
-print("\n" + "="*80)
-print("Code Generation Pipeline Ready!")
-print("="*80)
-print("\nUsage examples:")
-print("  python integration_example.py --functionality 'drawdown processing' --language tal")
-print("  python integration_example.py --batch 'payment init' 'ofac screen' --language python")
-print("\nOr use in Python:")
-print("  from integration_example import CodeGenerationPipeline")
-print("  pipeline = CodeGenerationPipeline(...)")
-print("  result = pipeline.generate_code('drawdown processing', language='tal')")
+            print(f"Example {example_num} not found! Available: 1-4")
+    else:
+        # Run basic example
+        example_basic_usage()
