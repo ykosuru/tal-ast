@@ -694,16 +694,46 @@ class UniversalFileIndexer:
         self.filetype_counts = Counter()
         self.total_chunks = 0
     
-    def scan_files(self) -> List[Path]:
-        """Scan folder for supported files"""
+    def scan_files(self, verbose: bool = False) -> List[Path]:
+        """Scan folder for supported files (case-insensitive)"""
         print(f"Scanning: {self.files_folder}")
         
         files = []
-        for ext in self.file_extensions:
-            found = list(self.files_folder.glob(f"**/*{ext}"))
-            files.extend(found)
+        seen = set()  # Avoid duplicates
         
-        print(f"Found {len(files)} files")
+        # Get all files recursively
+        all_files = list(self.files_folder.glob("**/*"))
+        
+        if verbose:
+            print(f"\nTotal files found: {len([f for f in all_files if f.is_file()])}")
+            print(f"Looking for extensions: {', '.join(self.file_extensions[:20])}...")
+        
+        # Filter by extension (case-insensitive)
+        extensions_lower = [ext.lower() for ext in self.file_extensions]
+        
+        for file_path in all_files:
+            if file_path.is_file():
+                file_ext_lower = file_path.suffix.lower()
+                if file_ext_lower in extensions_lower:
+                    # Avoid duplicates
+                    if str(file_path) not in seen:
+                        files.append(file_path)
+                        seen.add(str(file_path))
+                        if verbose:
+                            print(f"  ✓ {file_path.name}")
+                elif verbose and file_path.suffix:
+                    print(f"  ✗ {file_path.name} (extension: {file_path.suffix})")
+        
+        # Print breakdown by extension
+        ext_counts = {}
+        for f in files:
+            ext = f.suffix.lower()
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+        
+        print(f"\nFound {len(files)} matching files:")
+        for ext, count in sorted(ext_counts.items()):
+            print(f"  {ext}: {count} files")
+        
         return files
     
     def chunk_text(self, text: str, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -731,9 +761,9 @@ class UniversalFileIndexer:
         
         return chunks
     
-    def index_files(self):
+    def index_files(self, verbose_scan: bool = False):
         """Main indexing pipeline"""
-        files = self.scan_files()
+        files = self.scan_files(verbose=verbose_scan)
         
         if not files:
             print("No files found!")
@@ -1009,7 +1039,7 @@ def main():
     parser.add_argument("--top-k", type=int, default=10, help="Number of results")
     parser.add_argument("--extensions", nargs='+', help="File extensions to index")
     parser.add_argument("--disable-stemming", action="store_true")
-    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed file scanning")
     
     args = parser.parse_args()
     
@@ -1020,7 +1050,7 @@ def main():
             file_extensions=args.extensions,
             use_stemming=not args.disable_stemming
         )
-        indexer.index_files()
+        indexer.index_files(verbose_scan=args.verbose)
         
     elif args.action == "search":
         if not args.query:
