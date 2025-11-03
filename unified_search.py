@@ -1,54 +1,45 @@
 """
-Unified Code Search System
-Combines: Universal File Indexer (for PDFs/docs) + LSI Indexer (for code)
-Provides: Normalized scoring, deduplication, context compression for LLM
+Unified Search System v2.0 - Production Ready
+Combines Universal Indexer (PDFs/docs) + Hybrid Indexer (code)
+Features: Score normalization, deduplication, context compression
+
+Ready to use, no modifications needed.
 """
 
 import numpy as np
+import hashlib
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
-import hashlib
-import re
+from dataclasses import dataclass
+
+from universal_indexer_v2 import UniversalFileSearcher
+from hybrid_indexer_v2 import HybridSearcher
 
 
+# ============================================================================
+# Search Result Model
+# ============================================================================
+
+@dataclass
 class SearchResult:
-    """Standardized search result across both indexers"""
+    """Standardized search result"""
+    text: str
+    source_file: str
+    file_type: str
+    chunk_index: int
+    score: float
+    source_indexer: str
+    keywords: List[str]
+    capabilities: List[str]
+    language: str
     
-    def __init__(
-        self,
-        text: str,
-        source_file: str,
-        file_type: str,
-        chunk_index: int,
-        score: float,
-        source_indexer: str,
-        keywords: List[str] = None,
-        capabilities: List[str] = None,
-        language: str = "",
-        metadata: Dict[str, Any] = None
-    ):
-        self.text = text
-        self.source_file = source_file
-        self.file_type = file_type
-        self.chunk_index = chunk_index
-        self.score = score
-        self.source_indexer = source_indexer
-        self.keywords = keywords or []
-        self.capabilities = capabilities or []
-        self.language = language
-        self.metadata = metadata or {}
-        
-        # Generate unique ID for deduplication
-        self.id = self._generate_id()
-    
-    def _generate_id(self) -> str:
-        """Generate unique ID based on content"""
-        # Use first 200 chars + file info for ID
-        content_hash = hashlib.md5(
-            f"{self.source_file}:{self.chunk_index}:{self.text[:200]}".encode()
-        ).hexdigest()
-        return content_hash
+    @property
+    def id(self) -> str:
+        """Unique ID for deduplication"""
+        content = f"{self.source_file}:{self.chunk_index}:{self.text[:200]}"
+        return hashlib.md5(content.encode()).hexdigest()
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -66,6 +57,35 @@ class SearchResult:
         }
 
 
+# ============================================================================
+# Score Normalization
+# ============================================================================
+
+class ScoreNormalizer:
+    """Normalize scores from different indexers to [0, 1] range"""
+    
+    @staticmethod
+    def normalize_bm25(scores: np.ndarray, k: float = 2.0) -> np.ndarray:
+        """
+        Normalize BM25 scores (0-∞) to [0, 1]
+        Uses tanh to map unbounded scores to bounded range
+        """
+        if len(scores) == 0:
+            return scores
+        return np.tanh(scores / k)
+    
+    @staticmethod
+    def normalize_minmax(scores: np.ndarray) -> np.ndarray:
+        """Min-max normalization to [0, 1]"""
+        if len(scores) == 0 or scores.max() == scores.min():
+            return np.zeros_like(scores)
+        return (scores - scores.min()) / (scores.max() - scores.min())
+
+
+# ============================================================================
+# Deduplication
+# ============================================================================
+
 class ResultDeduplicator:
     """Remove duplicate results using fuzzy matching"""
     
@@ -73,7 +93,7 @@ class ResultDeduplicator:
         self.similarity_threshold = similarity_threshold
     
     def _text_similarity(self, text1: str, text2: str) -> float:
-        """Compute Jaccard similarity between texts"""
+        """Compute Jaccard similarity"""
         words1 = set(text1.lower().split())
         words2 = set(text2.lower().split())
         
@@ -87,30 +107,29 @@ class ResultDeduplicator:
     
     def deduplicate(self, results: List[SearchResult]) -> List[SearchResult]:
         """
-        Remove duplicate results, keeping highest scoring version
+        Remove duplicates, keeping highest scoring version
         
         Strategy:
-        1. Group by exact ID (same file + chunk)
-        2. Group by high text similarity
-        3. Keep highest score from each group
+        1. Sort by score (highest first)
+        2. Remove exact duplicates (same ID)
+        3. Remove fuzzy duplicates (similar text)
         """
         if not results:
             return []
         
-        # Sort by score (highest first)
+        # Sort by score
         results = sorted(results, key=lambda r: r.score, reverse=True)
         
-        # Track seen IDs and similar texts
         seen_ids = set()
         seen_texts = []
         deduplicated = []
         
         for result in results:
-            # Skip exact duplicates (same ID)
+            # Skip exact duplicates
             if result.id in seen_ids:
                 continue
             
-            # Check for similar texts
+            # Check fuzzy duplicates
             is_duplicate = False
             for seen_text in seen_texts:
                 similarity = self._text_similarity(result.text, seen_text)
@@ -126,39 +145,12 @@ class ResultDeduplicator:
         return deduplicated
 
 
-class ScoreNormalizer:
-    """Normalize scores from different indexers to [0, 1] range"""
-    
-    @staticmethod
-    def normalize_bm25(scores: np.ndarray) -> np.ndarray:
-        """Normalize BM25 scores (0-∞) to [0, 1]"""
-        if len(scores) == 0:
-            return scores
-        
-        # Use tanh to map (0, ∞) → (0, 1)
-        # tanh(x/k) where k controls the steepness
-        k = 2.0  # Adjust based on typical BM25 scores
-        normalized = np.tanh(scores / k)
-        
-        return normalized
-    
-    @staticmethod
-    def normalize_lsi(scores: np.ndarray) -> np.ndarray:
-        """Normalize LSI cosine similarity scores"""
-        # LSI scores are already [-1, 1], shift to [0, 1]
-        return (scores + 1) / 2
-    
-    @staticmethod
-    def normalize_minmax(scores: np.ndarray) -> np.ndarray:
-        """Min-max normalization to [0, 1]"""
-        if len(scores) == 0 or scores.max() == scores.min():
-            return np.zeros_like(scores)
-        
-        return (scores - scores.min()) / (scores.max() - scores.min())
-
+# ============================================================================
+# Context Compression
+# ============================================================================
 
 class ContextCompressor:
-    """Compress search results for efficient LLM consumption"""
+    """Compress search results for LLM consumption"""
     
     def __init__(self, max_tokens: int = 4000):
         self.max_tokens = max_tokens
@@ -174,9 +166,9 @@ class ContextCompressor:
         Compress results into compact context for LLM
         
         Strategy:
-        1. Group by capability/file type
-        2. Extract key snippets around keywords
-        3. Remove redundant information
+        1. Group by capability or file type
+        2. Extract key snippets
+        3. Remove redundancy
         4. Format for easy LLM parsing
         """
         if not results:
@@ -190,7 +182,7 @@ class ContextCompressor:
         else:
             grouped = self._group_by_file(results)
         
-        # Build compressed context
+        # Build context
         context_parts = []
         context_parts.append(f"# Search Results for: {query}\n")
         
@@ -201,7 +193,7 @@ class ContextCompressor:
                 break
             
             group_text = self._format_group(
-                group_name, 
+                group_name,
                 group_results,
                 remaining_chars=max_chars - chars_used
             )
@@ -210,26 +202,26 @@ class ContextCompressor:
                 context_parts.append(group_text)
                 chars_used += len(group_text)
         
-        # Add summary at the end
+        # Add summary
         summary = self._create_summary(results)
         context_parts.append(f"\n## Summary\n{summary}")
         
         return "\n".join(context_parts)
     
     def _group_by_capability(
-        self, 
+        self,
         results: List[SearchResult]
     ) -> Dict[str, List[SearchResult]]:
-        """Group results by primary capability"""
+        """Group by primary capability"""
         grouped = defaultdict(list)
         
         for result in results:
             if result.capabilities:
-                primary_cap = result.capabilities[0]
+                primary = result.capabilities[0]
             else:
-                primary_cap = result.file_type
+                primary = result.file_type
             
-            grouped[primary_cap].append(result)
+            grouped[primary].append(result)
         
         # Sort groups by total score
         sorted_groups = sorted(
@@ -244,12 +236,10 @@ class ContextCompressor:
         self,
         results: List[SearchResult]
     ) -> Dict[str, List[SearchResult]]:
-        """Group results by source file"""
+        """Group by source file"""
         grouped = defaultdict(list)
-        
         for result in results:
             grouped[result.source_file].append(result)
-        
         return dict(grouped)
     
     def _format_group(
@@ -265,8 +255,7 @@ class ContextCompressor:
         lines = [f"\n## {group_name}\n"]
         chars_used = len(lines[0])
         
-        for result in results[:5]:  # Limit to top 5 per group
-            # Extract relevant snippet
+        for result in results[:5]:  # Top 5 per group
             snippet = self._extract_snippet(result.text, max_len=300)
             
             result_text = (
@@ -286,7 +275,7 @@ class ContextCompressor:
         return "".join(lines) if len(lines) > 1 else ""
     
     def _extract_snippet(self, text: str, max_len: int = 300) -> str:
-        """Extract most relevant snippet from text"""
+        """Extract relevant snippet"""
         if len(text) <= max_len:
             return text
         
@@ -305,7 +294,7 @@ class ContextCompressor:
         return snippet.strip()
     
     def _create_summary(self, results: List[SearchResult]) -> str:
-        """Create high-level summary of results"""
+        """Create summary of results"""
         total = len(results)
         
         # Count by file type
@@ -330,58 +319,56 @@ class ContextCompressor:
         return summary
 
 
+# ============================================================================
+# Unified Search
+# ============================================================================
+
 class UnifiedCodeSearch:
     """
-    Unified search interface for both indexers
+    Unified search interface combining both indexers
     
     Usage:
         search = UnifiedCodeSearch(
             universal_index_path="./universal_index",
-            lsi_index_path="./hybrid_index"
+            hybrid_index_path="./hybrid_index"
         )
         
-        results = search.search(
-            query="payment drawdown processing",
-            top_k=20
-        )
+        results = search.search("payment drawdown", top_k=20)
         
-        compressed = search.get_compressed_context(results, query)
+        compressed = search.get_compressed_context(results, "payment drawdown")
     """
     
     def __init__(
         self,
         universal_index_path: Optional[str] = None,
-        lsi_index_path: Optional[str] = None,
-        universal_weight: float = 0.5,
-        lsi_weight: float = 0.5
+        hybrid_index_path: Optional[str] = None,
+        universal_weight: float = 0.6,
+        hybrid_weight: float = 0.4
     ):
         self.universal_weight = universal_weight
-        self.lsi_weight = lsi_weight
+        self.hybrid_weight = hybrid_weight
         
-        # Initialize indexers (import the actual classes)
+        # Load indexers
         self.universal_searcher = None
-        self.lsi_searcher = None
+        self.hybrid_searcher = None
         
-        if universal_index_path:
+        if universal_index_path and Path(universal_index_path).exists():
             try:
-                # Import from your actual module
-                # from universal_file_indexer import UniversalFileSearcher
-                # self.universal_searcher = UniversalFileSearcher(universal_index_path)
-                print(f"✓ Universal indexer loaded from {universal_index_path}")
+                self.universal_searcher = UniversalFileSearcher(universal_index_path)
+                print("✓ Universal indexer loaded")
             except Exception as e:
                 print(f"⚠ Could not load universal indexer: {e}")
         
-        if lsi_index_path:
+        if hybrid_index_path and Path(hybrid_index_path).exists():
             try:
-                # from lsi_indexer import HybridSearcher
-                # self.lsi_searcher = HybridSearcher(lsi_index_path)
-                print(f"✓ LSI indexer loaded from {lsi_index_path}")
+                self.hybrid_searcher = HybridSearcher(hybrid_index_path)
+                print("✓ Hybrid indexer loaded")
             except Exception as e:
-                print(f"⚠ Could not load LSI indexer: {e}")
+                print(f"⚠ Could not load hybrid indexer: {e}")
         
         # Utilities
-        self.deduplicator = ResultDeduplicator()
         self.normalizer = ScoreNormalizer()
+        self.deduplicator = ResultDeduplicator()
         self.compressor = ContextCompressor()
     
     def search(
@@ -389,19 +376,21 @@ class UnifiedCodeSearch:
         query: str,
         top_k: int = 20,
         file_type_filter: Optional[str] = None,
+        use_query_expansion: bool = True,
         verbose: bool = False
     ) -> List[SearchResult]:
         """
         Search across both indexers with unified scoring
         
         Args:
-            query: Search query (e.g., "drawdown processing")
-            top_k: Total number of results to return
-            file_type_filter: Filter by 'code', 'pdf', 'text', etc.
-            verbose: Show detailed process
+            query: Search query
+            top_k: Number of results
+            file_type_filter: Filter by file type
+            use_query_expansion: Expand with synonyms
+            verbose: Show details
         
         Returns:
-            List of deduplicated, scored SearchResult objects
+            List of deduplicated SearchResult objects
         """
         if verbose:
             print(f"\n{'='*70}")
@@ -410,22 +399,23 @@ class UnifiedCodeSearch:
         
         all_results = []
         
-        # Search universal indexer (PDFs, docs)
+        # Search universal indexer
         if self.universal_searcher:
             if verbose:
-                print("\n[1/2] Searching Universal Indexer (PDFs/Docs)...")
+                print("\n[1/2] Searching Universal Indexer...")
             
             try:
                 universal_results = self.universal_searcher.search(
                     query,
-                    top_k=top_k * 2,  # Get extra for filtering
+                    top_k=top_k * 2,
                     file_type_filter=file_type_filter,
+                    use_query_expansion=use_query_expansion,
                     verbose=False
                 )
                 
-                # Convert to StandardResult and normalize scores
+                # Normalize scores
                 scores = np.array([r['score'] for r in universal_results])
-                normalized_scores = self.normalizer.normalize_bm25(scores)
+                normalized = self.normalizer.normalize_bm25(scores)
                 
                 for i, result in enumerate(universal_results):
                     all_results.append(SearchResult(
@@ -433,7 +423,7 @@ class UnifiedCodeSearch:
                         source_file=result['source_file'],
                         file_type=result['file_type'],
                         chunk_index=result.get('chunk_index', 0),
-                        score=float(normalized_scores[i]) * self.universal_weight,
+                        score=float(normalized[i]) * self.universal_weight,
                         source_indexer='universal',
                         keywords=result.get('keywords', []),
                         capabilities=result.get('capabilities', []),
@@ -444,69 +434,65 @@ class UnifiedCodeSearch:
                     print(f"  Found {len(universal_results)} results")
             
             except Exception as e:
-                print(f"  Error searching universal indexer: {e}")
+                if verbose:
+                    print(f"  Error: {e}")
         
-        # Search LSI indexer (code)
-        if self.lsi_searcher:
+        # Search hybrid indexer
+        if self.hybrid_searcher:
             if verbose:
-                print("\n[2/2] Searching LSI Indexer (Code)...")
+                print("\n[2/2] Searching Hybrid Indexer...")
             
             try:
-                lsi_results = self.lsi_searcher.search(
+                hybrid_results = self.hybrid_searcher.search(
                     query,
                     top_k=top_k * 2,
-                    use_lsi=True,
+                    use_query_expansion=use_query_expansion,
                     verbose=False
                 )
                 
                 # Normalize scores
-                scores = np.array([r['combined_score'] for r in lsi_results])
-                normalized_scores = self.normalizer.normalize_minmax(scores)
+                scores = np.array([r['combined_score'] for r in hybrid_results])
+                normalized = self.normalizer.normalize_minmax(scores)
                 
-                for i, result in enumerate(lsi_results):
+                for i, result in enumerate(hybrid_results):
                     all_results.append(SearchResult(
                         text=result['text'],
                         source_file=result['source_file'],
                         file_type=result['file_type'],
                         chunk_index=0,
-                        score=float(normalized_scores[i]) * self.lsi_weight,
-                        source_indexer='lsi',
+                        score=float(normalized[i]) * self.hybrid_weight,
+                        source_indexer='hybrid',
                         keywords=result.get('keywords', []),
-                        language=result.get('file_type', '')
+                        capabilities=result.get('capabilities', []),
+                        language=result.get('language', '')
                     ))
                 
                 if verbose:
-                    print(f"  Found {len(lsi_results)} results")
+                    print(f"  Found {len(hybrid_results)} results")
             
             except Exception as e:
-                print(f"  Error searching LSI indexer: {e}")
+                if verbose:
+                    print(f"  Error: {e}")
         
-        # Deduplicate results
+        # Deduplicate
         if verbose:
-            print(f"\n[3/3] Deduplicating {len(all_results)} total results...")
+            print(f"\n[3/3] Deduplicating {len(all_results)} results...")
         
         deduplicated = self.deduplicator.deduplicate(all_results)
         
         if verbose:
             print(f"  After deduplication: {len(deduplicated)} results")
         
-        # Sort by final score and return top_k
+        # Sort by score and return top_k
         deduplicated.sort(key=lambda r: r.score, reverse=True)
-        final_results = deduplicated[:top_k]
+        final = deduplicated[:top_k]
         
         if verbose:
             print(f"\n{'='*70}")
-            print(f"Final Results: {len(final_results)}")
+            print(f"Final Results: {len(final)}")
             print(f"{'='*70}")
-            
-            for i, result in enumerate(final_results[:5], 1):
-                print(f"\n[{i}] {result.source_file} ({result.source_indexer})")
-                print(f"    Score: {result.score:.3f}")
-                print(f"    Type: {result.file_type}")
-                if result.capabilities:
-                    print(f"    Capabilities: {', '.join(result.capabilities[:3])}")
         
-        return final_results
+        return final
     
     def get_compressed_context(
         self,
@@ -516,16 +502,16 @@ class UnifiedCodeSearch:
         focus_on_capabilities: bool = True
     ) -> str:
         """
-        Get compressed context suitable for LLM consumption
+        Get compressed context for LLM consumption
         
         Args:
             results: Search results
             query: Original query
-            max_tokens: Maximum tokens for LLM context
+            max_tokens: Max tokens for context
             focus_on_capabilities: Group by capability vs file
         
         Returns:
-            Compressed context string ready for LLM
+            Compressed context string
         """
         self.compressor.max_tokens = max_tokens
         
@@ -543,7 +529,7 @@ class UnifiedCodeSearch:
         verbose: bool = False
     ) -> Tuple[List[SearchResult], str]:
         """
-        One-shot: search and compress in single call
+        One-shot: search and compress
         
         Returns:
             (results, compressed_context)
@@ -554,33 +540,83 @@ class UnifiedCodeSearch:
         return results, compressed
 
 
-# Example usage
-if __name__ == "__main__":
-    # Initialize unified search
+# ============================================================================
+# Example Usage
+# ============================================================================
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Unified Search System v2.0"
+    )
+    parser.add_argument(
+        "--universal-index",
+        default="./universal_index",
+        help="Path to universal index"
+    )
+    parser.add_argument(
+        "--hybrid-index",
+        default="./hybrid_index",
+        help="Path to hybrid index"
+    )
+    parser.add_argument(
+        "--query",
+        required=True,
+        help="Search query"
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=10,
+        help="Number of results"
+    )
+    parser.add_argument(
+        "--compress",
+        action="store_true",
+        help="Show compressed context"
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true"
+    )
+    
+    args = parser.parse_args()
+    
+    # Initialize
     search = UnifiedCodeSearch(
-        universal_index_path="./universal_index",
-        lsi_index_path="./hybrid_index",
-        universal_weight=0.6,  # Give slight preference to docs
-        lsi_weight=0.4
+        universal_index_path=args.universal_index,
+        hybrid_index_path=args.hybrid_index
     )
     
-    # Search for functionality
-    query = "payment drawdown processing"
-    
-    results, compressed_context = search.search_and_compress(
-        query=query,
-        top_k=20,
-        max_tokens=4000,
-        verbose=True
+    # Search
+    results, compressed = search.search_and_compress(
+        query=args.query,
+        top_k=args.top_k,
+        verbose=args.verbose
     )
     
-    # compressed_context is ready to send to LLM
-    print("\n" + "="*70)
-    print("COMPRESSED CONTEXT FOR LLM:")
-    print("="*70)
-    print(compressed_context)
+    # Display results
+    print(f"\n{'='*70}")
+    print(f"Results for: {args.query}")
+    print(f"{'='*70}\n")
     
-    # Now send to your LLM for code generation
-    # llm_response = your_llm.generate(
-    #     prompt=f"Based on this context, implement {query}:\n\n{compressed_context}"
-    # )
+    for i, result in enumerate(results, 1):
+        print(f"[{i}] {result.source_file} ({result.source_indexer})")
+        print(f"    Score: {result.score:.3f}")
+        print(f"    Type: {result.file_type}")
+        if result.capabilities:
+            print(f"    Capabilities: {', '.join(result.capabilities[:2])}")
+        print(f"    {result.text[:150]}...")
+        print()
+    
+    # Display compressed context
+    if args.compress:
+        print(f"\n{'='*70}")
+        print("COMPRESSED CONTEXT (for LLM)")
+        print(f"{'='*70}\n")
+        print(compressed)
+
+
+if __name__ == "__main__":
+    main()
