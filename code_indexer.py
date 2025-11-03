@@ -18,18 +18,74 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import svds
 from rank_bm25 import BM25Okapi
 
+# File type definitions (must be defined before imports)
+SUPPORTED_EXTENSIONS = {
+    'pdf': ['.pdf'],
+    'code': [
+        '.py', '.c', '.cpp', '.h', '.hpp', '.cc', '.cxx',
+        '.java', '.scala', '.kt', '.groovy',
+        '.js', '.ts', '.jsx', '.tsx',
+        '.go', '.rs', '.swift',
+        '.tal', '.cbl', '.cobol', '.cob',
+        '.sql', '.pl', '.pm',
+        '.rb', '.php', '.sh', '.bash',
+        '.cs', '.vb', '.fs'
+    ],
+    'text': ['.txt', '.md', '.rst', '.log', '.text'],
+    'config': ['.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg'],
+    'markup': ['.html', '.htm', '.xhtml', '.css', '.scss']
+}
+
+ALL_EXTENSIONS = set()
+for extensions in SUPPORTED_EXTENSIONS.values():
+    ALL_EXTENSIONS.update(extensions)
+
 # Import from universal indexer (shared components)
-# If running standalone, these will be defined here too
+# If running standalone, file extensions already defined above
 try:
     from universal_indexer_v2 import (
         TextStemmer, DomainQueryExpander, BusinessCapabilityTaxonomy,
-        CapabilityMapper, UniversalFileExtractor, KeywordExtractor,
-        SUPPORTED_EXTENSIONS, ALL_EXTENSIONS
+        CapabilityMapper, UniversalFileExtractor, KeywordExtractor
     )
     SHARED_IMPORTS = True
 except ImportError:
     SHARED_IMPORTS = False
     print("⚠ Running without shared imports - some features limited")
+    
+    # Simple fallback implementations
+    class TextStemmer:
+        def __init__(self, use_stemming=True):
+            self.use_stemming = False
+        def stem(self, word):
+            return word.lower()
+        def stem_text(self, text):
+            return text.lower()
+    
+    class DomainQueryExpander:
+        def __init__(self, stemmer=None):
+            pass
+        def expand_query(self, query, max_expansions=2):
+            return query
+    
+    class UniversalFileExtractor:
+        def extract(self, file_path):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return {"text": f.read(), "file_type": "text", "language": ""}
+            except:
+                return {"text": "", "file_type": "unknown", "language": ""}
+    
+    class KeywordExtractor:
+        def __init__(self, stemmer=None):
+            pass
+        def extract(self, text, max_keywords=20):
+            return []
+    
+    class CapabilityMapper:
+        def __init__(self, stemmer=None):
+            pass
+        def map_to_capabilities(self, keywords, text):
+            return []
 
 
 # ============================================================================
@@ -295,19 +351,15 @@ class HybridSearchEngine:
             self.file_extensions = list(ALL_EXTENSIONS)
         
         # Components
-        if SHARED_IMPORTS:
-            self.file_extractor = UniversalFileExtractor()
-            self.stemmer = TextStemmer(use_stemming=use_stemming)
-            self.keyword_extractor = KeywordExtractor(stemmer=self.stemmer)
-            self.capability_mapper = CapabilityMapper(stemmer=self.stemmer)
-            self.query_expander = DomainQueryExpander(stemmer=self.stemmer)
-        else:
-            print("⚠ Business capabilities disabled (missing shared imports)")
-            self.file_extractor = None
-            self.stemmer = None
-            self.keyword_extractor = None
-            self.capability_mapper = None
-            self.query_expander = None
+        self.file_extractor = UniversalFileExtractor()
+        self.stemmer = TextStemmer(use_stemming=use_stemming)
+        self.keyword_extractor = KeywordExtractor(stemmer=self.stemmer)
+        self.capability_mapper = CapabilityMapper(stemmer=self.stemmer)
+        self.query_expander = DomainQueryExpander(stemmer=self.stemmer)
+        
+        if not SHARED_IMPORTS:
+            print("⚠ Using fallback implementations (limited functionality)")
+            print("   For full features, ensure universal_indexer_v2.py is in the same directory")
         
         # Storage
         self.metadata_store = []
@@ -316,21 +368,51 @@ class HybridSearchEngine:
         self.lsi = None
         self.lsi_doc_vectors = None
     
-    def scan_files(self) -> List[Path]:
-        """Scan folder for files"""
+    def scan_files(self, verbose: bool = False) -> List[Path]:
+        """Scan folder for files (case-insensitive)"""
         print(f"Scanning: {self.files_folder}")
         
         files = []
-        for ext in self.file_extensions:
-            found = list(self.files_folder.glob(f"**/*{ext}"))
-            files.extend(found)
+        seen = set()  # Avoid duplicates
         
-        print(f"Found {len(files)} files")
+        # Get all files recursively
+        all_files = list(self.files_folder.glob("**/*"))
+        
+        if verbose:
+            print(f"\nTotal files found: {len([f for f in all_files if f.is_file()])}")
+            print(f"Looking for extensions: {', '.join(self.file_extensions)}")
+        
+        # Filter by extension (case-insensitive)
+        extensions_lower = [ext.lower() for ext in self.file_extensions]
+        
+        for file_path in all_files:
+            if file_path.is_file():
+                file_ext_lower = file_path.suffix.lower()
+                if file_ext_lower in extensions_lower:
+                    # Avoid duplicates
+                    if str(file_path) not in seen:
+                        files.append(file_path)
+                        seen.add(str(file_path))
+                        if verbose:
+                            print(f"  ✓ {file_path.name}")
+                elif verbose and file_path.suffix:
+                    print(f"  ✗ {file_path.name} (extension: {file_path.suffix})")
+        
+        # Print breakdown by extension
+        ext_counts = {}
+        for f in files:
+            ext = f.suffix.lower()
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+        
+        print(f"\nFound {len(files)} matching files:")
+        for ext, count in sorted(ext_counts.items()):
+            print(f"  {ext}: {count} files")
+        
         return files
     
-    def index_files(self):
+    def index_files(self, verbose: bool = False):
         """Index all files with BM25 + LSI"""
-        files = self.scan_files()
+        files = self.scan_files(verbose=verbose)
         
         if not files:
             print("No files found!")
@@ -343,15 +425,7 @@ class HybridSearchEngine:
             print(f"[{idx}/{len(files)}] {file_path.name}")
             
             # Extract content
-            if self.file_extractor:
-                content = self.file_extractor.extract(file_path)
-            else:
-                # Simple fallback
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = {"text": f.read(), "file_type": "text"}
-                except:
-                    continue
+            content = self.file_extractor.extract(file_path)
             
             if not content.get("text") or len(content["text"].strip()) < 10:
                 continue
@@ -367,21 +441,15 @@ class HybridSearchEngine:
                     continue
                 
                 # Extract keywords
-                if self.keyword_extractor:
-                    keywords = self.keyword_extractor.extract(chunk_text)
-                    keyword_list = [kw for kw, _ in keywords[:10]]
-                else:
-                    keyword_list = []
+                keywords = self.keyword_extractor.extract(chunk_text)
+                keyword_list = [kw for kw, _ in keywords[:10]]
                 
                 # Map capabilities
-                if self.capability_mapper:
-                    capabilities = self.capability_mapper.map_to_capabilities(
-                        keywords if self.keyword_extractor else [],
-                        chunk_text
-                    )
-                    capability_list = [cap for cap, _ in capabilities[:3]]
-                else:
-                    capability_list = []
+                capabilities = self.capability_mapper.map_to_capabilities(
+                    keywords,
+                    chunk_text
+                )
+                capability_list = [cap for cap, _ in capabilities[:3]]
                 
                 all_chunks.append({
                     "text": chunk_text,
@@ -485,12 +553,8 @@ class HybridSearcher:
         self.use_lsi = self.stats['use_lsi']
         
         # Load components
-        if SHARED_IMPORTS:
-            self.stemmer = TextStemmer(use_stemming=self.use_stemming)
-            self.query_expander = DomainQueryExpander(stemmer=self.stemmer)
-        else:
-            self.stemmer = None
-            self.query_expander = None
+        self.stemmer = TextStemmer(use_stemming=self.use_stemming)
+        self.query_expander = DomainQueryExpander(stemmer=self.stemmer)
         
         # Load data
         with open(self.index_path / "metadata.pkl", 'rb') as f:
@@ -541,14 +605,14 @@ class HybridSearcher:
         processed_query = query.lower()
         
         # Expand
-        if use_query_expansion and self.query_expander:
+        if use_query_expansion:
             expanded = self.query_expander.expand_query(processed_query)
             if verbose and expanded != processed_query:
                 print(f"Expanded: {expanded}")
             processed_query = expanded
         
         # Stem
-        if self.use_stemming and self.stemmer:
+        if self.use_stemming:
             processed_query = self.stemmer.stem_text(processed_query)
         
         query_tokens = processed_query.split()
@@ -627,7 +691,7 @@ def main():
     parser.add_argument("--term", help="Term for similarity search")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--disable-lsi", action="store_true")
-    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed file scanning")
     
     args = parser.parse_args()
     
@@ -637,7 +701,7 @@ def main():
             index_path=args.index_path,
             use_lsi=not args.disable_lsi
         )
-        engine.index_files()
+        engine.index_files(verbose=args.verbose)
         
     elif args.action == "search":
         if not args.query:
