@@ -1,36 +1,25 @@
 """
-Quick Context Extractor v2.3 - Query Validation Edition
+Quick Context Extractor v2.1 - FIXED
 Works with existing indexes
 Handles both text/code AND images!
 
-NEW FEATURES:
-- Query term validation - Ensures results contain actual query terms
-- Iterative search - Keeps fetching until enough valid results found
-- Configurable strictness - Exact, case-insensitive, or fuzzy matching
-
-FEATURES:
-- Full command-line interface
-- Select which index(es) to use (universal, hybrid, both)
+FIXES:
 - Result diversification (mix of PDFs and code)
 - Better source path resolution using metadata
 - Configurable file type filtering
-- Multiple output formats (text, HTML, JSON)
-- **Query term validation and iteration**
 
-Usage:
-    python quick_context_extractor_cli.py "payment validation"
-    python quick_context_extractor_cli.py "OFAC screening" --strict
-    python quick_context_extractor_cli.py "payment flow" --match-mode fuzzy
+Features:
+- Text/Code: Extract N lines before/after (configurable)
+- Images: Extract and embed full image as base64
+- PDFs: Extract images from matched pages
+- Smart result mixing: Get both code and PDFs in results
 """
 
-import argparse
-import sys
-import json
-import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 import pickle
+import re
 import base64
 import io
 
@@ -44,112 +33,11 @@ except ImportError:
     print("⚠ PDF/Image support not available. Install: pip install pdfplumber Pillow")
 
 
-class QueryValidator:
-    """Validates that search results actually contain query terms"""
-    
-    def __init__(self, match_mode: str = 'flexible'):
-        """
-        Args:
-            match_mode: 'exact', 'case-insensitive', 'flexible', or 'fuzzy'
-        """
-        self.match_mode = match_mode
-    
-    def extract_query_terms(self, query: str) -> Set[str]:
-        """Extract meaningful terms from query"""
-        # Remove common stopwords
-        stopwords = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-            'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were',
-            'how', 'what', 'when', 'where', 'why', 'who', 'which',
-            'do', 'does', 'did', 'has', 'have', 'had'
-        }
-        
-        # Extract words
-        words = re.findall(r'\b[\w-]+\b', query.lower())
-        
-        # Filter out stopwords and very short words
-        terms = {w for w in words if len(w) > 2 and w not in stopwords}
-        
-        return terms
-    
-    def validate_result(self, result_text: str, query_terms: Set[str]) -> Tuple[bool, Set[str], Set[str]]:
-        """
-        Validate that result contains query terms
-        
-        Returns:
-            (is_valid, found_terms, missing_terms)
-        """
-        if not query_terms:
-            return True, set(), set()
-        
-        result_lower = result_text.lower()
-        found_terms = set()
-        
-        for term in query_terms:
-            if self.match_mode == 'exact':
-                # Exact match (case-sensitive)
-                if term in result_text:
-                    found_terms.add(term)
-            
-            elif self.match_mode == 'case-insensitive':
-                # Case-insensitive exact match
-                if term.lower() in result_lower:
-                    found_terms.add(term)
-            
-            elif self.match_mode == 'flexible':
-                # Allow partial matches (substring)
-                if term.lower() in result_lower:
-                    found_terms.add(term)
-                else:
-                    # Check if term is part of a compound word
-                    pattern = r'\b\w*' + re.escape(term.lower()) + r'\w*\b'
-                    if re.search(pattern, result_lower):
-                        found_terms.add(term)
-            
-            elif self.match_mode == 'fuzzy':
-                # Most permissive - check for related terms
-                if term.lower() in result_lower:
-                    found_terms.add(term)
-                else:
-                    # Check stemmed versions (simple stemming)
-                    stem = self._simple_stem(term)
-                    pattern = r'\b' + re.escape(stem) + r'\w*\b'
-                    if re.search(pattern, result_lower):
-                        found_terms.add(term)
-        
-        missing_terms = query_terms - found_terms
-        
-        # Result is valid if we found most of the terms
-        if self.match_mode == 'exact':
-            is_valid = len(missing_terms) == 0
-        elif self.match_mode == 'case-insensitive':
-            is_valid = len(missing_terms) == 0
-        elif self.match_mode == 'flexible':
-            # At least 70% of terms must be found
-            is_valid = len(found_terms) >= len(query_terms) * 0.7
-        else:  # fuzzy
-            # At least 50% of terms must be found
-            is_valid = len(found_terms) >= max(1, len(query_terms) * 0.5)
-        
-        return is_valid, found_terms, missing_terms
-    
-    def _simple_stem(self, word: str) -> str:
-        """Simple stemming - removes common suffixes"""
-        suffixes = ['ing', 'ed', 'es', 's', 'tion', 'ment', 'ness', 'ly']
-        word_lower = word.lower()
-        
-        for suffix in suffixes:
-            if word_lower.endswith(suffix) and len(word_lower) > len(suffix) + 2:
-                return word_lower[:-len(suffix)]
-        
-        return word_lower
-
-
 class QuickContextExtractor:
     """
     Extract context without requiring line numbers in index
     Works with existing indexes!
-    NOW WITH QUERY VALIDATION AND ITERATIVE SEARCH!
+    NOW WITH RESULT DIVERSIFICATION!
     """
     
     def __init__(
@@ -173,132 +61,59 @@ class QuickContextExtractor:
         max_matches: int = 5,
         lines_before: int = 200,
         lines_after: int = 200,
-        index_type: str = "both",
-        embed_images: bool = True,
-        diversify_results: bool = True,
-        file_type_filter: Optional[str] = None,
-        match_mode: str = 'flexible',  # NEW: Query validation mode
-        max_fetch_attempts: int = 5     # NEW: Max iterations to find valid results
+        index_type: str = "both",  # "both", "universal", or "hybrid"
+        embed_images: bool = True,  # Embed images from PDFs
+        diversify_results: bool = True,  # Mix different file types
+        file_type_filter: Optional[str] = None  # Filter: 'code', 'pdf', 'text'
     ) -> str:
         """
-        Extract context for query with validation
+        Extract context for query
         
         Args:
             query: Search query
-            max_matches: Number of valid matches to return
+            max_matches: Number of matches
             lines_before: Lines before match (for text/code)
             lines_after: Lines after match (for text/code)
             index_type: Which index to search
             embed_images: Embed full images from PDFs
             diversify_results: Try to get mix of file types
             file_type_filter: Only return specific file type
-            match_mode: Query validation strictness
-            max_fetch_attempts: Max attempts to fetch valid results
         
         Returns:
             Formatted context string
         """
         print(f"\nQuery: {query}")
-        print(f"Match mode: {match_mode}")
         print(f"Settings: {lines_before} lines before, {lines_after} lines after")
-        print(f"Index: {index_type}")
         print(f"Image embedding: {'Enabled' if embed_images else 'Disabled'}")
         print(f"Result diversification: {'Enabled' if diversify_results else 'Disabled'}")
+        
+        # Search indexes
+        results = self._search_indexes(
+            query, 
+            max_matches * 3 if diversify_results else max_matches,  # Get more candidates
+            index_type
+        )
+        
+        if not results:
+            return "No results found."
+        
+        # Apply file type filter
         if file_type_filter:
-            print(f"File type filter: {file_type_filter}")
+            results = [r for r in results if r['file_type'] == file_type_filter]
+            print(f"Filtered to {len(results)} {file_type_filter} results")
         
-        # Initialize validator
-        validator = QueryValidator(match_mode=match_mode)
-        query_terms = validator.extract_query_terms(query)
-        print(f"Query terms to validate: {', '.join(sorted(query_terms))}")
-        
-        # Iterative search with validation
-        valid_results = []
-        fetch_multiplier = 3 if diversify_results else 2
-        fetch_per_iteration = max_matches * fetch_multiplier
-        max_total_fetch = fetch_per_iteration * max_fetch_attempts
-        total_fetched = 0
-        iteration = 0
-        discarded_count = 0
-        
-        while len(valid_results) < max_matches and iteration < max_fetch_attempts:
-            iteration += 1
-            
-            # Calculate how many to fetch this iteration
-            needed = max_matches - len(valid_results)
-            to_fetch = min(needed * fetch_multiplier, max_total_fetch - total_fetched)
-            
-            if to_fetch <= 0:
-                break
-            
-            print(f"\n--- Iteration {iteration}: Fetching {to_fetch} candidates ---")
-            
-            # Search indexes (with offset to skip already-fetched results)
-            results = self._search_indexes(
-                query,
-                to_fetch,
-                index_type,
-                offset=total_fetched
-            )
-            
-            if not results:
-                print("No more results available from index")
-                break
-            
-            total_fetched += len(results)
-            print(f"Fetched {len(results)} results (total: {total_fetched})")
-            
-            # Apply file type filter
-            if file_type_filter:
-                before_filter = len(results)
-                results = [r for r in results if r['file_type'] == file_type_filter]
-                if before_filter > len(results):
-                    print(f"Filtered to {len(results)} {file_type_filter} results")
-            
-            # Validate each result
-            print(f"\nValidating {len(results)} results...")
-            for i, result in enumerate(results, 1):
-                # Validate query terms in result text
-                is_valid, found_terms, missing_terms = validator.validate_result(
-                    result['text'],
-                    query_terms
-                )
-                
-                if is_valid:
-                    valid_results.append(result)
-                    print(f"  [{i}] ✓ {result['source_file']} - Valid (found: {len(found_terms)}/{len(query_terms)} terms)")
-                else:
-                    discarded_count += 1
-                    print(f"  [{i}] ✗ {result['source_file']} - Invalid (missing: {', '.join(sorted(missing_terms))})")
-                
-                if len(valid_results) >= max_matches:
-                    break
-        
-        print(f"\n{'='*70}")
-        print(f"Validation Summary:")
-        print(f"  Total fetched: {total_fetched}")
-        print(f"  Valid results: {len(valid_results)}")
-        print(f"  Discarded: {discarded_count}")
-        print(f"  Iterations: {iteration}")
-        print(f"{'='*70}")
-        
-        if not valid_results:
-            return f"No valid results found after checking {total_fetched} candidates.\n" + \
-                   f"Query terms: {', '.join(sorted(query_terms))}\n" + \
-                   f"Try: --match-mode fuzzy for more permissive matching"
-        
-        # Diversify valid results if enabled
+        # Diversify results if enabled
         if diversify_results and not file_type_filter:
-            valid_results = self._diversify_results(valid_results, max_matches)
+            results = self._diversify_results(results, max_matches)
         else:
-            valid_results = valid_results[:max_matches]
+            results = results[:max_matches]
         
-        print(f"\nExtracting context from {len(valid_results)} validated matches...")
+        print(f"\nFound {len(results)} matches")
         
-        # Extract context from each valid result
+        # Extract context from each result
         contexts = []
-        for i, result in enumerate(valid_results, 1):
-            print(f"[{i}/{len(valid_results)}] {result['source_file']} ({result['file_type']})")
+        for i, result in enumerate(results, 1):
+            print(f"[{i}/{len(results)}] {result['source_file']} ({result['file_type']})")
             
             context = self._extract_context_for_result(
                 result,
@@ -311,7 +126,7 @@ class QuickContextExtractor:
                 contexts.append(context)
         
         # Format for LLM
-        return self._format_contexts(contexts, query, query_terms)
+        return self._format_contexts(contexts, query)
     
     def _diversify_results(self, results: List[Dict], max_results: int) -> List[Dict]:
         """
@@ -355,73 +170,54 @@ class QuickContextExtractor:
         self,
         query: str,
         max_matches: int,
-        index_type: str,
-        offset: int = 0  # NEW: Offset for pagination
+        index_type: str
     ) -> List[Dict[str, Any]]:
-        """Search one or both indexes with offset support"""
+        """Search one or both indexes"""
+        from universal_indexer_v2 import UniversalFileSearcher
+        try:
+            from hybrid_indexer_v2_fixed import HybridSearcher
+        except ImportError:
+            from hybrid_indexer_v2 import HybridSearcher
+        
         results = []
         
-        # Check which indexes exist
-        universal_exists = self.universal_index.exists() and (self.universal_index / "bm25.pkl").exists()
-        hybrid_exists = self.hybrid_index.exists() and (self.hybrid_index / "bm25.pkl").exists()
-        
-        if not universal_exists and not hybrid_exists:
-            print("❌ No indexes found!")
-            print(f"   Looked for: {self.universal_index} and {self.hybrid_index}")
-            return []
-        
         # Search universal index
-        if index_type in ["both", "universal"] and universal_exists:
+        if index_type in ["both", "universal"] and self.universal_index.exists():
             try:
-                from universal_indexer_v2 import UniversalFileSearcher
                 searcher = UniversalFileSearcher(str(self.universal_index))
-                # Fetch more than needed to account for offset
-                uni_results = searcher.search(query, top_k=max_matches + offset + 10, verbose=False)
-                
-                # Skip offset results
-                uni_results = uni_results[offset:offset + max_matches]
+                uni_results = searcher.search(query, top_k=max_matches, verbose=False)
                 
                 for r in uni_results:
                     results.append({
                         'text': r['text'],
                         'source_file': r['source_file'],
-                        'source_path': r.get('source_path', ''),
+                        'source_path': r.get('source_path', ''),  # ✅ Get source path if available
                         'file_type': r['file_type'],
                         'chunk_index': r.get('chunk_index', 0),
                         'score': r['score'],
                         'index': 'universal'
                     })
             except Exception as e:
-                print(f"  ⚠ Universal index error: {e}")
+                print(f"⚠ Universal index error: {e}")
         
         # Search hybrid index
-        if index_type in ["both", "hybrid"] and hybrid_exists:
+        if index_type in ["both", "hybrid"] and self.hybrid_index.exists():
             try:
-                # Try fixed version first, fallback to original
-                try:
-                    from hybrid_indexer_v2_fixed import HybridSearcher
-                except ImportError:
-                    from hybrid_indexer_v2 import HybridSearcher
-                
                 searcher = HybridSearcher(str(self.hybrid_index))
-                # Fetch more than needed to account for offset
-                hyb_results = searcher.search(query, top_k=max_matches + offset + 10, verbose=False)
-                
-                # Skip offset results
-                hyb_results = hyb_results[offset:offset + max_matches]
+                hyb_results = searcher.search(query, top_k=max_matches, verbose=False)
                 
                 for r in hyb_results:
                     results.append({
                         'text': r['text'],
                         'source_file': r['source_file'],
-                        'source_path': r.get('source_path', ''),
+                        'source_path': r.get('source_path', ''),  # ✅ Get source path if available
                         'file_type': r['file_type'],
                         'chunk_index': 0,
                         'score': r.get('combined_score', r.get('bm25_score', 0)),
                         'index': 'hybrid'
                     })
             except Exception as e:
-                print(f"  ⚠ Hybrid index error: {e}")
+                print(f"⚠ Hybrid index error: {e}")
         
         # Sort by score and deduplicate
         results.sort(key=lambda x: x['score'], reverse=True)
@@ -436,10 +232,6 @@ class QuickContextExtractor:
                 unique_results.append(r)
         
         return unique_results
-    
-    # [Rest of the methods remain the same as before - _extract_context_for_result, 
-    # _extract_text_context, _extract_pdf_context, etc.]
-    # I'll include key methods but omit duplicates for brevity
     
     def _extract_context_for_result(
         self,
@@ -461,9 +253,21 @@ class QuickContextExtractor:
         is_pdf = source_path.suffix.lower() == '.pdf'
         
         if is_pdf and embed_images and PDF_AVAILABLE:
-            return self._extract_pdf_context(source_path, result, lines_before, lines_after)
+            # Extract images from PDF
+            return self._extract_pdf_context(
+                source_path,
+                result,
+                lines_before,
+                lines_after
+            )
         else:
-            return self._extract_text_context(source_path, result, lines_before, lines_after)
+            # Extract text/code context
+            return self._extract_text_context(
+                source_path,
+                result,
+                lines_before,
+                lines_after
+            )
     
     def _extract_text_context(
         self,
@@ -474,19 +278,26 @@ class QuickContextExtractor:
     ) -> Optional[Dict[str, Any]]:
         """Extract context from text/code files"""
         
+        # Check if result text looks like garbage (binary data)
         result_text = result['text']
         if self._is_garbage_text(result_text):
             print(f"  ⚠ Skipping: appears to be binary/image data")
             return None
         
+        # Read file (with caching)
         lines = self._read_file_cached(source_path)
         
         if not lines:
             print(f"  ⚠ Could not read file or file is binary")
             return None
         
-        match_start, match_end = self._find_match_in_lines(lines, result['text'])
+        # Find match location in file
+        match_start, match_end = self._find_match_in_lines(
+            lines,
+            result['text']
+        )
         
+        # Extract context
         before_start = max(0, match_start - lines_before)
         before_lines = lines[before_start:match_start]
         
@@ -510,22 +321,179 @@ class QuickContextExtractor:
             'file_type': result['file_type']
         }
     
-    # Include other essential methods (same as before)
+    def _extract_pdf_context(
+        self,
+        source_path: Path,
+        result: Dict[str, Any],
+        lines_before: int,
+        lines_after: int
+    ) -> Optional[Dict[str, Any]]:
+        """Extract context from PDF (renders full page as single image)"""
+        
+        try:
+            # Open PDF
+            if str(source_path) in self.pdf_cache:
+                pdf = self.pdf_cache[str(source_path)]
+            else:
+                pdf = pdfplumber.open(source_path)
+                self.pdf_cache[str(source_path)] = pdf
+            
+            # Find which page the match is on
+            page_num = self._find_page_in_pdf(pdf, result['text'])
+            
+            if page_num is None:
+                print(f"  ⚠ Could not find match in PDF")
+                return self._extract_text_context(source_path, result, lines_before, lines_after)
+            
+            page = pdf.pages[page_num]
+            
+            # Extract text from page
+            page_text = page.extract_text() or ""
+            text_lines = page_text.split('\n')
+            
+            # Render FULL PAGE as single image
+            images = []
+            
+            try:
+                print(f"  Rendering full page {page_num + 1} as single image...")
+                
+                # Render entire page at high resolution
+                img = page.to_image(resolution=200)
+                img_pil = img.original
+                
+                # Convert to base64
+                buffered = io.BytesIO()
+                img_pil.save(buffered, format="PNG", optimize=True)
+                img_base64 = base64.b64encode(buffered.getvalue()).decode()
+                
+                images.append({
+                    'index': 0,
+                    'base64': img_base64,
+                    'width': page.width,
+                    'height': page.height,
+                    'full_page': True
+                })
+                
+                print(f"  ✓ Captured full page as single image ({page.width:.0f}x{page.height:.0f})")
+                
+            except Exception as e:
+                print(f"  ⚠ Could not render page: {e}")
+            
+            # Get context pages (pages before and after)
+            context_pages_before = []
+            context_pages_after = []
+            
+            # Pages before (2 pages max)
+            for i in range(max(0, page_num - 2), page_num):
+                try:
+                    ctx_page = pdf.pages[i]
+                    ctx_text = ctx_page.extract_text() or ""
+                    context_pages_before.append({
+                        'page_num': i,
+                        'text': ctx_text[:500]
+                    })
+                except:
+                    pass
+            
+            # Pages after (2 pages max)
+            for i in range(page_num + 1, min(len(pdf.pages), page_num + 3)):
+                try:
+                    ctx_page = pdf.pages[i]
+                    ctx_text = ctx_page.extract_text() or ""
+                    context_pages_after.append({
+                        'page_num': i,
+                        'text': ctx_text[:500]
+                    })
+                except:
+                    pass
+            
+            print(f"  ✓ Page {page_num + 1} captured as single image")
+            
+            return {
+                'type': 'pdf',
+                'source_file': result['source_file'],
+                'source_path': source_path,
+                'page_num': page_num,
+                'page_text': text_lines,
+                'images': images,
+                'context_pages_before': context_pages_before,
+                'context_pages_after': context_pages_after,
+                'score': result['score'],
+                'file_type': result['file_type']
+            }
+            
+        except Exception as e:
+            print(f"  ⚠ PDF extraction error: {e}")
+            return self._extract_text_context(source_path, result, lines_before, lines_after)
+    
+    def _find_page_in_pdf(self, pdf, match_text: str) -> Optional[int]:
+        """Find which page contains the match text"""
+        match_words = set(match_text.lower().split()[:10])
+        
+        best_page = 0
+        best_match_count = 0
+        
+        for page_num, page in enumerate(pdf.pages):
+            page_text = (page.extract_text() or "").lower()
+            page_words = set(page_text.split())
+            
+            match_count = len(match_words & page_words)
+            
+            if match_count > best_match_count:
+                best_match_count = match_count
+                best_page = page_num
+        
+        return best_page if best_match_count > 0 else None
+    
     def _is_garbage_text(self, text: str) -> bool:
+        """Check if text looks like binary garbage"""
         if not text or len(text) < 10:
             return False
+        
         non_printable = sum(1 for c in text if not c.isprintable() and c not in '\t\n\r ')
-        return non_printable / len(text) > 0.2
+        if non_printable / len(text) > 0.2:
+            return True
+        
+        garbage_indicators = [
+            b'\x00'.decode('latin-1'),
+            '\ufffd',
+        ]
+        
+        for indicator in garbage_indicators:
+            if indicator in text:
+                return True
+        
+        non_ascii = sum(1 for c in text if ord(c) > 127)
+        if non_ascii / len(text) > 0.5:
+            return True
+        
+        return False
     
     def _find_source_file(self, result: Dict[str, Any]) -> Optional[Path]:
+        """
+        Find the source file path
+        NOW WITH BETTER PATH RESOLUTION!
+        """
+        # Try source_path from metadata first (if available from fixed indexer)
         if result.get('source_path') and result['source_path']:
             source_path = Path(result['source_path'])
             if source_path.exists():
+                print(f"  ✓ Using stored path: {source_path}")
                 return source_path
         
         filename = result['source_file']
-        search_paths = [Path(filename), Path("./your_docs") / filename, Path("./your_code") / filename]
         
+        # Try common locations
+        search_paths = [
+            Path(filename),
+            Path("./your_docs") / filename,
+            Path("./your_code") / filename,
+            Path("./docs") / filename,
+            Path("./code") / filename,
+            Path("./src") / filename,
+        ]
+        
+        # Also search metadata from index
         if result['index'] == 'universal':
             try:
                 with open(self.universal_index / "metadata.pkl", 'rb') as f:
@@ -539,82 +507,194 @@ class QuickContextExtractor:
             except:
                 pass
         
+        elif result['index'] == 'hybrid':
+            try:
+                with open(self.hybrid_index / "metadata.pkl", 'rb') as f:
+                    metadata_list = pickle.load(f)
+                for meta in metadata_list:
+                    if meta.get('source_file') == filename:
+                        source_path = meta.get('source_path')
+                        if source_path:
+                            search_paths.insert(0, Path(source_path))
+                        break
+            except:
+                pass
+        
         for path in search_paths:
             if path.exists():
                 return path
+        
         return None
     
+    def _is_binary_file(self, file_path: Path) -> bool:
+        """Check if file is binary"""
+        binary_extensions = {
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            '.zip', '.tar', '.gz', '.exe', '.dll', '.so', '.dylib',
+            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
+            '.mp3', '.mp4', '.avi', '.mov', '.wav',
+            '.bin', '.dat', '.db'
+        }
+        
+        if file_path.suffix.lower() in binary_extensions:
+            return True
+        
+        try:
+            with open(file_path, 'rb') as f:
+                chunk = f.read(8192)
+            
+            if b'\x00' in chunk:
+                return True
+            
+            text_chars = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7f})
+            non_text = chunk.translate(None, text_chars)
+            
+            if len(non_text) / max(1, len(chunk)) > 0.3:
+                return True
+        except:
+            pass
+        
+        return False
+    
+    def _clean_line(self, line: str) -> str:
+        """Remove non-printable characters from line"""
+        cleaned = ''.join(char for char in line if char.isprintable() or char in '\t\n\r')
+        return cleaned
+    
     def _read_file_cached(self, file_path: Path) -> List[str]:
+        """Read file with caching and binary detection"""
         file_path_str = str(file_path)
+        
         if file_path_str in self.file_cache:
             return self.file_cache[file_path_str]
         
+        if self._is_binary_file(file_path):
+            print(f"  ⚠ Skipping binary file: {file_path.name}")
+            return []
+        
         try:
-            for encoding in ['utf-8', 'latin-1', 'cp1252']:
+            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
                 try:
                     with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
-                        lines = [line.rstrip('\n\r') for line in f.readlines()]
-                    self.file_cache[file_path_str] = lines
-                    return lines
-                except:
+                        lines = [self._clean_line(line.rstrip('\n\r')) for line in f.readlines()]
+                    
+                    cleaned_lines = []
+                    for line in lines:
+                        non_ascii = sum(1 for c in line if ord(c) > 127)
+                        if len(line) > 0 and non_ascii / len(line) < 0.5:
+                            cleaned_lines.append(line)
+                        elif len(line) == 0:
+                            cleaned_lines.append(line)
+                    
+                    self.file_cache[file_path_str] = cleaned_lines
+                    return cleaned_lines
+                except UnicodeDecodeError:
                     continue
-        except:
-            pass
+        except Exception as e:
+            print(f"  Error reading file: {e}")
+        
         return []
     
     def _find_match_in_lines(self, lines: List[str], match_text: str) -> tuple:
+        """Find where match_text appears in lines"""
         match_lines = [l.strip() for l in match_text.split('\n') if l.strip()]
+        
         if not match_lines:
             return (0, min(10, len(lines)))
         
         search_lines = match_lines[:min(3, len(match_lines))]
-        for i in range(len(lines)):
-            matches = sum(1 for j, sl in enumerate(search_lines) 
-                         if i + j < len(lines) and sl in lines[i + j])
-            if matches >= len(search_lines) * 0.7:
-                return (i, min(i + len(match_lines), len(lines)))
         
-        return (0, min(len(match_lines), len(lines)))
+        for i in range(len(lines)):
+            matches = 0
+            for j, search_line in enumerate(search_lines):
+                if i + j >= len(lines):
+                    break
+                
+                file_line = lines[i + j].strip()
+                
+                if (search_line in file_line or 
+                    file_line in search_line or
+                    self._similarity(search_line, file_line) > 0.7):
+                    matches += 1
+            
+            if matches >= len(search_lines) * 0.7:
+                start_line = i
+                end_line = min(i + len(match_lines), len(lines))
+                return (start_line, end_line)
+        
+        estimated_lines = len(match_lines)
+        return (0, min(estimated_lines, len(lines)))
     
-    def _format_contexts(self, contexts: List[Dict[str, Any]], query: str, query_terms: Set[str]) -> str:
-        """Format contexts with query term highlighting"""
+    def _similarity(self, s1: str, s2: str) -> float:
+        """Compute similarity between two strings"""
+        words1 = set(s1.lower().split())
+        words2 = set(s2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def _format_contexts(self, contexts: List[Dict[str, Any]], query: str) -> str:
+        """Format contexts for LLM (handles both text and images)"""
         if not contexts:
             return "No contexts found."
         
         parts = []
-        parts.append(f"# Code Context for: {query}")
-        parts.append(f"Query terms validated: {', '.join(sorted(query_terms))}\n")
-        parts.append(f"Found {len(contexts)} validated sections\n")
+        
+        # Header
+        parts.append(f"# Code Context for: {query}\n")
+        parts.append(f"Found {len(contexts)} relevant sections\n")
         
         text_count = sum(1 for c in contexts if c.get('type') == 'text')
         pdf_count = sum(1 for c in contexts if c.get('type') == 'pdf')
         parts.append(f"- Text/Code: {text_count}")
         parts.append(f"- PDFs with images: {pdf_count}\n")
         
+        # Each context
         for i, ctx in enumerate(contexts, 1):
             parts.append(f"\n{'='*70}")
             parts.append(f"## Match {i}: {ctx['source_file']}")
-            parts.append(f"Score: {ctx['score']:.3f} | Type: {ctx['file_type']}")
+            parts.append(f"Score: {ctx['score']:.3f}")
             parts.append(f"{'='*70}\n")
             
-            if ctx.get('type') == 'text':
+            if ctx.get('type') == 'pdf':
+                parts.append(self._format_pdf_context(ctx))
+            else:
                 parts.append(self._format_text_context(ctx))
         
+        # Summary
         parts.append(f"\n{'='*70}")
-        parts.append(f"## Summary")
-        parts.append(f"Query: {query}")
-        parts.append(f"Validated terms: {', '.join(sorted(query_terms))}")
-        parts.append(f"Total validated matches: {len(contexts)}")
+        parts.append("## Summary")
+        parts.append(f"Total matches: {len(contexts)}")
+        
+        total_lines = sum(
+            len(c.get('before_lines', [])) + len(c.get('match_lines', [])) + len(c.get('after_lines', []))
+            for c in contexts if c.get('type') == 'text'
+        )
+        total_images = sum(len(c.get('images', [])) for c in contexts if c.get('type') == 'pdf')
+        
+        parts.append(f"Total text lines: {total_lines}")
+        parts.append(f"Total images: {total_images}")
         
         return '\n'.join(parts)
     
     def _format_text_context(self, ctx: Dict[str, Any]) -> str:
+        """Format text/code context"""
         parts = []
-        parts.append(f"Type: {ctx['file_type']}")
+        
+        parts.append(f"Type: Text/Code")
         parts.append(f"Location: Lines {ctx['match_start']}-{ctx['match_end']}\n")
         
         ext = Path(ctx['source_file']).suffix.lower()
-        lang_map = {'.py': 'python', '.java': 'java', '.tal': 'tal', '.c': 'c'}
+        lang_map = {
+            '.py': 'python', '.java': 'java', '.c': 'c', '.cpp': 'cpp',
+            '.js': 'javascript', '.tal': 'tal', '.cbl': 'cobol',
+            '.sql': 'sql', '.sh': 'bash', '.txt': 'text'
+        }
         lang = lang_map.get(ext, 'text')
         
         parts.append(f"```{lang}")
@@ -628,7 +708,7 @@ class QuickContextExtractor:
                 parts.append(f"{start_num + j:4d} | {line}")
             parts.append("")
         
-        parts.append(">>> RELEVANT MATCH (VALIDATED) <<<")
+        parts.append(">>> RELEVANT MATCH <<<")
         parts.append("")
         
         for j, line in enumerate(ctx['match_lines'][:30]):
@@ -643,98 +723,214 @@ class QuickContextExtractor:
                 parts.append(f"{ctx['match_end'] + j:4d} | {line}")
         
         parts.append("```\n")
+        
+        return '\n'.join(parts)
+    
+    def _format_pdf_context(self, ctx: Dict[str, Any]) -> str:
+        """Format PDF context with full page image"""
+        parts = []
+        
+        parts.append(f"Type: PDF")
+        parts.append(f"Page: {ctx['page_num'] + 1}\n")
+        
+        if ctx['context_pages_before']:
+            parts.append(f"### Context from Previous Pages\n")
+            for page_ctx in ctx['context_pages_before']:
+                parts.append(f"**Page {page_ctx['page_num'] + 1}:**")
+                lines = page_ctx['text'].split('\n')[:5]
+                for line in lines:
+                    if line.strip():
+                        parts.append(f"  {line}")
+            parts.append("")
+        
+        if ctx['images']:
+            parts.append(f"### Full Page {ctx['page_num'] + 1} Image\n")
+            
+            for img in ctx['images']:
+                if img.get('full_page'):
+                    parts.append(f"**Complete page rendered as image** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
+                else:
+                    parts.append(f"**Page Image** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
+                
+                parts.append(f"![Page Image](data:image/png;base64,{img['base64']})\n")
+        
+        if ctx['page_text'] and len(ctx['page_text']) < 100:
+            parts.append(f"### Page {ctx['page_num'] + 1} Text Content\n")
+            parts.append("```")
+            for line in ctx['page_text'][:30]:
+                if line.strip():
+                    parts.append(line)
+            parts.append("```\n")
+        
+        if ctx['context_pages_after']:
+            parts.append(f"### Context from Following Pages\n")
+            for page_ctx in ctx['context_pages_after']:
+                parts.append(f"**Page {page_ctx['page_num'] + 1}:**")
+                lines = page_ctx['text'].split('\n')[:5]
+                for line in lines:
+                    if line.strip():
+                        parts.append(f"  {line}")
+            parts.append("")
+        
         return '\n'.join(parts)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Quick Context Extractor v2.3 - With Query Validation",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Basic search with validation
-  %(prog)s "payment validation"
-  
-  # Strict matching (must contain exact terms)
-  %(prog)s "OFAC screening" --match-mode exact
-  
-  # Flexible matching (default, allows partial matches)
-  %(prog)s "payment flow" --match-mode flexible
-  
-  # Fuzzy matching (most permissive)
-  %(prog)s "payment" --match-mode fuzzy
-  
-  # Search specific index
-  %(prog)s "payment" --index hybrid --match-mode case-insensitive
-"""
-    )
+# Quick usage function
+def quick_extract(
+    query: str,
+    lines_before: int = 200,
+    lines_after: int = 200,
+    max_matches: int = 5,
+    embed_images: bool = True,
+    diversify_results: bool = True,
+    file_type_filter: Optional[str] = None
+) -> str:
+    """
+    One-liner: extract context for query (text + images)
     
-    parser.add_argument('query', nargs='+', help='Search query terms')
-    parser.add_argument('--index', '-i', choices=['both', 'universal', 'hybrid'], 
-                       default='both', help='Which index to search')
-    parser.add_argument('--max', '-n', type=int, default=5, 
-                       help='Maximum validated results (default: 5)')
-    parser.add_argument('--before', '-b', type=int, default=200, 
-                       help='Lines before match')
-    parser.add_argument('--after', '-a', type=int, default=200, 
-                       help='Lines after match')
-    parser.add_argument('--file-type', '-t', choices=['code', 'pdf', 'text'], 
-                       help='Filter by file type')
-    parser.add_argument('--match-mode', choices=['exact', 'case-insensitive', 'flexible', 'fuzzy'],
-                       default='flexible', 
-                       help='Query term matching strictness (default: flexible)')
-    parser.add_argument('--strict', action='store_true', 
-                       help='Alias for --match-mode exact')
-    parser.add_argument('--max-fetch', type=int, default=5,
-                       help='Max fetch iterations (default: 5)')
-    parser.add_argument('--no-diversify', action='store_true', 
-                       help='Disable result diversification')
-    parser.add_argument('--no-images', action='store_true', 
-                       help='Disable PDF image embedding')
-    parser.add_argument('--output', '-o', help='Output file')
-    parser.add_argument('--quiet', '-q', action='store_true', 
-                       help='Minimal output')
+    Args:
+        query: Search query
+        lines_before: Lines before match (for text/code)
+        lines_after: Lines after match (for text/code)
+        max_matches: Number of matches
+        embed_images: Embed full images from PDFs
+        diversify_results: Get mix of file types
+        file_type_filter: Only get specific type ('code', 'pdf', 'text')
     
-    args = parser.parse_args()
-    
-    query = ' '.join(args.query)
-    match_mode = 'exact' if args.strict else args.match_mode
-    embed_images = not args.no_images
-    
-    if not args.quiet:
-        print("="*70)
-        print("QUICK CONTEXT EXTRACTION v2.3 - Query Validation Edition")
-        print("="*70)
-    
+    Usage:
+        # Mixed results (PDFs + code)
+        context = quick_extract("payment validation", diversify_results=True)
+        
+        # Code only
+        context = quick_extract("payment validation", file_type_filter='code')
+        
+        # PDFs only
+        context = quick_extract("flow diagram", file_type_filter='pdf')
+    """
     extractor = QuickContextExtractor()
-    
-    context = extractor.extract(
-        query=query,
-        max_matches=args.max,
-        lines_before=args.before,
-        lines_after=args.after,
-        index_type=args.index,
+    return extractor.extract(
+        query,
+        max_matches,
+        lines_before,
+        lines_after,
         embed_images=embed_images,
-        diversify_results=not args.no_diversify,
-        file_type_filter=args.file_type,
-        match_mode=match_mode,
-        max_fetch_attempts=args.max_fetch
+        diversify_results=diversify_results,
+        file_type_filter=file_type_filter
     )
-    
-    output_file = args.output or "extracted_context.txt"
-    with open(output_file, 'w') as f:
-        f.write(context)
-    
-    if not args.quiet:
-        print(f"\n✓ Saved to: {output_file}")
-        print(f"  Length: {len(context):,} characters")
-        print("\n" + "="*70)
-        print("PREVIEW")
-        print("="*70)
-        print(context[:1000])
-        if len(context) > 1000:
-            print(f"\n... ({len(context) - 1000:,} more characters)")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    
+    if len(sys.argv) > 1:
+        query = ' '.join(sys.argv[1:])
+    else:
+        query = "payment drawdown processing"
+    
+    print("="*70)
+    print("QUICK CONTEXT EXTRACTION v2.1")
+    print("With Result Diversification & Better Path Resolution!")
+    print("="*70)
+    
+    # Check if we should look for specific file types
+    image_keywords = ['diagram', 'chart', 'flow', 'graph', 'image', 'figure', 'illustration']
+    has_image_keyword = any(kw in query.lower() for kw in image_keywords)
+    
+    if has_image_keyword:
+        print(f"\n💡 Query contains image keywords - will include PDFs with images")
+    
+    context = quick_extract(
+        query,
+        lines_before=200,
+        lines_after=200,
+        max_matches=5,
+        embed_images=True,
+        diversify_results=True  # ✅ Mix code and PDFs in results
+    )
+    
+    print("\n" + "="*70)
+    print("RESULT")
+    print("="*70)
+    print(context[:2000])
+    if len(context) > 2000:
+        print(f"\n... ({len(context) - 2000:,} more characters)")
+    
+    # Save to file
+    with open("extracted_context.txt", 'w') as f:
+        f.write(context)
+    
+    # Also save as HTML if there are images
+    if "data:image/png;base64," in context:
+        print(f"\n📸 Images detected - creating HTML view...")
+        
+        html_content = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Context: """ + query + """</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 1400px; margin: 20px auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; border-bottom: 2px solid #95a5a6; padding-bottom: 8px; margin-top: 30px; }
+        h3 { color: #7f8c8d; margin-top: 20px; }
+        pre { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+        .image-container { margin: 20px 0; padding: 20px; background: #f8f9fa; border-radius: 8px; border: 2px solid #dee2e6; text-align: center; }
+        .image-container img { max-width: 100%; width: auto; height: auto; max-height: 1200px; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 4px 8px rgba(0,0,0,0.15); display: block; margin: 15px auto; }
+    </style>
+</head>
+<body>
+    <div class="container">
+"""
+        
+        lines = context.split('\n')
+        in_code_block = False
+        
+        for line in lines:
+            if line.startswith('```'):
+                if in_code_block:
+                    html_content += "</pre>\n"
+                    in_code_block = False
+                else:
+                    html_content += "<pre>\n"
+                    in_code_block = True
+                continue
+            
+            if '![Page Image](data:image/png;base64,' in line or '![Image](data:image/png;base64,' in line:
+                match = re.search(r'!\[(?:Page )?Image\]\(data:image/png;base64,([^)]+)\)', line)
+                if match:
+                    base64_data = match.group(1)
+                    html_content += f'<div class="image-container">\n'
+                    html_content += f'<img src="data:image/png;base64,{base64_data}" alt="Full Page Image" />\n'
+                    html_content += '</div>\n'
+                continue
+            
+            if line.startswith('# '):
+                html_content += f"<h1>{line[2:]}</h1>\n"
+            elif line.startswith('## '):
+                html_content += f"<h2>{line[3:]}</h2>\n"
+            elif line.startswith('### '):
+                html_content += f"<h3>{line[4:]}</h3>\n"
+            elif line.strip() == '='*70:
+                html_content += '<hr>\n'
+            elif line.strip() and not in_code_block:
+                html_content += f"{line}<br>\n"
+            elif in_code_block:
+                html_content += f"{line}\n"
+        
+        if in_code_block:
+            html_content += "</pre>\n"
+        
+        html_content += """
+    </div>
+</body>
+</html>
+"""
+        
+        with open("extracted_context.html", 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        print(f"\n✅ Saved HTML: extracted_context.html")
+    
+    print(f"\n✓ Saved to: extracted_context.txt")
+    print(f"  Length: {len(context):,} chars")
