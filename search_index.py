@@ -1,7 +1,13 @@
 """
-Quick Context Extractor v2.2 - QUERY VALIDATION
+Quick Context Extractor v2.3 - IMPROVED DEDUPLICATION
 Works with existing indexes
 Handles both text/code AND images!
+
+NEW IN v2.3:
+- Two-stage deduplication: exact chunk + similarity-based
+- Prevents duplicate code results from same file
+- Configurable similarity threshold (default 0.85)
+- Shows deduplication stats in output
 
 NEW IN v2.2:
 - Query term validation: Only keep results that actually contain search terms
@@ -72,7 +78,8 @@ class QuickContextExtractor:
         diversify_results: bool = True,  # Mix different file types
         file_type_filter: Optional[str] = None,  # Filter: 'code', 'pdf', 'text'
         validate_query_terms: bool = True,  # NEW: Validate results contain query terms
-        min_query_terms: int = 1  # NEW: Minimum query terms that must match
+        min_query_terms: int = 1,  # NEW: Minimum query terms that must match
+        dedup_similarity: float = 0.85  # NEW: Similarity threshold for deduplication (0.0-1.0)
     ) -> str:
         """
         Extract context for query
@@ -88,6 +95,7 @@ class QuickContextExtractor:
             file_type_filter: Only return specific file type
             validate_query_terms: Only keep results that contain query terms
             min_query_terms: Minimum number of query terms that must appear in result
+            dedup_similarity: Similarity threshold for deduplication (0.85 = 85% similar)
         
         Returns:
             Formatted context string
@@ -97,6 +105,10 @@ class QuickContextExtractor:
         print(f"Image embedding: {'Enabled' if embed_images else 'Disabled'}")
         print(f"Result diversification: {'Enabled' if diversify_results else 'Disabled'}")
         print(f"Query validation: {'Enabled' if validate_query_terms else 'Disabled'}")
+        print(f"Deduplication threshold: {dedup_similarity:.2f}")
+        
+        # Store dedup_similarity for use in _search_indexes
+        self.dedup_similarity = dedup_similarity
         
         # Search indexes
         results = self._search_indexes(
@@ -328,19 +340,58 @@ class QuickContextExtractor:
             except Exception as e:
                 print(f"⚠ Hybrid index error: {e}")
         
-        # Sort by score and deduplicate
+        # Sort by score
         results.sort(key=lambda x: x['score'], reverse=True)
         
-        # Remove duplicates
-        seen = set()
+        # IMPROVED DEDUPLICATION
+        # Strategy 1: Remove exact duplicates by file + chunk
+        seen_chunks = set()
         unique_results = []
+        
         for r in results:
-            key = f"{r['source_file']}:{r['text'][:100]}"
-            if key not in seen:
-                seen.add(key)
+            chunk_key = f"{r['source_file']}:{r['chunk_index']}"
+            if chunk_key not in seen_chunks:
+                seen_chunks.add(chunk_key)
                 unique_results.append(r)
         
-        return unique_results
+        # Strategy 2: Remove highly similar results from same file
+        final_results = []
+        file_texts = defaultdict(list)  # Track texts per file
+        
+        dedup_threshold = getattr(self, 'dedup_similarity', 0.85)
+        
+        for r in unique_results:
+            source_file = r['source_file']
+            text = r['text']
+            
+            # Check if this text is too similar to existing texts from same file
+            is_duplicate = False
+            for existing_text in file_texts[source_file]:
+                similarity = self._text_similarity(text, existing_text)
+                if similarity > dedup_threshold:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                file_texts[source_file].append(text)
+                final_results.append(r)
+        
+        print(f"Deduplication: {len(results)} → {len(unique_results)} → {len(final_results)} results")
+        
+        return final_results
+    
+    def _text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate Jaccard similarity between two texts"""
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+        
+        return intersection / union if union > 0 else 0.0
     
     def _extract_context_for_result(
         self,
@@ -898,7 +949,8 @@ def quick_extract(
     diversify_results: bool = True,
     file_type_filter: Optional[str] = None,
     validate_query_terms: bool = True,
-    min_query_terms: int = 1
+    min_query_terms: int = 1,
+    dedup_similarity: float = 0.85
 ) -> str:
     """
     One-liner: extract context for query (text + images)
@@ -913,6 +965,7 @@ def quick_extract(
         file_type_filter: Only get specific type ('code', 'pdf', 'text')
         validate_query_terms: Only keep results containing query terms
         min_query_terms: Minimum query terms that must appear in result
+        dedup_similarity: Similarity threshold for deduplication (0.85 = 85% similar)
     
     Usage:
         # Mixed results with validation (default)
@@ -926,6 +979,9 @@ def quick_extract(
         
         # Strict matching (require at least 2 query terms)
         context = quick_extract("payment wire transfer", min_query_terms=2)
+        
+        # Less strict deduplication (allow more similar results)
+        context = quick_extract("payment", dedup_similarity=0.95)
     """
     extractor = QuickContextExtractor()
     return extractor.extract(
@@ -937,7 +993,8 @@ def quick_extract(
         diversify_results=diversify_results,
         file_type_filter=file_type_filter,
         validate_query_terms=validate_query_terms,
-        min_query_terms=min_query_terms
+        min_query_terms=min_query_terms,
+        dedup_similarity=dedup_similarity
     )
 
 
@@ -950,8 +1007,8 @@ if __name__ == "__main__":
         query = "payment drawdown processing"
     
     print("="*70)
-    print("QUICK CONTEXT EXTRACTION v2.2")
-    print("With Query Term Validation!")
+    print("QUICK CONTEXT EXTRACTION v2.3")
+    print("With Improved Deduplication & Query Validation!")
     print("="*70)
     
     # Check if we should look for specific file types
