@@ -269,7 +269,7 @@ class QuickContextExtractor:
         lines_before: int,
         lines_after: int
     ) -> Optional[Dict[str, Any]]:
-        """Extract context from PDF (text + images)"""
+        """Extract context from PDF (renders full page as single image)"""
         
         try:
             # Open PDF
@@ -292,89 +292,65 @@ class QuickContextExtractor:
             page_text = page.extract_text() or ""
             text_lines = page_text.split('\n')
             
-            # Extract images from page
+            # Render FULL PAGE as single image (not individual elements!)
             images = []
-            if hasattr(page, 'images') and page.images:
-                print(f"  Found {len(page.images)} images on page {page_num + 1}")
-                
-                for img_idx, img_info in enumerate(page.images):
-                    try:
-                        # Get image from page
-                        img_bbox = (img_info['x0'], img_info['top'], img_info['x1'], img_info['bottom'])
-                        img = page.within_bbox(img_bbox).to_image()
-                        
-                        # Convert to PIL Image
-                        img_pil = img.original
-                        
-                        # Convert to base64
-                        buffered = io.BytesIO()
-                        img_pil.save(buffered, format="PNG")
-                        img_base64 = base64.b64encode(buffered.getvalue()).decode()
-                        
-                        images.append({
-                            'index': img_idx,
-                            'base64': img_base64,
-                            'width': img_info['width'],
-                            'height': img_info['height']
-                        })
-                        
-                        print(f"    ✓ Extracted image {img_idx + 1} ({img_info['width']:.0f}x{img_info['height']:.0f})")
-                    except Exception as e:
-                        print(f"    ⚠ Could not extract image {img_idx + 1}: {e}")
             
-            # If no images found, try to extract as raster
-            if not images:
-                try:
-                    # Render page as image
-                    img = page.to_image(resolution=150)
-                    img_pil = img.original
-                    
-                    # Convert to base64
-                    buffered = io.BytesIO()
-                    img_pil.save(buffered, format="PNG")
-                    img_base64 = base64.b64encode(buffered.getvalue()).decode()
-                    
-                    images.append({
-                        'index': 0,
-                        'base64': img_base64,
-                        'width': page.width,
-                        'height': page.height,
-                        'full_page': True
-                    })
-                    
-                    print(f"  ✓ Rendered full page as image")
-                except Exception as e:
-                    print(f"  ⚠ Could not render page: {e}")
+            try:
+                print(f"  Rendering full page {page_num + 1} as single image...")
+                
+                # Render entire page at high resolution
+                img = page.to_image(resolution=200)  # Higher resolution for clarity
+                img_pil = img.original
+                
+                # Convert to base64
+                buffered = io.BytesIO()
+                img_pil.save(buffered, format="PNG", optimize=True)
+                img_base64 = base64.b64encode(buffered.getvalue()).decode()
+                
+                images.append({
+                    'index': 0,
+                    'base64': img_base64,
+                    'width': page.width,
+                    'height': page.height,
+                    'full_page': True
+                })
+                
+                print(f"  ✓ Captured full page as single image ({page.width:.0f}x{page.height:.0f})")
+                
+            except Exception as e:
+                print(f"  ⚠ Could not render page: {e}")
+                # Fallback to text only
+                pass
             
             # Get context pages (pages before and after)
             context_pages_before = []
             context_pages_after = []
             
-            # Pages before (limited)
+            # Pages before (2 pages max)
             for i in range(max(0, page_num - 2), page_num):
                 try:
                     ctx_page = pdf.pages[i]
                     ctx_text = ctx_page.extract_text() or ""
                     context_pages_before.append({
                         'page_num': i,
-                        'text': ctx_text
+                        'text': ctx_text[:500]  # First 500 chars
                     })
                 except:
                     pass
             
-            # Pages after (limited)
+            # Pages after (2 pages max)
             for i in range(page_num + 1, min(len(pdf.pages), page_num + 3)):
                 try:
                     ctx_page = pdf.pages[i]
                     ctx_text = ctx_page.extract_text() or ""
                     context_pages_after.append({
                         'page_num': i,
-                        'text': ctx_text
+                        'text': ctx_text[:500]  # First 500 chars
                     })
                 except:
                     pass
             
-            print(f"  ✓ Page {page_num + 1} with {len(images)} image(s)")
+            print(f"  ✓ Page {page_num + 1} captured as single image")
             
             return {
                 'type': 'pdf',
@@ -710,7 +686,7 @@ class QuickContextExtractor:
         return '\n'.join(parts)
     
     def _format_pdf_context(self, ctx: Dict[str, Any]) -> str:
-        """Format PDF context with embedded images"""
+        """Format PDF context with full page image"""
         parts = []
         
         parts.append(f"Type: PDF")
@@ -722,41 +698,33 @@ class QuickContextExtractor:
             for page_ctx in ctx['context_pages_before']:
                 parts.append(f"**Page {page_ctx['page_num'] + 1}:**")
                 # Show first few lines
-                lines = page_ctx['text'].split('\n')[:10]
+                lines = page_ctx['text'].split('\n')[:5]
                 for line in lines:
                     if line.strip():
                         parts.append(f"  {line}")
             parts.append("")
         
-        # Show page text
-        parts.append(f"### Page {ctx['page_num'] + 1} Content\n")
-        
-        if ctx['page_text']:
-            parts.append("```")
-            for line in ctx['page_text'][:50]:  # Limit lines
-                parts.append(line)
-            parts.append("```\n")
-        
-        # Embed images
+        # Show full page image
         if ctx['images']:
-            parts.append(f"### Images from Page {ctx['page_num'] + 1}\n")
+            parts.append(f"### Full Page {ctx['page_num'] + 1} Image\n")
             
             for img in ctx['images']:
                 if img.get('full_page'):
-                    parts.append(f"**Full Page Rendered as Image:**\n")
+                    parts.append(f"**Complete page rendered as image** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
                 else:
-                    parts.append(f"**Image {img['index'] + 1}** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
+                    parts.append(f"**Page Image** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
                 
                 # Embed as markdown image (base64)
-                parts.append(f"![Image](data:image/png;base64,{img['base64']})\n")
-                
-                # Also provide raw base64 for LLMs that need it
-                parts.append("<details>")
-                parts.append("<summary>Base64 Image Data (click to expand)</summary>\n")
-                parts.append("```")
-                parts.append(f"data:image/png;base64,{img['base64'][:100]}...")
-                parts.append("```")
-                parts.append("</details>\n")
+                parts.append(f"![Page Image](data:image/png;base64,{img['base64']})\n")
+        
+        # Show page text (optional, usually redundant with image)
+        if ctx['page_text'] and len(ctx['page_text']) < 100:  # Only show if short
+            parts.append(f"### Page {ctx['page_num'] + 1} Text Content\n")
+            parts.append("```")
+            for line in ctx['page_text'][:30]:  # Limit lines
+                if line.strip():
+                    parts.append(line)
+            parts.append("```\n")
         
         # Show context from next pages (if any)
         if ctx['context_pages_after']:
@@ -764,7 +732,7 @@ class QuickContextExtractor:
             for page_ctx in ctx['context_pages_after']:
                 parts.append(f"**Page {page_ctx['page_num'] + 1}:**")
                 # Show first few lines
-                lines = page_ctx['text'].split('\n')[:10]
+                lines = page_ctx['text'].split('\n')[:5]
                 for line in lines:
                     if line.strip():
                         parts.append(f"  {line}")
@@ -911,20 +879,28 @@ if __name__ == "__main__":
             background: #f8f9fa;
             border-radius: 8px;
             border: 2px solid #dee2e6;
+            text-align: center;
         }
         .image-container img {
             max-width: 100%;
+            width: auto;
             height: auto;
+            max-height: 1200px;
             border: 1px solid #ccc;
             border-radius: 4px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
             display: block;
-            margin: 10px 0;
+            margin: 15px auto;
         }
         .image-info {
-            color: #6c757d;
-            font-size: 14px;
-            margin-bottom: 10px;
+            color: #495057;
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: white;
+            border-radius: 4px;
+            display: inline-block;
         }
         .score-badge {
             background: #28a745;
@@ -983,15 +959,15 @@ if __name__ == "__main__":
                 continue
             
             # Handle markdown images - convert to proper HTML img tags
-            if '![Image](data:image/png;base64,' in line:
+            if '![Page Image](data:image/png;base64,' in line or '![Image](data:image/png;base64,' in line:
                 # Extract base64 data
                 import re
-                match = re.search(r'!\[Image\]\(data:image/png;base64,([^)]+)\)', line)
+                match = re.search(r'!\[(?:Page )?Image\]\(data:image/png;base64,([^)]+)\)', line)
                 if match:
                     base64_data = match.group(1)
                     html_content += f'<div class="image-container">\n'
-                    html_content += f'<div class="image-info">📸 Embedded Image</div>\n'
-                    html_content += f'<img src="data:image/png;base64,{base64_data}" alt="Extracted Image" />\n'
+                    html_content += f'<div class="image-info">🖼️ Full Page Image (High Resolution)</div>\n'
+                    html_content += f'<img src="data:image/png;base64,{base64_data}" alt="Full Page Image" />\n'
                     html_content += '</div>\n'
                 continue
             
@@ -1054,35 +1030,43 @@ if __name__ == "__main__":
         print(f"       or: xdg-open extracted_context.html  (Linux)")
         
         # Also save images as separate PNG files
-        print(f"\n📸 Extracting images as separate files...")
+        print(f"\n📸 Extracting full page images as separate files...")
         image_count = 0
         for line in context.split('\n'):
-            if '![Image](data:image/png;base64,' in line:
+            if '![Page Image](data:image/png;base64,' in line or '![Image](data:image/png;base64,' in line:
                 match = re.search(r'data:image/png;base64,([^)]+)', line)
                 if match:
                     try:
                         base64_data = match.group(1)
                         img_data = base64.b64decode(base64_data)
                         
-                        img_filename = f"extracted_image_{image_count + 1}.png"
+                        img_filename = f"extracted_page_{image_count + 1}.png"
                         with open(img_filename, 'wb') as f:
                             f.write(img_data)
                         
-                        print(f"  ✓ Saved: {img_filename}")
+                        # Get image size
+                        from PIL import Image
+                        img_obj = Image.open(io.BytesIO(img_data))
+                        width, height = img_obj.size
+                        
+                        print(f"  ✓ Saved: {img_filename} ({width}x{height} pixels)")
                         image_count += 1
                     except Exception as e:
                         print(f"  ⚠ Could not save image {image_count + 1}: {e}")
         
         if image_count > 0:
-            print(f"\n✅ Extracted {image_count} image(s) as separate PNG files")
+            print(f"\n✅ Extracted {image_count} full page image(s) as separate PNG files")
         
         print(f"\n{'='*70}")
         print(f"📁 FILES CREATED:")
         print(f"{'='*70}")
         print(f"  1. extracted_context.txt  - Text format (for copying)")
-        print(f"  2. extracted_context.html - HTML with images (OPEN THIS IN BROWSER!)")
+        print(f"  2. extracted_context.html - HTML with images (⭐ OPEN THIS IN BROWSER!)")
         if image_count > 0:
-            print(f"  3. extracted_image_*.png  - Individual image files ({image_count} images)")
+            print(f"  3. extracted_page_*.png   - Full page images ({image_count} file(s))")
+        print(f"{'='*70}")
+        print(f"\n💡 TIP: Open extracted_context.html in your browser to see full page images!")
+        print(f"     Each PDF page is captured as ONE complete image (not broken up)")
         print(f"{'='*70}")
     
     print(f"\n✓ Saved to: extracted_context.txt")
