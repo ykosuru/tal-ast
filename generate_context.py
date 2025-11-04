@@ -852,38 +852,238 @@ if __name__ == "__main__":
     
     # Also save as HTML if there are images
     if "data:image/png;base64," in context:
-        html_content = f"""
-<!DOCTYPE html>
+        print(f"\n📸 Images detected - creating HTML view...")
+        
+        # Convert to proper HTML with rendered images
+        html_content = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Context: {query}</title>
+    <title>Context: """ + query + """</title>
     <style>
-        body {{ font-family: Arial, sans-serif; max-width: 1200px; margin: 20px auto; padding: 20px; }}
-        pre {{ background: #f5f5f5; padding: 15px; overflow-x: auto; }}
-        img {{ max-width: 100%; border: 1px solid #ddd; margin: 10px 0; }}
-        .match {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin: 10px 0; }}
-        h2 {{ border-bottom: 2px solid #333; padding-bottom: 5px; }}
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            max-width: 1400px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            border-bottom: 2px solid #95a5a6;
+            padding-bottom: 8px;
+            margin-top: 30px;
+        }
+        h3 {
+            color: #7f8c8d;
+            margin-top: 20px;
+        }
+        pre {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .match-highlight {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+        .image-container {
+            margin: 20px 0;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border: 2px solid #dee2e6;
+        }
+        .image-container img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: block;
+            margin: 10px 0;
+        }
+        .image-info {
+            color: #6c757d;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        .score-badge {
+            background: #28a745;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            display: inline-block;
+        }
+        .file-badge {
+            background: #17a2b8;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            display: inline-block;
+            margin-left: 10px;
+        }
+        .separator {
+            border-top: 2px dashed #dee2e6;
+            margin: 40px 0;
+        }
+        code {
+            background: #f8f9fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        .summary {
+            background: #e7f3ff;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 30px;
+            border-left: 4px solid #3498db;
+        }
     </style>
 </head>
 <body>
+    <div class="container">
 """
-        # Convert markdown to simple HTML
-        html_body = context.replace('```', '</pre><pre>').replace('\n', '<br>\n')
-        html_body = html_body.replace('>>> RELEVANT MATCH <<<', '<div class="match">>>> RELEVANT MATCH <<<')
-        html_body = html_body.replace('>>> END MATCH <<<', '>>> END MATCH <<<</div>')
         
-        html_content += html_body
+        # Parse the context and convert to HTML with proper image tags
+        lines = context.split('\n')
+        in_code_block = False
+        in_match = False
+        
+        for line in lines:
+            # Handle code blocks
+            if line.startswith('```'):
+                if in_code_block:
+                    html_content += "</pre>\n"
+                    in_code_block = False
+                else:
+                    html_content += "<pre>\n"
+                    in_code_block = True
+                continue
+            
+            # Handle markdown images - convert to proper HTML img tags
+            if '![Image](data:image/png;base64,' in line:
+                # Extract base64 data
+                import re
+                match = re.search(r'!\[Image\]\(data:image/png;base64,([^)]+)\)', line)
+                if match:
+                    base64_data = match.group(1)
+                    html_content += f'<div class="image-container">\n'
+                    html_content += f'<div class="image-info">📸 Embedded Image</div>\n'
+                    html_content += f'<img src="data:image/png;base64,{base64_data}" alt="Extracted Image" />\n'
+                    html_content += '</div>\n'
+                continue
+            
+            # Handle headers
+            if line.startswith('# '):
+                html_content += f"<h1>{line[2:]}</h1>\n"
+            elif line.startswith('## '):
+                html_content += f"<h2>{line[3:]}</h2>\n"
+            elif line.startswith('### '):
+                html_content += f"<h3>{line[4:]}</h3>\n"
+            
+            # Handle match highlights
+            elif '>>> RELEVANT MATCH <<<' in line:
+                html_content += '<div class="match-highlight">\n'
+                html_content += '<strong>>>> RELEVANT MATCH <<<</strong><br>\n'
+                in_match = True
+            elif '>>> END MATCH <<<' in line:
+                html_content += '<strong>>>> END MATCH <<<</strong>\n'
+                html_content += '</div>\n'
+                in_match = False
+            
+            # Handle separators
+            elif line.strip() == '='*70:
+                html_content += '<div class="separator"></div>\n'
+            
+            # Handle score and file type badges
+            elif line.startswith('Score:'):
+                score = line.split(':')[1].strip()
+                html_content += f'<span class="score-badge">Score: {score}</span>\n'
+            elif line.startswith('Type:'):
+                file_type = line.split(':')[1].strip()
+                html_content += f'<span class="file-badge">Type: {file_type}</span>\n'
+            
+            # Skip base64 details sections
+            elif '<details>' in line or '</details>' in line or '<summary>' in line or '</summary>' in line:
+                continue
+            
+            # Regular text
+            elif line.strip() and not in_code_block:
+                html_content += f"{line}<br>\n"
+            elif in_code_block:
+                html_content += f"{line}\n"
+        
+        if in_code_block:
+            html_content += "</pre>\n"
+        
         html_content += """
+    </div>
 </body>
 </html>
 """
         
-        with open("extracted_context.html", 'w') as f:
+        with open("extracted_context.html", 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        print(f"\n✓ Saved with images to: extracted_context.html")
-        print(f"  Open in browser to view embedded images!")
+        print(f"\n✅ Saved HTML with RENDERED images: extracted_context.html")
+        print(f"  🌐 Open in browser to see actual images!")
+        print(f"  💡 Try: open extracted_context.html  (Mac)")
+        print(f"       or: start extracted_context.html  (Windows)")
+        print(f"       or: xdg-open extracted_context.html  (Linux)")
+        
+        # Also save images as separate PNG files
+        print(f"\n📸 Extracting images as separate files...")
+        image_count = 0
+        for line in context.split('\n'):
+            if '![Image](data:image/png;base64,' in line:
+                match = re.search(r'data:image/png;base64,([^)]+)', line)
+                if match:
+                    try:
+                        base64_data = match.group(1)
+                        img_data = base64.b64decode(base64_data)
+                        
+                        img_filename = f"extracted_image_{image_count + 1}.png"
+                        with open(img_filename, 'wb') as f:
+                            f.write(img_data)
+                        
+                        print(f"  ✓ Saved: {img_filename}")
+                        image_count += 1
+                    except Exception as e:
+                        print(f"  ⚠ Could not save image {image_count + 1}: {e}")
+        
+        if image_count > 0:
+            print(f"\n✅ Extracted {image_count} image(s) as separate PNG files")
+        
+        print(f"\n{'='*70}")
+        print(f"📁 FILES CREATED:")
+        print(f"{'='*70}")
+        print(f"  1. extracted_context.txt  - Text format (for copying)")
+        print(f"  2. extracted_context.html - HTML with images (OPEN THIS IN BROWSER!)")
+        if image_count > 0:
+            print(f"  3. extracted_image_*.png  - Individual image files ({image_count} images)")
+        print(f"{'='*70}")
     
     print(f"\n✓ Saved to: extracted_context.txt")
     print(f"  Length: {len(context):,} chars")
