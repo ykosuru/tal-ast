@@ -1,9 +1,11 @@
 """
-LSI/SVD Indexer v2.0 - Production Ready
+LSI/SVD Indexer v2.1 - FIXED: Source Path Storage
 Hybrid search: BM25 + Latent Semantic Indexing using eigenvectors
 Supports: All code file types, text files
 
-All patches integrated, no modifications needed.
+FIXES:
+- Now stores full source_path (not just filename)
+- Better file location tracking for Quick Context Extractor
 """
 
 import json
@@ -41,7 +43,6 @@ for extensions in SUPPORTED_EXTENSIONS.values():
     ALL_EXTENSIONS.update(extensions)
 
 # Import from universal indexer (shared components)
-# If running standalone, file extensions already defined above
 try:
     from universal_indexer_v2 import (
         TextStemmer, DomainQueryExpander, BusinessCapabilityTaxonomy,
@@ -317,7 +318,7 @@ class LatentSemanticIndexer:
 class HybridSearchEngine:
     """
     Hybrid search: BM25 (keyword) + LSI (semantic)
-    Now with business capability mapping!
+    Now with business capability mapping AND full source path storage!
     """
     
     def __init__(
@@ -451,9 +452,11 @@ class HybridSearchEngine:
                 )
                 capability_list = [cap for cap, _ in capabilities[:3]]
                 
+                # FIX: Store both filename AND full path
                 all_chunks.append({
                     "text": chunk_text,
                     "source_file": str(file_path.name),
+                    "source_path": str(file_path.resolve()),  # ✅ FIXED: Store full path
                     "file_type": content.get("file_type", "unknown"),
                     "language": content.get("language", ""),
                     "keywords": keyword_list,
@@ -464,8 +467,10 @@ class HybridSearchEngine:
         
         # Store documents
         for chunk in all_chunks:
+            # FIX: Include source_path in metadata
             self.metadata_store.append({
                 "source_file": chunk["source_file"],
+                "source_path": chunk["source_path"],  # ✅ FIXED: Include full path
                 "file_type": chunk["file_type"],
                 "language": chunk.get("language", ""),
                 "keywords": chunk["keywords"],
@@ -535,6 +540,7 @@ class HybridSearchEngine:
         print(f"Total chunks: {len(all_chunks)}")
         print(f"Stemming: {'Enabled' if self.use_stemming else 'Disabled'}")
         print(f"LSI: {'Enabled' if self.use_lsi else 'Disabled'}")
+        print(f"✅ Source paths: Stored for all files")
         
         return stats
 
@@ -653,6 +659,7 @@ class HybridSearcher:
             results.append({
                 "text": self.document_store[idx][:500],
                 "source_file": metadata["source_file"],
+                "source_path": metadata.get("source_path", ""),  # ✅ FIXED: Include source path
                 "file_type": metadata["file_type"],
                 "language": metadata.get("language", ""),
                 "keywords": metadata.get("keywords", []),
@@ -682,7 +689,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Hybrid Search Engine v2.0 - BM25 + LSI"
+        description="Hybrid Search Engine v2.1 - BM25 + LSI (FIXED)"
     )
     parser.add_argument("--folder", required=True)
     parser.add_argument("--index-path", default="./hybrid_index")
@@ -722,6 +729,7 @@ def main():
         
         for i, result in enumerate(results, 1):
             print(f"[{i}] {result['source_file']}")
+            print(f"    Path: {result.get('source_path', 'N/A')}")
             print(f"    BM25: {result['bm25_score']:.3f} | LSI: {result['lsi_score']:.3f}")
             print(f"    {result['text'][:150]}...")
             print()
