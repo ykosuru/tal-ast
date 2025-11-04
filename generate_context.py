@@ -1,23 +1,18 @@
 """
-Quick Context Extractor - Works with existing indexes
+Quick Context Extractor v2.1 - FIXED
+Works with existing indexes
 Handles both text/code AND images!
+
+FIXES:
+- Result diversification (mix of PDFs and code)
+- Better source path resolution using metadata
+- Configurable file type filtering
 
 Features:
 - Text/Code: Extract N lines before/after (configurable)
 - Images: Extract and embed full image as base64
 - PDFs: Extract images from matched pages
-
-Usage:
-    from quick_context_extractor import QuickContextExtractor
-    
-    extractor = QuickContextExtractor()
-    context = extractor.extract(
-        query="payment flow diagram",
-        lines_before=200,
-        lines_after=200,
-        embed_images=True
-    )
-    print(context)
+- Smart result mixing: Get both code and PDFs in results
 """
 
 from pathlib import Path
@@ -42,6 +37,7 @@ class QuickContextExtractor:
     """
     Extract context without requiring line numbers in index
     Works with existing indexes!
+    NOW WITH RESULT DIVERSIFICATION!
     """
     
     def __init__(
@@ -66,7 +62,9 @@ class QuickContextExtractor:
         lines_before: int = 200,
         lines_after: int = 200,
         index_type: str = "both",  # "both", "universal", or "hybrid"
-        embed_images: bool = True  # Embed images from PDFs
+        embed_images: bool = True,  # Embed images from PDFs
+        diversify_results: bool = True,  # Mix different file types
+        file_type_filter: Optional[str] = None  # Filter: 'code', 'pdf', 'text'
     ) -> str:
         """
         Extract context for query
@@ -78,6 +76,8 @@ class QuickContextExtractor:
             lines_after: Lines after match (for text/code)
             index_type: Which index to search
             embed_images: Embed full images from PDFs
+            diversify_results: Try to get mix of file types
+            file_type_filter: Only return specific file type
         
         Returns:
             Formatted context string
@@ -85,19 +85,35 @@ class QuickContextExtractor:
         print(f"\nQuery: {query}")
         print(f"Settings: {lines_before} lines before, {lines_after} lines after")
         print(f"Image embedding: {'Enabled' if embed_images else 'Disabled'}")
+        print(f"Result diversification: {'Enabled' if diversify_results else 'Disabled'}")
         
         # Search indexes
-        results = self._search_indexes(query, max_matches, index_type)
+        results = self._search_indexes(
+            query, 
+            max_matches * 3 if diversify_results else max_matches,  # Get more candidates
+            index_type
+        )
         
         if not results:
             return "No results found."
+        
+        # Apply file type filter
+        if file_type_filter:
+            results = [r for r in results if r['file_type'] == file_type_filter]
+            print(f"Filtered to {len(results)} {file_type_filter} results")
+        
+        # Diversify results if enabled
+        if diversify_results and not file_type_filter:
+            results = self._diversify_results(results, max_matches)
+        else:
+            results = results[:max_matches]
         
         print(f"\nFound {len(results)} matches")
         
         # Extract context from each result
         contexts = []
         for i, result in enumerate(results, 1):
-            print(f"[{i}/{len(results)}] {result['source_file']}")
+            print(f"[{i}/{len(results)}] {result['source_file']} ({result['file_type']})")
             
             context = self._extract_context_for_result(
                 result,
@@ -112,6 +128,44 @@ class QuickContextExtractor:
         # Format for LLM
         return self._format_contexts(contexts, query)
     
+    def _diversify_results(self, results: List[Dict], max_results: int) -> List[Dict]:
+        """
+        Diversify results to include different file types
+        Strategy: Round-robin selection from each file type
+        """
+        # Group by file type
+        by_type = defaultdict(list)
+        for r in results:
+            file_type = r.get('file_type', 'unknown')
+            by_type[file_type].append(r)
+        
+        print(f"\nDiversifying results across {len(by_type)} file types:")
+        for ft, items in by_type.items():
+            print(f"  {ft}: {len(items)} results")
+        
+        # Round-robin selection
+        diversified = []
+        type_names = list(by_type.keys())
+        type_indices = {t: 0 for t in type_names}
+        
+        while len(diversified) < max_results:
+            added_any = False
+            
+            for file_type in type_names:
+                if type_indices[file_type] < len(by_type[file_type]):
+                    diversified.append(by_type[file_type][type_indices[file_type]])
+                    type_indices[file_type] += 1
+                    added_any = True
+                    
+                    if len(diversified) >= max_results:
+                        break
+            
+            if not added_any:
+                break
+        
+        print(f"Diversified to {len(diversified)} results")
+        return diversified
+    
     def _search_indexes(
         self,
         query: str,
@@ -120,7 +174,10 @@ class QuickContextExtractor:
     ) -> List[Dict[str, Any]]:
         """Search one or both indexes"""
         from universal_indexer_v2 import UniversalFileSearcher
-        from hybrid_indexer_v2 import HybridSearcher
+        try:
+            from hybrid_indexer_v2_fixed import HybridSearcher
+        except ImportError:
+            from hybrid_indexer_v2 import HybridSearcher
         
         results = []
         
@@ -134,6 +191,7 @@ class QuickContextExtractor:
                     results.append({
                         'text': r['text'],
                         'source_file': r['source_file'],
+                        'source_path': r.get('source_path', ''),  # ✅ Get source path if available
                         'file_type': r['file_type'],
                         'chunk_index': r.get('chunk_index', 0),
                         'score': r['score'],
@@ -152,6 +210,7 @@ class QuickContextExtractor:
                     results.append({
                         'text': r['text'],
                         'source_file': r['source_file'],
+                        'source_path': r.get('source_path', ''),  # ✅ Get source path if available
                         'file_type': r['file_type'],
                         'chunk_index': 0,
                         'score': r.get('combined_score', r.get('bm25_score', 0)),
@@ -172,7 +231,7 @@ class QuickContextExtractor:
                 seen.add(key)
                 unique_results.append(r)
         
-        return unique_results[:max_matches]
+        return unique_results
     
     def _extract_context_for_result(
         self,
@@ -292,14 +351,14 @@ class QuickContextExtractor:
             page_text = page.extract_text() or ""
             text_lines = page_text.split('\n')
             
-            # Render FULL PAGE as single image (not individual elements!)
+            # Render FULL PAGE as single image
             images = []
             
             try:
                 print(f"  Rendering full page {page_num + 1} as single image...")
                 
                 # Render entire page at high resolution
-                img = page.to_image(resolution=200)  # Higher resolution for clarity
+                img = page.to_image(resolution=200)
                 img_pil = img.original
                 
                 # Convert to base64
@@ -319,8 +378,6 @@ class QuickContextExtractor:
                 
             except Exception as e:
                 print(f"  ⚠ Could not render page: {e}")
-                # Fallback to text only
-                pass
             
             # Get context pages (pages before and after)
             context_pages_before = []
@@ -333,7 +390,7 @@ class QuickContextExtractor:
                     ctx_text = ctx_page.extract_text() or ""
                     context_pages_before.append({
                         'page_num': i,
-                        'text': ctx_text[:500]  # First 500 chars
+                        'text': ctx_text[:500]
                     })
                 except:
                     pass
@@ -345,7 +402,7 @@ class QuickContextExtractor:
                     ctx_text = ctx_page.extract_text() or ""
                     context_pages_after.append({
                         'page_num': i,
-                        'text': ctx_text[:500]  # First 500 chars
+                        'text': ctx_text[:500]
                     })
                 except:
                     pass
@@ -367,12 +424,11 @@ class QuickContextExtractor:
             
         except Exception as e:
             print(f"  ⚠ PDF extraction error: {e}")
-            # Fallback to text extraction
             return self._extract_text_context(source_path, result, lines_before, lines_after)
     
     def _find_page_in_pdf(self, pdf, match_text: str) -> Optional[int]:
         """Find which page contains the match text"""
-        match_words = set(match_text.lower().split()[:10])  # First 10 words
+        match_words = set(match_text.lower().split()[:10])
         
         best_page = 0
         best_match_count = 0
@@ -394,24 +450,19 @@ class QuickContextExtractor:
         if not text or len(text) < 10:
             return False
         
-        # Count non-printable characters
         non_printable = sum(1 for c in text if not c.isprintable() and c not in '\t\n\r ')
-        
-        # If more than 20% non-printable, likely garbage
         if non_printable / len(text) > 0.2:
             return True
         
-        # Check for common binary indicators
         garbage_indicators = [
-            b'\x00'.decode('latin-1'),  # Null bytes
-            '\ufffd',  # Replacement character (encoding failed)
+            b'\x00'.decode('latin-1'),
+            '\ufffd',
         ]
         
         for indicator in garbage_indicators:
             if indicator in text:
                 return True
         
-        # Check if mostly non-ASCII
         non_ascii = sum(1 for c in text if ord(c) > 127)
         if non_ascii / len(text) > 0.5:
             return True
@@ -419,7 +470,17 @@ class QuickContextExtractor:
         return False
     
     def _find_source_file(self, result: Dict[str, Any]) -> Optional[Path]:
-        """Find the source file path"""
+        """
+        Find the source file path
+        NOW WITH BETTER PATH RESOLUTION!
+        """
+        # Try source_path from metadata first (if available from fixed indexer)
+        if result.get('source_path') and result['source_path']:
+            source_path = Path(result['source_path'])
+            if source_path.exists():
+                print(f"  ✓ Using stored path: {source_path}")
+                return source_path
+        
         filename = result['source_file']
         
         # Try common locations
@@ -446,6 +507,19 @@ class QuickContextExtractor:
             except:
                 pass
         
+        elif result['index'] == 'hybrid':
+            try:
+                with open(self.hybrid_index / "metadata.pkl", 'rb') as f:
+                    metadata_list = pickle.load(f)
+                for meta in metadata_list:
+                    if meta.get('source_file') == filename:
+                        source_path = meta.get('source_path')
+                        if source_path:
+                            search_paths.insert(0, Path(source_path))
+                        break
+            except:
+                pass
+        
         for path in search_paths:
             if path.exists():
                 return path
@@ -454,7 +528,6 @@ class QuickContextExtractor:
     
     def _is_binary_file(self, file_path: Path) -> bool:
         """Check if file is binary"""
-        # Check by extension first
         binary_extensions = {
             '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
             '.zip', '.tar', '.gz', '.exe', '.dll', '.so', '.dylib',
@@ -466,20 +539,16 @@ class QuickContextExtractor:
         if file_path.suffix.lower() in binary_extensions:
             return True
         
-        # Check file content (read first 8KB)
         try:
             with open(file_path, 'rb') as f:
                 chunk = f.read(8192)
             
-            # Check for null bytes
             if b'\x00' in chunk:
                 return True
             
-            # Check if mostly printable
             text_chars = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7f})
             non_text = chunk.translate(None, text_chars)
             
-            # If more than 30% non-text, consider binary
             if len(non_text) / max(1, len(chunk)) > 0.3:
                 return True
         except:
@@ -489,7 +558,6 @@ class QuickContextExtractor:
     
     def _clean_line(self, line: str) -> str:
         """Remove non-printable characters from line"""
-        # Remove control characters but keep tabs and newlines
         cleaned = ''.join(char for char in line if char.isprintable() or char in '\t\n\r')
         return cleaned
     
@@ -500,24 +568,19 @@ class QuickContextExtractor:
         if file_path_str in self.file_cache:
             return self.file_cache[file_path_str]
         
-        # Check if binary
         if self._is_binary_file(file_path):
             print(f"  ⚠ Skipping binary file: {file_path.name}")
             return []
         
         try:
-            # Try different encodings
             for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
                 try:
                     with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
                         lines = [self._clean_line(line.rstrip('\n\r')) for line in f.readlines()]
                     
-                    # Filter out lines with too many non-ASCII chars (likely garbage)
                     cleaned_lines = []
                     for line in lines:
-                        # Count non-ASCII characters
                         non_ascii = sum(1 for c in line if ord(c) > 127)
-                        # If more than 50% non-ASCII, skip
                         if len(line) > 0 and non_ascii / len(line) < 0.5:
                             cleaned_lines.append(line)
                         elif len(line) == 0:
@@ -532,24 +595,16 @@ class QuickContextExtractor:
         
         return []
     
-    def _find_match_in_lines(
-        self,
-        lines: List[str],
-        match_text: str
-    ) -> tuple:
+    def _find_match_in_lines(self, lines: List[str], match_text: str) -> tuple:
         """Find where match_text appears in lines"""
-        
-        # Clean match text
         match_lines = [l.strip() for l in match_text.split('\n') if l.strip()]
         
         if not match_lines:
             return (0, min(10, len(lines)))
         
-        # Search for first few lines
         search_lines = match_lines[:min(3, len(match_lines))]
         
         for i in range(len(lines)):
-            # Check if we have a match starting at line i
             matches = 0
             for j, search_line in enumerate(search_lines):
                 if i + j >= len(lines):
@@ -557,19 +612,16 @@ class QuickContextExtractor:
                 
                 file_line = lines[i + j].strip()
                 
-                # Fuzzy match
                 if (search_line in file_line or 
                     file_line in search_line or
                     self._similarity(search_line, file_line) > 0.7):
                     matches += 1
             
-            # If we matched most of the search lines
             if matches >= len(search_lines) * 0.7:
                 start_line = i
                 end_line = min(i + len(match_lines), len(lines))
                 return (start_line, end_line)
         
-        # Fallback: estimate based on line count
         estimated_lines = len(match_lines)
         return (0, min(estimated_lines, len(lines)))
     
@@ -586,11 +638,7 @@ class QuickContextExtractor:
         
         return intersection / union if union > 0 else 0.0
     
-    def _format_contexts(
-        self,
-        contexts: List[Dict[str, Any]],
-        query: str
-    ) -> str:
+    def _format_contexts(self, contexts: List[Dict[str, Any]], query: str) -> str:
         """Format contexts for LLM (handles both text and images)"""
         if not contexts:
             return "No contexts found."
@@ -614,10 +662,8 @@ class QuickContextExtractor:
             parts.append(f"{'='*70}\n")
             
             if ctx.get('type') == 'pdf':
-                # Format PDF with images
                 parts.append(self._format_pdf_context(ctx))
             else:
-                # Format text/code context
                 parts.append(self._format_text_context(ctx))
         
         # Summary
@@ -643,7 +689,6 @@ class QuickContextExtractor:
         parts.append(f"Type: Text/Code")
         parts.append(f"Location: Lines {ctx['match_start']}-{ctx['match_end']}\n")
         
-        # Determine language for syntax highlighting
         ext = Path(ctx['source_file']).suffix.lower()
         lang_map = {
             '.py': 'python', '.java': 'java', '.c': 'c', '.cpp': 'cpp',
@@ -654,28 +699,24 @@ class QuickContextExtractor:
         
         parts.append(f"```{lang}")
         
-        # Show limited context
         before = ctx['before_lines'][-50:] if len(ctx['before_lines']) > 50 else ctx['before_lines']
         after = ctx['after_lines'][:50] if len(ctx['after_lines']) > 50 else ctx['after_lines']
         
-        # Lines before
         if before:
             start_num = ctx['match_start'] - len(before)
             for j, line in enumerate(before):
                 parts.append(f"{start_num + j:4d} | {line}")
             parts.append("")
         
-        # Match (highlighted)
         parts.append(">>> RELEVANT MATCH <<<")
         parts.append("")
         
-        for j, line in enumerate(ctx['match_lines'][:30]):  # Limit match display
+        for j, line in enumerate(ctx['match_lines'][:30]):
             parts.append(f"{ctx['match_start'] + j:4d} | {line}")
         
         parts.append("")
         parts.append(">>> END MATCH <<<")
         
-        # Lines after
         if after:
             parts.append("")
             for j, line in enumerate(after):
@@ -692,19 +733,16 @@ class QuickContextExtractor:
         parts.append(f"Type: PDF")
         parts.append(f"Page: {ctx['page_num'] + 1}\n")
         
-        # Show context from previous pages (if any)
         if ctx['context_pages_before']:
             parts.append(f"### Context from Previous Pages\n")
             for page_ctx in ctx['context_pages_before']:
                 parts.append(f"**Page {page_ctx['page_num'] + 1}:**")
-                # Show first few lines
                 lines = page_ctx['text'].split('\n')[:5]
                 for line in lines:
                     if line.strip():
                         parts.append(f"  {line}")
             parts.append("")
         
-        # Show full page image
         if ctx['images']:
             parts.append(f"### Full Page {ctx['page_num'] + 1} Image\n")
             
@@ -714,24 +752,20 @@ class QuickContextExtractor:
                 else:
                     parts.append(f"**Page Image** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
                 
-                # Embed as markdown image (base64)
                 parts.append(f"![Page Image](data:image/png;base64,{img['base64']})\n")
         
-        # Show page text (optional, usually redundant with image)
-        if ctx['page_text'] and len(ctx['page_text']) < 100:  # Only show if short
+        if ctx['page_text'] and len(ctx['page_text']) < 100:
             parts.append(f"### Page {ctx['page_num'] + 1} Text Content\n")
             parts.append("```")
-            for line in ctx['page_text'][:30]:  # Limit lines
+            for line in ctx['page_text'][:30]:
                 if line.strip():
                     parts.append(line)
             parts.append("```\n")
         
-        # Show context from next pages (if any)
         if ctx['context_pages_after']:
             parts.append(f"### Context from Following Pages\n")
             for page_ctx in ctx['context_pages_after']:
                 parts.append(f"**Page {page_ctx['page_num'] + 1}:**")
-                # Show first few lines
                 lines = page_ctx['text'].split('\n')[:5]
                 for line in lines:
                     if line.strip():
@@ -747,7 +781,9 @@ def quick_extract(
     lines_before: int = 200,
     lines_after: int = 200,
     max_matches: int = 5,
-    embed_images: bool = True
+    embed_images: bool = True,
+    diversify_results: bool = True,
+    file_type_filter: Optional[str] = None
 ) -> str:
     """
     One-liner: extract context for query (text + images)
@@ -758,16 +794,18 @@ def quick_extract(
         lines_after: Lines after match (for text/code)
         max_matches: Number of matches
         embed_images: Embed full images from PDFs
+        diversify_results: Get mix of file types
+        file_type_filter: Only get specific type ('code', 'pdf', 'text')
     
     Usage:
-        # Text/code files: get 200 lines before/after
-        context = quick_extract("payment validation", lines_before=200, lines_after=200)
+        # Mixed results (PDFs + code)
+        context = quick_extract("payment validation", diversify_results=True)
         
-        # PDFs with images: embed full images
-        context = quick_extract("payment flow diagram", embed_images=True)
+        # Code only
+        context = quick_extract("payment validation", file_type_filter='code')
         
-        # Configurable context size
-        context = quick_extract("error handling", lines_before=100, lines_after=100)
+        # PDFs only
+        context = quick_extract("flow diagram", file_type_filter='pdf')
     """
     extractor = QuickContextExtractor()
     return extractor.extract(
@@ -775,7 +813,9 @@ def quick_extract(
         max_matches,
         lines_before,
         lines_after,
-        embed_images=embed_images
+        embed_images=embed_images,
+        diversify_results=diversify_results,
+        file_type_filter=file_type_filter
     )
 
 
@@ -788,29 +828,30 @@ if __name__ == "__main__":
         query = "payment drawdown processing"
     
     print("="*70)
-    print("QUICK CONTEXT EXTRACTION")
-    print("With Image Embedding Support!")
+    print("QUICK CONTEXT EXTRACTION v2.1")
+    print("With Result Diversification & Better Path Resolution!")
     print("="*70)
     
-    # Check if we should look for images
+    # Check if we should look for specific file types
     image_keywords = ['diagram', 'chart', 'flow', 'graph', 'image', 'figure', 'illustration']
     has_image_keyword = any(kw in query.lower() for kw in image_keywords)
     
     if has_image_keyword:
-        print(f"\n💡 Query contains image keywords - enabling image extraction")
+        print(f"\n💡 Query contains image keywords - will include PDFs with images")
     
     context = quick_extract(
         query,
         lines_before=200,
         lines_after=200,
         max_matches=5,
-        embed_images=True  # Always try to embed images
+        embed_images=True,
+        diversify_results=True  # ✅ Mix code and PDFs in results
     )
     
     print("\n" + "="*70)
     print("RESULT")
     print("="*70)
-    print(context[:2000])  # Show first 2000 chars
+    print(context[:2000])
     if len(context) > 2000:
         print(f"\n... ({len(context) - 2000:,} more characters)")
     
@@ -822,133 +863,30 @@ if __name__ == "__main__":
     if "data:image/png;base64," in context:
         print(f"\n📸 Images detected - creating HTML view...")
         
-        # Convert to proper HTML with rendered images
         html_content = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <title>Context: """ + query + """</title>
     <style>
-        body {
-            font-family: 'Segoe UI', Arial, sans-serif;
-            max-width: 1400px;
-            margin: 20px auto;
-            padding: 20px;
-            background: #f5f5f5;
-        }
-        .container {
-            background: white;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #2c3e50;
-            border-bottom: 3px solid #3498db;
-            padding-bottom: 10px;
-        }
-        h2 {
-            color: #34495e;
-            border-bottom: 2px solid #95a5a6;
-            padding-bottom: 8px;
-            margin-top: 30px;
-        }
-        h3 {
-            color: #7f8c8d;
-            margin-top: 20px;
-        }
-        pre {
-            background: #2c3e50;
-            color: #ecf0f1;
-            padding: 15px;
-            border-radius: 5px;
-            overflow-x: auto;
-            font-size: 13px;
-            line-height: 1.5;
-        }
-        .match-highlight {
-            background: #fff3cd;
-            border-left: 4px solid #ffc107;
-            padding: 15px;
-            margin: 15px 0;
-            border-radius: 4px;
-        }
-        .image-container {
-            margin: 20px 0;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 8px;
-            border: 2px solid #dee2e6;
-            text-align: center;
-        }
-        .image-container img {
-            max-width: 100%;
-            width: auto;
-            height: auto;
-            max-height: 1200px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-            display: block;
-            margin: 15px auto;
-        }
-        .image-info {
-            color: #495057;
-            font-size: 15px;
-            font-weight: 600;
-            margin-bottom: 15px;
-            padding: 10px;
-            background: white;
-            border-radius: 4px;
-            display: inline-block;
-        }
-        .score-badge {
-            background: #28a745;
-            color: white;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 14px;
-            display: inline-block;
-        }
-        .file-badge {
-            background: #17a2b8;
-            color: white;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 14px;
-            display: inline-block;
-            margin-left: 10px;
-        }
-        .separator {
-            border-top: 2px dashed #dee2e6;
-            margin: 40px 0;
-        }
-        code {
-            background: #f8f9fa;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-family: 'Courier New', monospace;
-        }
-        .summary {
-            background: #e7f3ff;
-            padding: 20px;
-            border-radius: 8px;
-            margin-top: 30px;
-            border-left: 4px solid #3498db;
-        }
+        body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 1400px; margin: 20px auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; border-bottom: 2px solid #95a5a6; padding-bottom: 8px; margin-top: 30px; }
+        h3 { color: #7f8c8d; margin-top: 20px; }
+        pre { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+        .image-container { margin: 20px 0; padding: 20px; background: #f8f9fa; border-radius: 8px; border: 2px solid #dee2e6; text-align: center; }
+        .image-container img { max-width: 100%; width: auto; height: auto; max-height: 1200px; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 4px 8px rgba(0,0,0,0.15); display: block; margin: 15px auto; }
     </style>
 </head>
 <body>
     <div class="container">
 """
         
-        # Parse the context and convert to HTML with proper image tags
         lines = context.split('\n')
         in_code_block = False
-        in_match = False
         
         for line in lines:
-            # Handle code blocks
             if line.startswith('```'):
                 if in_code_block:
                     html_content += "</pre>\n"
@@ -958,54 +896,23 @@ if __name__ == "__main__":
                     in_code_block = True
                 continue
             
-            # Handle markdown images - convert to proper HTML img tags
             if '![Page Image](data:image/png;base64,' in line or '![Image](data:image/png;base64,' in line:
-                # Extract base64 data
-                import re
                 match = re.search(r'!\[(?:Page )?Image\]\(data:image/png;base64,([^)]+)\)', line)
                 if match:
                     base64_data = match.group(1)
                     html_content += f'<div class="image-container">\n'
-                    html_content += f'<div class="image-info">🖼️ Full Page Image (High Resolution)</div>\n'
                     html_content += f'<img src="data:image/png;base64,{base64_data}" alt="Full Page Image" />\n'
                     html_content += '</div>\n'
                 continue
             
-            # Handle headers
             if line.startswith('# '):
                 html_content += f"<h1>{line[2:]}</h1>\n"
             elif line.startswith('## '):
                 html_content += f"<h2>{line[3:]}</h2>\n"
             elif line.startswith('### '):
                 html_content += f"<h3>{line[4:]}</h3>\n"
-            
-            # Handle match highlights
-            elif '>>> RELEVANT MATCH <<<' in line:
-                html_content += '<div class="match-highlight">\n'
-                html_content += '<strong>>>> RELEVANT MATCH <<<</strong><br>\n'
-                in_match = True
-            elif '>>> END MATCH <<<' in line:
-                html_content += '<strong>>>> END MATCH <<<</strong>\n'
-                html_content += '</div>\n'
-                in_match = False
-            
-            # Handle separators
             elif line.strip() == '='*70:
-                html_content += '<div class="separator"></div>\n'
-            
-            # Handle score and file type badges
-            elif line.startswith('Score:'):
-                score = line.split(':')[1].strip()
-                html_content += f'<span class="score-badge">Score: {score}</span>\n'
-            elif line.startswith('Type:'):
-                file_type = line.split(':')[1].strip()
-                html_content += f'<span class="file-badge">Type: {file_type}</span>\n'
-            
-            # Skip base64 details sections
-            elif '<details>' in line or '</details>' in line or '<summary>' in line or '</summary>' in line:
-                continue
-            
-            # Regular text
+                html_content += '<hr>\n'
             elif line.strip() and not in_code_block:
                 html_content += f"{line}<br>\n"
             elif in_code_block:
@@ -1023,73 +930,7 @@ if __name__ == "__main__":
         with open("extracted_context.html", 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        print(f"\n✅ Saved HTML with RENDERED images: extracted_context.html")
-        print(f"  🌐 Open in browser to see actual images!")
-        print(f"  💡 Try: open extracted_context.html  (Mac)")
-        print(f"       or: start extracted_context.html  (Windows)")
-        print(f"       or: xdg-open extracted_context.html  (Linux)")
-        
-        # Also save images as separate PNG files
-        print(f"\n📸 Extracting full page images as separate files...")
-        image_count = 0
-        for line in context.split('\n'):
-            if '![Page Image](data:image/png;base64,' in line or '![Image](data:image/png;base64,' in line:
-                match = re.search(r'data:image/png;base64,([^)]+)', line)
-                if match:
-                    try:
-                        base64_data = match.group(1)
-                        img_data = base64.b64decode(base64_data)
-                        
-                        img_filename = f"extracted_page_{image_count + 1}.png"
-                        with open(img_filename, 'wb') as f:
-                            f.write(img_data)
-                        
-                        # Get image size
-                        from PIL import Image
-                        img_obj = Image.open(io.BytesIO(img_data))
-                        width, height = img_obj.size
-                        
-                        print(f"  ✓ Saved: {img_filename} ({width}x{height} pixels)")
-                        image_count += 1
-                    except Exception as e:
-                        print(f"  ⚠ Could not save image {image_count + 1}: {e}")
-        
-        if image_count > 0:
-            print(f"\n✅ Extracted {image_count} full page image(s) as separate PNG files")
-        
-        print(f"\n{'='*70}")
-        print(f"📁 FILES CREATED:")
-        print(f"{'='*70}")
-        print(f"  1. extracted_context.txt  - Text format (for copying)")
-        print(f"  2. extracted_context.html - HTML with images (⭐ OPEN THIS IN BROWSER!)")
-        if image_count > 0:
-            print(f"  3. extracted_page_*.png   - Full page images ({image_count} file(s))")
-        print(f"{'='*70}")
-        print(f"\n💡 TIP: Open extracted_context.html in your browser to see full page images!")
-        print(f"     Each PDF page is captured as ONE complete image (not broken up)")
-        print(f"{'='*70}")
+        print(f"\n✅ Saved HTML: extracted_context.html")
     
     print(f"\n✓ Saved to: extracted_context.txt")
     print(f"  Length: {len(context):,} chars")
-    
-    # Usage examples
-    print("\n" + "="*70)
-    print("USAGE EXAMPLES")
-    print("="*70)
-    print("""
-# Extract text/code with 200 lines before/after
-python quick_context_extractor.py "payment validation"
-
-# Extract with custom line counts
-context = quick_extract("error handling", lines_before=100, lines_after=100)
-
-# Extract images from PDFs
-context = quick_extract("payment flow diagram", embed_images=True)
-
-# Adjust number of matches
-context = quick_extract("OFAC screening", max_matches=10)
-
-# Code only (skip PDFs)
-extractor = QuickContextExtractor()
-context = extractor.extract("validation", index_type="hybrid")
-""")
