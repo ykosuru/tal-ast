@@ -1,8 +1,9 @@
 """
-HTML-Based Knowledge Graph Visualizer
+HTML-Based Knowledge Graph Visualizer - Updated to read from JSON files
 Interactive browser-based visualizations using D3.js - NO system binaries required!
 
 Features:
+- Read graph data from JSON files exported by parsers.py
 - Interactive force-directed graphs
 - Zoom and pan
 - Node filtering and search
@@ -15,341 +16,168 @@ from typing import Dict, List, Optional, Set, Any
 from pathlib import Path
 import json
 import logging
-
-from knowledge_graph import (
-    Entity, Relationship, EntityType, RelationType, KnowledgeGraph
-)
+import sys
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# HTML Visualizer (No System Dependencies)
+# Graph Data Loader (NEW)
 # ============================================================================
 
-class HTMLGraphVisualizer:
-    """Generate interactive HTML visualizations using D3.js"""
+class GraphDataLoader:
+    """Load graph data from JSON files"""
     
-    # Color schemes for different entity types
-    ENTITY_COLORS = {
-        EntityType.FILE: '#E8F4F8',
-        EntityType.PROCEDURE: '#90EE90',
-        EntityType.FUNCTION: '#90EE90',
-        EntityType.VARIABLE: '#FFD700',
-        EntityType.STRUCTURE: '#98FB98',
-        EntityType.CONSTANT: '#FFB6C1',
-    }
-    
-    def __init__(self, kg: KnowledgeGraph):
-        """Initialize visualizer with knowledge graph"""
-        self.kg = kg
-    
-    def visualize_full_graph(self,
-                            output_file: str = "knowledge_graph.html",
-                            max_nodes: int = 200,
-                            include_files: bool = False,
-                            include_variables: bool = False) -> str:
+    @staticmethod
+    def load_from_file(json_file: str) -> Dict[str, Any]:
         """
-        Create interactive HTML visualization of the full graph
+        Load graph data from JSON file
         
         Args:
-            output_file: Output HTML filename
-            max_nodes: Maximum nodes to include
-            include_files: Include file entities
-            include_variables: Include variable entities
+            json_file: Path to graph_data.json file
         
         Returns:
-            Path to generated HTML file
+            Dict with nodes and edges
         """
-        # Get entities
-        all_entities = self.kg.query_entities()
+        file_path = Path(json_file)
         
-        # Filter entities
-        filtered_entities = []
-        for entity in all_entities:
-            if entity.type == EntityType.FILE and not include_files:
-                continue
-            if entity.type == EntityType.VARIABLE and not include_variables:
-                continue
-            filtered_entities.append(entity)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Graph data file not found: {json_file}")
         
-        # Limit nodes
-        if len(filtered_entities) > max_nodes:
-            logger.warning(f"Limiting to {max_nodes} nodes (found {len(filtered_entities)})")
-            procedures = [e for e in filtered_entities if e.type == EntityType.PROCEDURE]
-            others = [e for e in filtered_entities if e.type != EntityType.PROCEDURE]
-            filtered_entities = procedures[:int(max_nodes * 0.8)] + others[:int(max_nodes * 0.2)]
+        with open(file_path, 'r') as f:
+            data = json.load(f)
         
-        # Get relationships
-        all_relationships = self.kg.query_relationships()
-        entity_ids = {e.id for e in filtered_entities}
-        filtered_relationships = [r for r in all_relationships 
-                                 if r.source_id in entity_ids and r.target_id in entity_ids]
+        logger.info(f"Loaded graph data from {json_file}")
+        logger.info(f"  Nodes: {len(data.get('nodes', []))}")
+        logger.info(f"  Edges: {len(data.get('edges', []))}")
         
-        # Convert to D3 format
-        graph_data = self._convert_to_d3_format(filtered_entities, filtered_relationships)
-        
-        # Generate HTML
-        html_content = self._generate_html_template(
-            graph_data,
-            title="Knowledge Graph - Full View",
-            description=f"Showing {len(filtered_entities)} entities and {len(filtered_relationships)} relationships"
-        )
-        
-        # Write file
-        output_path = Path(output_file)
-        output_path.write_text(html_content, encoding='utf-8')
-        
-        logger.info(f"Generated HTML visualization: {output_path}")
-        return str(output_path)
+        return data
     
-    def visualize_call_graph(self,
-                            output_file: str = "call_graph.html",
-                            main_only: bool = True,
-                            max_depth: int = 5) -> str:
+    @staticmethod
+    def convert_to_d3_format(graph_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Create interactive HTML visualization of call graph
+        Convert loaded graph data to D3.js format
         
         Args:
-            output_file: Output HTML filename
-            main_only: Start from main procedures only
-            max_depth: Maximum call depth
+            graph_data: Data from graph_data.json
         
         Returns:
-            Path to generated HTML file
+            Dict with nodes and links in D3 format
         """
-        # Get procedures
-        procedures = self.kg.query_entities(entity_type=EntityType.PROCEDURE)
+        # Color schemes for different entity types
+        ENTITY_COLORS = {
+            'file': '#E8F4F8',
+            'procedure': '#90EE90',
+            'function': '#90EE90',
+            'variable': '#FFD700',
+            'structure': '#98FB98',
+            'constant': '#FFB6C1',
+        }
         
-        # Filter to main procedures if requested
-        if main_only:
-            start_procedures = [p for p in procedures if p.metadata.get('is_main')]
-        else:
-            start_procedures = procedures
-        
-        if not start_procedures:
-            start_procedures = procedures[:10]
-        
-        # Build call graph
-        visited_procs = set()
-        proc_depths = {}
-        
-        for proc in start_procedures:
-            self._traverse_calls(proc, 0, max_depth, visited_procs, proc_depths)
-        
-        # Get entities and relationships
-        entities = [self.kg.get_entity(pid) for pid in visited_procs]
-        entities = [e for e in entities if e]
-        
-        relationships = []
-        for proc_id in visited_procs:
-            rels = self.kg.query_relationships(
-                source_id=proc_id,
-                rel_type=RelationType.CALLS
-            )
-            for rel in rels:
-                if rel.target_id in visited_procs:
-                    relationships.append(rel)
-        
-        # Convert to D3 format
-        graph_data = self._convert_to_d3_format(entities, relationships)
-        
-        # Add depth information
-        for node in graph_data['nodes']:
-            node['depth'] = proc_depths.get(node['id'], 0)
-        
-        # Generate HTML
-        html_content = self._generate_html_template(
-            graph_data,
-            title="Call Graph",
-            description=f"Procedure call relationships (max depth: {max_depth})",
-            layout_type="hierarchical"
-        )
-        
-        output_path = Path(output_file)
-        output_path.write_text(html_content, encoding='utf-8')
-        
-        logger.info(f"Generated call graph: {output_path}")
-        return str(output_path)
-    
-    def visualize_file_structure(self,
-                                output_file: str = "file_structure.html") -> str:
-        """
-        Create interactive HTML visualization of file structure
-        
-        Args:
-            output_file: Output HTML filename
-        
-        Returns:
-            Path to generated HTML file
-        """
-        # Get files and procedures
-        files = self.kg.query_entities(entity_type=EntityType.FILE)
-        procedures = self.kg.query_entities(entity_type=EntityType.PROCEDURE)
-        
-        # Group procedures by file
-        file_procedures = {}
-        for proc in procedures:
-            if proc.file_path:
-                if proc.file_path not in file_procedures:
-                    file_procedures[proc.file_path] = []
-                file_procedures[proc.file_path].append(proc)
-        
-        # Create entities list
-        entities = list(files)
-        for proc_list in file_procedures.values():
-            entities.extend(proc_list)
-        
-        # Get call relationships
-        relationships = self.kg.query_relationships(rel_type=RelationType.CALLS)
-        
-        # Convert to D3 format
-        graph_data = self._convert_to_d3_format(entities, relationships)
-        
-        # Add file grouping
-        for node in graph_data['nodes']:
-            entity = next((e for e in entities if e.id == node['id']), None)
-            if entity and entity.file_path:
-                node['file'] = Path(entity.file_path).name
-        
-        # Generate HTML
-        html_content = self._generate_html_template(
-            graph_data,
-            title="File Structure",
-            description=f"Code organization across {len(files)} files",
-            layout_type="grouped"
-        )
-        
-        output_path = Path(output_file)
-        output_path.write_text(html_content, encoding='utf-8')
-        
-        logger.info(f"Generated file structure: {output_path}")
-        return str(output_path)
-    
-    def visualize_procedure_subgraph(self,
-                                    procedure_name: str,
-                                    output_file: str = "procedure_graph.html",
-                                    depth: int = 2) -> str:
-        """
-        Create interactive HTML visualization of procedure context
-        
-        Args:
-            procedure_name: Name of the procedure
-            output_file: Output HTML filename
-            depth: Relationship depth
-        
-        Returns:
-            Path to generated HTML file
-        """
-        # Find procedure
-        procedures = self.kg.query_entities(entity_type=EntityType.PROCEDURE)
-        target_proc = None
-        for proc in procedures:
-            if proc.name == procedure_name:
-                target_proc = proc
-                break
-        
-        if not target_proc:
-            raise ValueError(f"Procedure '{procedure_name}' not found")
-        
-        # Get related entities
-        visited_entities = {target_proc.id: target_proc}
-        visited_relationships = set()
-        
-        self._traverse_procedure_context(
-            target_proc,
-            depth,
-            visited_entities,
-            visited_relationships,
-            include_variables=True
-        )
-        
-        # Convert to D3 format
-        entities = list(visited_entities.values())
-        relationships = list(visited_relationships)
-        graph_data = self._convert_to_d3_format(entities, relationships)
-        
-        # Mark the target procedure
-        for node in graph_data['nodes']:
-            if node['id'] == target_proc.id:
-                node['is_target'] = True
-        
-        # Generate HTML
-        html_content = self._generate_html_template(
-            graph_data,
-            title=f"Procedure: {procedure_name}",
-            description=f"Context and relationships for {procedure_name}",
-            layout_type="radial",
-            center_node=target_proc.id
-        )
-        
-        output_path = Path(output_file)
-        output_path.write_text(html_content, encoding='utf-8')
-        
-        logger.info(f"Generated procedure graph: {output_path}")
-        return str(output_path)
-    
-    def _convert_to_d3_format(self, entities: List[Entity], 
-                              relationships: List[Relationship]) -> Dict[str, Any]:
-        """Convert entities and relationships to D3.js format"""
         nodes = []
-        for entity in entities:
+        for node_data in graph_data.get('nodes', []):
             node = {
-                'id': entity.id,
-                'name': entity.name,
-                'type': entity.type.value,
-                'qualified_name': entity.qualified_name,
-                'color': self.ENTITY_COLORS.get(entity.type, '#CCCCCC'),
-                'size': self._get_node_size(entity),
-                'metadata': {}
+                'id': node_data['id'],
+                'name': node_data['name'],
+                'type': node_data['type'],
+                'qualified_name': node_data.get('qualified_name', ''),
+                'color': ENTITY_COLORS.get(node_data['type'], '#CCCCCC'),
+                'size': GraphDataLoader._get_node_size(node_data),
+                'metadata': node_data.get('metadata', {}),
+                'file_path': node_data.get('file_path', ''),
+                'start_line': node_data.get('start_line', 0)
             }
-            
-            # Add relevant metadata
-            if entity.type == EntityType.PROCEDURE:
-                node['metadata']['is_main'] = entity.metadata.get('is_main', False)
-                node['metadata']['is_external'] = entity.metadata.get('is_external', False)
-                node['metadata']['param_count'] = entity.metadata.get('parameter_count', 0)
-                node['metadata']['return_type'] = entity.metadata.get('return_type', 'void')
-            
             nodes.append(node)
         
         links = []
-        for rel in relationships:
+        for edge_data in graph_data.get('edges', []):
             link = {
-                'source': rel.source_id,
-                'target': rel.target_id,
-                'type': rel.type.value,
-                'weight': rel.weight
+                'source': edge_data['source'],
+                'target': edge_data['target'],
+                'type': edge_data['type'],
+                'weight': edge_data.get('weight', 1.0),
+                'metadata': edge_data.get('metadata', {})
             }
             links.append(link)
         
         return {'nodes': nodes, 'links': links}
     
-    def _get_node_size(self, entity: Entity) -> int:
+    @staticmethod
+    def _get_node_size(node_data: Dict[str, Any]) -> int:
         """Calculate node size based on entity type and metadata"""
         base_size = 10
         
-        if entity.type == EntityType.PROCEDURE:
-            if entity.metadata.get('is_main'):
+        if node_data['type'] == 'procedure':
+            metadata = node_data.get('metadata', {})
+            if metadata.get('is_main'):
                 return base_size * 2
-            stmt_count = entity.metadata.get('statement_count', 0)
+            stmt_count = metadata.get('statement_count', 0)
             return base_size + min(stmt_count / 10, 20)
-        elif entity.type == EntityType.FILE:
+        elif node_data['type'] == 'file':
             return base_size * 1.5
         
         return base_size
+
+
+# ============================================================================
+# Standalone HTML Generator (NEW)
+# ============================================================================
+
+def generate_standalone_html(json_file: str, 
+                            output_file: str = "graph_visualization.html",
+                            title: str = "Knowledge Graph Visualization") -> str:
+    """
+    Generate a standalone HTML file from graph JSON data
     
-    def _generate_html_template(self, graph_data: Dict[str, Any],
-                                title: str,
-                                description: str,
-                                layout_type: str = "force",
-                                center_node: Optional[str] = None) -> str:
-        """Generate complete HTML file with embedded D3.js visualization"""
-        
-        graph_json = json.dumps(graph_data, indent=2)
-        
-        html = f"""<!DOCTYPE html>
+    Args:
+        json_file: Path to graph_data.json
+        output_file: Output HTML file path
+        title: Page title
+    
+    Returns:
+        Path to generated HTML file
+    """
+    # Load graph data
+    loader = GraphDataLoader()
+    graph_data = loader.load_from_file(json_file)
+    d3_data = loader.convert_to_d3_format(graph_data)
+    
+    # Get statistics
+    stats = graph_data.get('statistics', {})
+    metadata = graph_data.get('metadata', {})
+    
+    description = f"Showing {len(d3_data['nodes'])} entities and {len(d3_data['links'])} relationships"
+    
+    # Generate HTML
+    html_content = _generate_html_template(
+        d3_data,
+        title=title,
+        description=description,
+        statistics=stats
+    )
+    
+    # Write file
+    output_path = Path(output_file)
+    output_path.write_text(html_content, encoding='utf-8')
+    
+    logger.info(f"Generated HTML visualization: {output_path}")
+    print(f"\n✓ HTML visualization created: {output_path}")
+    print(f"  Open this file in your web browser to view the interactive graph")
+    
+    return str(output_path)
+
+
+def _generate_html_template(graph_data: Dict[str, Any],
+                            title: str,
+                            description: str,
+                            statistics: Dict[str, Any] = None) -> str:
+    """Generate complete HTML file with embedded D3.js visualization"""
+    
+    graph_json = json.dumps(graph_data, indent=2)
+    stats_json = json.dumps(statistics or {}, indent=2)
+    
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -357,11 +185,16 @@ class HTMLGraphVisualizer:
     <title>{title}</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
-        body {{
+        * {{
             margin: 0;
             padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: #f5f7fa;
+            overflow: hidden;
         }}
         
         .header {{
@@ -402,6 +235,7 @@ class HTMLGraphVisualizer:
         .control-group label {{
             font-weight: 500;
             color: #333;
+            font-size: 14px;
         }}
         
         input[type="text"], input[type="range"], select {{
@@ -409,6 +243,10 @@ class HTMLGraphVisualizer:
             border: 1px solid #ddd;
             border-radius: 4px;
             font-size: 14px;
+        }}
+        
+        input[type="text"] {{
+            min-width: 200px;
         }}
         
         button {{
@@ -436,6 +274,7 @@ class HTMLGraphVisualizer:
             stroke: #fff;
             stroke-width: 2px;
             cursor: pointer;
+            transition: all 0.3s;
         }}
         
         .node:hover {{
@@ -448,12 +287,17 @@ class HTMLGraphVisualizer:
             stroke-width: 4px;
         }}
         
+        .node.main-procedure {{
+            stroke: #ffd700;
+            stroke-width: 3px;
+        }}
+        
         .link {{
             stroke: #999;
             stroke-opacity: 0.6;
         }}
         
-        .link.call {{
+        .link.calls {{
             stroke: #4285f4;
         }}
         
@@ -462,24 +306,38 @@ class HTMLGraphVisualizer:
             stroke-dasharray: 5,5;
         }}
         
+        .link.highlighted {{
+            stroke: #ff6b6b;
+            stroke-width: 2px;
+            stroke-opacity: 1;
+        }}
+        
         .node-label {{
             font-size: 11px;
             pointer-events: none;
             text-anchor: middle;
             fill: #333;
+            font-weight: 500;
         }}
         
         .tooltip {{
             position: absolute;
-            padding: 10px;
-            background: rgba(0, 0, 0, 0.8);
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.85);
             color: white;
-            border-radius: 4px;
+            border-radius: 6px;
             font-size: 12px;
             pointer-events: none;
             opacity: 0;
             transition: opacity 0.3s;
-            max-width: 300px;
+            max-width: 350px;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }}
+        
+        .tooltip strong {{
+            color: #ffd700;
+            font-size: 14px;
         }}
         
         .legend {{
@@ -505,31 +363,43 @@ class HTMLGraphVisualizer:
             border-radius: 50%;
             margin-right: 8px;
             border: 2px solid #fff;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
         }}
         
         .stats {{
             position: absolute;
-            top: 80px;
+            top: 200px;
             left: 20px;
             background: white;
             padding: 15px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             font-size: 12px;
+            max-width: 250px;
         }}
         
         .stat-item {{
-            margin: 5px 0;
+            margin: 8px 0;
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }}
+        
+        .stat-item:last-child {{
+            border-bottom: none;
         }}
         
         .stat-label {{
             font-weight: 600;
             color: #666;
+            display: block;
         }}
         
         .stat-value {{
             color: #333;
             font-weight: 500;
+            font-size: 16px;
+            margin-top: 3px;
+            display: block;
         }}
     </style>
 </head>
@@ -541,7 +411,7 @@ class HTMLGraphVisualizer:
     
     <div class="controls">
         <div class="control-group">
-            <label>Search:</label>
+            <label>🔍 Search:</label>
             <input type="text" id="search" placeholder="Search nodes...">
         </div>
         
@@ -558,35 +428,43 @@ class HTMLGraphVisualizer:
         
         <div class="control-group">
             <label>Link Distance:</label>
-            <input type="range" id="link-distance" min="30" max="200" value="100">
+            <input type="range" id="link-distance" min="30" max="200" value="100" step="10">
+            <span id="link-distance-value">100</span>
         </div>
         
         <div class="control-group">
-            <label>Charge Strength:</label>
-            <input type="range" id="charge-strength" min="-500" max="-50" value="-200">
+            <label>Charge:</label>
+            <input type="range" id="charge-strength" min="-500" max="-50" value="-200" step="10">
+            <span id="charge-value">-200</span>
         </div>
         
-        <button onclick="resetZoom()">Reset Zoom</button>
-        <button onclick="exportSVG()">Export SVG</button>
+        <button onclick="resetZoom()">🔄 Reset</button>
+        <button onclick="centerGraph()">📍 Center</button>
+        <button onclick="exportSVG()">💾 Export SVG</button>
     </div>
     
     <div class="stats" id="stats">
+        <h3 style="margin-bottom: 10px; color: #667eea;">Graph Statistics</h3>
         <div class="stat-item">
-            <span class="stat-label">Nodes:</span>
+            <span class="stat-label">Total Nodes</span>
             <span class="stat-value" id="node-count">0</span>
         </div>
         <div class="stat-item">
-            <span class="stat-label">Links:</span>
+            <span class="stat-label">Total Links</span>
             <span class="stat-value" id="link-count">0</span>
         </div>
         <div class="stat-item">
-            <span class="stat-label">Visible:</span>
+            <span class="stat-label">Visible Nodes</span>
             <span class="stat-value" id="visible-count">0</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-label">Selected</span>
+            <span class="stat-value" id="selected-node">None</span>
         </div>
     </div>
     
     <div class="legend">
-        <strong>Entity Types</strong>
+        <h4 style="margin-bottom: 10px; color: #667eea;">Entity Types</h4>
         <div class="legend-item">
             <div class="legend-color" style="background: #90EE90;"></div>
             <span>Procedure</span>
@@ -603,14 +481,23 @@ class HTMLGraphVisualizer:
             <div class="legend-color" style="background: #E8F4F8;"></div>
             <span>File</span>
         </div>
+        <hr style="margin: 10px 0;">
+        <div class="legend-item">
+            <div class="legend-color" style="background: #90EE90; border-color: #ffd700; border-width: 3px;"></div>
+            <span>★ Main Proc</span>
+        </div>
     </div>
     
     <svg id="graph"></svg>
     <div class="tooltip" id="tooltip"></div>
     
     <script>
-        // Graph data
+        // Graph data embedded from JSON
         const graphData = {graph_json};
+        const statistics = {stats_json};
+        
+        console.log('Loaded graph data:', graphData);
+        console.log('Statistics:', statistics);
         
         // Dimensions
         const width = window.innerWidth;
@@ -653,7 +540,11 @@ class HTMLGraphVisualizer:
             .selectAll("circle")
             .data(graphData.nodes)
             .join("circle")
-            .attr("class", "node")
+            .attr("class", d => {{
+                let classes = "node";
+                if (d.metadata && d.metadata.is_main) classes += " main-procedure";
+                return classes;
+            }})
             .attr("r", d => d.size)
             .attr("fill", d => d.color)
             .call(drag(simulation))
@@ -719,20 +610,36 @@ class HTMLGraphVisualizer:
         function showTooltip(event, d) {{
             const tooltip = d3.select("#tooltip");
             let html = `<strong>${{d.name}}</strong><br>`;
-            html += `Type: ${{d.type}}<br>`;
+            html += `<div style="margin-top: 5px;">`;
+            html += `Type: <strong>${{d.type}}</strong><br>`;
             
-            if (d.metadata.is_main) {{
-                html += `<strong style="color: #ffd700;">★ MAIN PROCEDURE</strong><br>`;
+            if (d.file_path) {{
+                html += `File: ${{d.file_path.split('/').pop()}}<br>`;
             }}
-            if (d.metadata.is_external) {{
-                html += `<em>External Reference</em><br>`;
+            
+            if (d.start_line) {{
+                html += `Line: ${{d.start_line}}<br>`;
             }}
-            if (d.metadata.param_count) {{
-                html += `Parameters: ${{d.metadata.param_count}}<br>`;
+            
+            if (d.metadata) {{
+                if (d.metadata.is_main) {{
+                    html += `<strong style="color: #ffd700;">★ MAIN PROCEDURE</strong><br>`;
+                }}
+                if (d.metadata.is_external) {{
+                    html += `<em style="color: #ff9999;">External Reference</em><br>`;
+                }}
+                if (d.metadata.parameter_count !== undefined) {{
+                    html += `Parameters: ${{d.metadata.parameter_count}}<br>`;
+                }}
+                if (d.metadata.return_type) {{
+                    html += `Returns: ${{d.metadata.return_type}}<br>`;
+                }}
+                if (d.metadata.statement_count) {{
+                    html += `Statements: ${{d.metadata.statement_count}}<br>`;
+                }}
             }}
-            if (d.metadata.return_type) {{
-                html += `Returns: ${{d.metadata.return_type}}<br>`;
-            }}
+            
+            html += `</div>`;
             
             tooltip.html(html)
                 .style("left", (event.pageX + 10) + "px")
@@ -745,43 +652,68 @@ class HTMLGraphVisualizer:
         }}
         
         // Highlight connections
+        let highlightedNode = null;
+        
         function highlightConnections(event, d) {{
-            const connected = new Set();
+            if (highlightedNode === d.id) {{
+                // Deselect
+                highlightedNode = null;
+                node.classed("highlighted", false);
+                link.classed("highlighted", false)
+                    .attr("stroke-opacity", 0.6);
+                document.getElementById("selected-node").textContent = "None";
+                return;
+            }}
             
-            graphData.links.forEach(link => {{
-                if (link.source.id === d.id) connected.add(link.target.id);
-                if (link.target.id === d.id) connected.add(link.source.id);
+            highlightedNode = d.id;
+            const connected = new Set();
+            const connectedLinks = new Set();
+            
+            graphData.links.forEach((link, idx) => {{
+                if (link.source.id === d.id) {{
+                    connected.add(link.target.id);
+                    connectedLinks.add(idx);
+                }}
+                if (link.target.id === d.id) {{
+                    connected.add(link.source.id);
+                    connectedLinks.add(idx);
+                }}
             }});
             
             node.classed("highlighted", n => n.id === d.id || connected.has(n.id));
-            link.attr("stroke-opacity", l => 
-                (l.source.id === d.id || l.target.id === d.id) ? 1 : 0.1
-            );
+            
+            link.classed("highlighted", (l, i) => connectedLinks.has(i))
+                .attr("stroke-opacity", (l, i) => connectedLinks.has(i) ? 1 : 0.1);
+            
+            document.getElementById("selected-node").textContent = d.name;
         }}
         
         // Search functionality
         document.getElementById("search").addEventListener("input", function(e) {{
             const searchTerm = e.target.value.toLowerCase();
             
-            node.classed("highlighted", d => 
-                d.name.toLowerCase().includes(searchTerm) ||
-                d.qualified_name.toLowerCase().includes(searchTerm)
-            );
-            
             if (searchTerm) {{
+                node.classed("highlighted", d => 
+                    d.name.toLowerCase().includes(searchTerm) ||
+                    (d.qualified_name && d.qualified_name.toLowerCase().includes(searchTerm))
+                );
+                
                 node.attr("opacity", d =>
                     d.name.toLowerCase().includes(searchTerm) ||
-                    d.qualified_name.toLowerCase().includes(searchTerm) ? 1 : 0.2
+                    (d.qualified_name && d.qualified_name.toLowerCase().includes(searchTerm)) ? 1 : 0.2
                 );
                 label.attr("opacity", d =>
                     d.name.toLowerCase().includes(searchTerm) ||
-                    d.qualified_name.toLowerCase().includes(searchTerm) ? 1 : 0.2
+                    (d.qualified_name && d.qualified_name.toLowerCase().includes(searchTerm)) ? 1 : 0.2
                 );
             }} else {{
-                node.attr("opacity", 1);
+                node.classed("highlighted", false)
+                    .attr("opacity", 1);
                 label.attr("opacity", 1);
                 link.attr("stroke-opacity", 0.6);
             }}
+            
+            updateStats();
         }});
         
         // Filter by type
@@ -801,6 +733,7 @@ class HTMLGraphVisualizer:
         // Link distance control
         document.getElementById("link-distance").addEventListener("input", function(e) {{
             linkDistance = +e.target.value;
+            document.getElementById("link-distance-value").textContent = linkDistance;
             simulation.force("link").distance(linkDistance);
             simulation.alpha(0.3).restart();
         }});
@@ -808,6 +741,7 @@ class HTMLGraphVisualizer:
         // Charge strength control
         document.getElementById("charge-strength").addEventListener("input", function(e) {{
             chargeStrength = +e.target.value;
+            document.getElementById("charge-value").textContent = chargeStrength;
             simulation.force("charge").strength(chargeStrength);
             simulation.alpha(0.3).restart();
         }});
@@ -819,8 +753,30 @@ class HTMLGraphVisualizer:
                 d3.zoomIdentity
             );
             
-            node.classed("highlighted", false);
-            link.attr("stroke-opacity", 0.6);
+            node.classed("highlighted", false)
+                .attr("opacity", 1);
+            link.classed("highlighted", false)
+                .attr("stroke-opacity", 0.6);
+            label.attr("opacity", 1);
+            highlightedNode = null;
+            document.getElementById("selected-node").textContent = "None";
+        }}
+        
+        // Center graph
+        function centerGraph() {{
+            const bounds = g.node().getBBox();
+            const fullWidth = bounds.width;
+            const fullHeight = bounds.height;
+            const midX = bounds.x + fullWidth / 2;
+            const midY = bounds.y + fullHeight / 2;
+            
+            const scale = 0.8 / Math.max(fullWidth / width, fullHeight / height);
+            const translate = [width / 2 - scale * midX, height / 2 - scale * midY];
+            
+            svg.transition().duration(750).call(
+                zoom.transform,
+                d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+            );
         }}
         
         // Export SVG
@@ -830,8 +786,9 @@ class HTMLGraphVisualizer:
             const url = URL.createObjectURL(blob);
             const link = document.createElement("a");
             link.href = url;
-            link.download = "{title.replace(' ', '_').lower()}.svg";
+            link.download = "knowledge_graph.svg";
             link.click();
+            URL.revokeObjectURL(url);
         }}
         
         // Update statistics
@@ -839,172 +796,124 @@ class HTMLGraphVisualizer:
             document.getElementById("node-count").textContent = graphData.nodes.length;
             document.getElementById("link-count").textContent = graphData.links.length;
             
-            const visibleNodes = graphData.nodes.filter(n => 
-                parseFloat(d3.select(`circle[cx="${{n.x}}"]`).attr("opacity") || 1) > 0.5
-            ).length;
-            document.getElementById("visible-count").textContent = visibleNodes;
+            const visibleCount = graphData.nodes.filter(n => {{
+                const nodeElement = node.filter(d => d.id === n.id);
+                const opacity = nodeElement.attr("opacity");
+                return !opacity || parseFloat(opacity) > 0.5;
+            }}).length;
+            
+            document.getElementById("visible-count").textContent = visibleCount;
         }}
+        
+        // Initialize - center after a delay to let simulation settle
+        setTimeout(centerGraph, 1000);
     </script>
 </body>
 </html>"""
-        
-        return html
     
-    def _traverse_calls(self, entity: Entity, current_depth: int, max_depth: int,
-                       visited_procs: Set[str], proc_depths: Dict[str, int]):
-        """Recursively traverse call graph"""
-        if current_depth > max_depth or entity.id in visited_procs:
-            return
-        
-        visited_procs.add(entity.id)
-        
-        if entity.id not in proc_depths or current_depth < proc_depths[entity.id]:
-            proc_depths[entity.id] = current_depth
-        
-        rels = self.kg.query_relationships(
-            source_id=entity.id,
-            rel_type=RelationType.CALLS
-        )
-        
-        for rel in rels:
-            callee = self.kg.get_entity(rel.target_id)
-            if callee and callee.type == EntityType.PROCEDURE:
-                self._traverse_calls(callee, current_depth + 1, max_depth,
-                                   visited_procs, proc_depths)
-    
-    def _traverse_procedure_context(self, entity: Entity, depth: int,
-                                   visited_entities: Dict[str, Entity],
-                                   visited_relationships: Set[Relationship],
-                                   include_variables: bool):
-        """Recursively traverse procedure context"""
-        if depth <= 0:
-            return
-        
-        outgoing = self.kg.query_relationships(source_id=entity.id)
-        incoming = self.kg.query_relationships(target_id=entity.id)
-        
-        for rel in outgoing + incoming:
-            visited_relationships.add(rel)
-            
-            other_id = rel.target_id if rel.source_id == entity.id else rel.source_id
-            if other_id not in visited_entities:
-                other = self.kg.get_entity(other_id)
-                if other:
-                    if not include_variables and other.type == EntityType.VARIABLE:
-                        continue
-                    
-                    visited_entities[other_id] = other
-                    
-                    if other.type == EntityType.PROCEDURE and rel.type == RelationType.CALLS:
-                        self._traverse_procedure_context(
-                            other, depth - 1, visited_entities,
-                            visited_relationships, include_variables
-                        )
+    return html
 
 
 # ============================================================================
-# Convenience Functions
+# Command Line Interface
 # ============================================================================
 
-def visualize_knowledge_graph_html(kg: KnowledgeGraph,
-                                   output_dir: str = "./visualizations",
-                                   format: str = "html") -> Dict[str, str]:
-    """
-    Generate all standard HTML visualizations (no GraphViz binary needed!)
+def main():
+    """Command line interface for generating visualizations from JSON"""
+    import argparse
     
-    Args:
-        kg: Knowledge graph to visualize
-        output_dir: Output directory for visualizations
-        format: Output format (html only)
+    parser = argparse.ArgumentParser(
+        description='Generate interactive HTML visualizations from graph JSON data',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Generate visualization from graph data
+  python graph_visualizer.py graph_data.json
+  
+  # Custom output file
+  python graph_visualizer.py graph_data.json -o my_graph.html
+  
+  # Custom title
+  python graph_visualizer.py graph_data.json -t "Payment System Architecture"
+        """
+    )
     
-    Returns:
-        Dict mapping visualization type to file path
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True, parents=True)
+    parser.add_argument('json_file', help='Path to graph_data.json file')
+    parser.add_argument('-o', '--output', default='graph_visualization.html',
+                       help='Output HTML file (default: graph_visualization.html)')
+    parser.add_argument('-t', '--title', default='Knowledge Graph Visualization',
+                       help='Visualization title')
     
-    visualizer = HTMLGraphVisualizer(kg)
-    
-    results = {}
-    
-    print(f"\n{'='*70}")
-    print("GENERATING HTML VISUALIZATIONS (No System Dependencies!)")
-    print(f"{'='*70}\n")
-    
-    try:
-        # Full graph
-        print("Creating full graph visualization...")
-        full_path = visualizer.visualize_full_graph(
-            output_file=str(output_path / "full_graph.html"),
-            max_nodes=200,
-            include_files=False,
-            include_variables=False
-        )
-        results['full_graph'] = full_path
-        print(f"  ✓ {full_path}")
-    except Exception as e:
-        logger.error(f"Failed to create full graph: {e}")
+    args = parser.parse_args()
     
     try:
-        # Call graph
-        print("\nCreating call graph...")
-        call_path = visualizer.visualize_call_graph(
-            output_file=str(output_path / "call_graph.html"),
-            main_only=True,
-            max_depth=4
+        # Validate input file
+        if not Path(args.json_file).exists():
+            print(f"Error: File '{args.json_file}' not found")
+            sys.exit(1)
+        
+        # Generate visualization
+        print(f"\n{'='*70}")
+        print("GENERATING INTERACTIVE HTML VISUALIZATION")
+        print(f"{'='*70}\n")
+        print(f"Input:  {args.json_file}")
+        print(f"Output: {args.output}")
+        print(f"Title:  {args.title}\n")
+        
+        output_path = generate_standalone_html(
+            json_file=args.json_file,
+            output_file=args.output,
+            title=args.title
         )
-        results['call_graph'] = call_path
-        print(f"  ✓ {call_path}")
+        
+        print(f"\n{'='*70}")
+        print("SUCCESS!")
+        print(f"{'='*70}")
+        print(f"\nOpen the following file in your web browser:")
+        print(f"  {Path(output_path).absolute()}")
+        print(f"\nFeatures:")
+        print(f"  • Interactive force-directed graph")
+        print(f"  • Search and filter nodes")
+        print(f"  • Click nodes to highlight connections")
+        print(f"  • Zoom and pan")
+        print(f"  • Export to SVG")
+        print(f"\n{'='*70}\n")
+        
     except Exception as e:
-        logger.error(f"Failed to create call graph: {e}")
-    
-    try:
-        # File structure
-        print("\nCreating file structure...")
-        file_path = visualizer.visualize_file_structure(
-            output_file=str(output_path / "file_structure.html")
-        )
-        results['file_structure'] = file_path
-        print(f"  ✓ {file_path}")
-    except Exception as e:
-        logger.error(f"Failed to create file structure: {e}")
-    
-    print(f"\n{'='*70}")
-    print("All visualizations are interactive HTML files!")
-    print("Open them in any web browser - no additional software needed.")
-    print(f"{'='*70}\n")
-    
-    return results
+        print(f"\nError: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    print("""
+    if len(sys.argv) == 1:
+        print("""
 ╔══════════════════════════════════════════════════════════════════════╗
-║          HTML Knowledge Graph Visualizer (No GraphViz!)              ║
+║     HTML Knowledge Graph Visualizer - Standalone File Version       ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
-Generate interactive browser-based visualizations using D3.js.
+Generate interactive browser-based visualizations from JSON graph data.
 
 ✓ NO system binaries required
-✓ NO GraphViz installation needed
+✓ NO GraphViz installation needed  
 ✓ Works entirely in the browser
 ✓ Interactive: zoom, pan, search
 ✓ Export SVG directly from browser
 
 USAGE:
-  from html_graph_visualizer import visualize_knowledge_graph_html
-  from knowledge_graph import KnowledgeGraph
-  
-  kg = KnowledgeGraph()
-  # ... populate kg ...
-  
-  visualize_knowledge_graph_html(kg, output_dir="./visualizations")
+  python graph_visualizer.py <graph_data.json> [options]
 
-FEATURES:
-  • Interactive force-directed graphs
-  • Search and filter nodes
-  • Highlight connections
-  • Zoom and pan
-  • Export to SVG
-  • Responsive design
-    """)
+WORKFLOW:
+  1. Parse TAL files:
+     python parsers.py ./tal_source --export ./output
+     
+  2. Visualize graph:
+     python graph_visualizer.py ./output/graph_data.json
+     
+  3. Open graph_visualization.html in your browser
+
+Run with --help for more options.
+        """)
+    else:
+        main()
