@@ -1,361 +1,305 @@
 #!/usr/bin/env python3
 """
-Demo Script for Enhanced TAL Knowledge Graph System
+Complete Workflow Demo: Parse TAL Code -> Export Graph -> Generate Visualization
 
-This script demonstrates all three new features:
-1. GraphViz visualization
-2. Enhanced LLM context for code rewriting
-3. Fixed Kuzu persistence
-
-Run this after setting up the necessary TAL parser modules.
+This script demonstrates the full pipeline:
+1. Parse TAL files and build knowledge graph
+2. Export graph data to JSON
+3. Generate interactive HTML visualization
 """
 
 import sys
 from pathlib import Path
 
-def print_banner(text):
-    """Print a formatted banner"""
+# Add necessary imports (adjust paths as needed)
+try:
+    from knowledge_graph import KnowledgeGraph
+    from parsers_updated import export_for_visualization, export_knowledge_graph
+    from graph_visualizer import generate_standalone_html
+    print("✓ All modules imported successfully")
+except ImportError as e:
+    print(f"Error importing modules: {e}")
+    print("\nMake sure these files are in the same directory:")
+    print("  - knowledge_graph.py")
+    print("  - parsers_updated.py (or parsers.py with updated functions)")
+    print("  - graph_visualizer.py")
+    sys.exit(1)
+
+
+def demo_workflow(tal_directory: str = None, output_dir: str = "./demo_output"):
+    """
+    Run complete workflow demonstration
+    
+    Args:
+        tal_directory: Directory containing TAL files (optional for demo)
+        output_dir: Output directory for exports and visualizations
+    """
+    print("""
+╔══════════════════════════════════════════════════════════════════════╗
+║           Knowledge Graph Workflow Demonstration                     ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+This demo shows the complete pipeline from parsing to visualization.
+    """)
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True, parents=True)
+    
+    # ========================================================================
+    # STEP 1: Create Sample Knowledge Graph
+    # ========================================================================
+    
     print("\n" + "="*70)
-    print(f"  {text}")
+    print("STEP 1: Creating Sample Knowledge Graph")
+    print("="*70 + "\n")
+    
+    kg = KnowledgeGraph(backend="networkx")
+    
+    if tal_directory and Path(tal_directory).exists():
+        print(f"Parsing TAL files from: {tal_directory}")
+        # Here you would call your TAL parsing code
+        # For demo, we'll create sample data
+    else:
+        print("Creating sample graph data for demonstration...\n")
+        create_sample_graph(kg)
+    
+    stats = kg.get_statistics()
+    print(f"\nGraph created successfully!")
+    print(f"  Entities: {stats['total_entities']}")
+    print(f"  Relationships: {stats['total_relationships']}")
+    
+    # ========================================================================
+    # STEP 2: Export Graph Data
+    # ========================================================================
+    
+    print("\n" + "="*70)
+    print("STEP 2: Exporting Graph Data")
+    print("="*70 + "\n")
+    
+    vis_file = export_knowledge_graph(kg, output_dir=output_dir)
+    
+    print(f"\n✓ Graph data exported successfully")
+    print(f"  Visualization data: {vis_file}")
+    
+    # ========================================================================
+    # STEP 3: Generate HTML Visualization
+    # ========================================================================
+    
+    print("\n" + "="*70)
+    print("STEP 3: Generating Interactive HTML Visualization")
+    print("="*70 + "\n")
+    
+    html_file = output_path / "graph_visualization.html"
+    generate_standalone_html(
+        json_file=vis_file,
+        output_file=str(html_file),
+        title="Demo Knowledge Graph"
+    )
+    
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    
+    print("\n" + "="*70)
+    print("✓ WORKFLOW COMPLETE!")
+    print("="*70)
+    
+    print(f"""
+Generated Files:
+  📄 Full graph data:      {output_path / 'knowledge_graph.json'}
+  📄 Visualization data:   {output_path / 'graph_data.json'}
+  📄 Procedures summary:   {output_path / 'procedures.json'}
+  📄 Call graph:           {output_path / 'call_graph.json'}
+  📄 Statistics:           {output_path / 'statistics.json'}
+  
+  🌐 Interactive HTML:     {html_file}
+
+Next Steps:
+  1. Open {html_file} in your web browser
+  2. Use the interactive controls to explore the graph
+  3. Search for nodes, filter by type, zoom and pan
+  4. Click nodes to highlight connections
+  5. Export to SVG if needed
+
+Real Usage:
+  # Parse your TAL code
+  python parsers.py ./your_tal_directory --export ./output
+  
+  # Generate visualization
+  python graph_visualizer.py ./output/graph_data.json
+  
+  # Open graph_visualization.html in browser
+    """)
+    
     print("="*70 + "\n")
 
 
-def demo_feature_1_visualization():
-    """Demonstrate GraphViz visualization"""
-    print_banner("FEATURE 1: GraphViz Visualization")
+def create_sample_graph(kg: KnowledgeGraph):
+    """Create sample graph data for demonstration"""
+    from knowledge_graph import Entity, Relationship, EntityType, RelationType
     
-    print("""
-This feature generates visual diagrams of your TAL code structure:
-
-1. Full Graph - Complete knowledge graph with all entities
-2. Call Graph - Procedure call relationships
-3. File Structure - Organization of code by file
-4. Procedure Context - Detailed view of specific procedures
-
-Example Usage:
-""")
+    # Create file entity
+    file1 = Entity(
+        id="",
+        type=EntityType.FILE,
+        name="payment_processor.tal",
+        qualified_name="payment_processor.tal",
+        file_path="/path/to/payment_processor.tal",
+        language="TAL",
+        metadata={'extension': '.tal'}
+    )
+    kg.add_entity(file1)
     
-    code = """
-from graph_visualizer import visualize_knowledge_graph, KnowledgeGraphVisualizer
-from knowledge_graph import KnowledgeGraph
-
-# After parsing your TAL code...
-kg = KnowledgeGraph()
-
-# Generate all standard visualizations
-viz_paths = visualize_knowledge_graph(
-    kg,
-    output_dir="./visualizations",
-    format="png"
-)
-
-# Or create specific visualizations
-visualizer = KnowledgeGraphVisualizer(kg)
-
-# Full graph
-visualizer.visualize_full_graph(
-    "full_graph",
-    max_nodes=200,
-    include_files=False
-)
-
-# Call graph
-visualizer.visualize_call_graph(
-    "call_graph",
-    main_only=True,
-    max_depth=5
-)
-
-# Specific procedure context
-visualizer.visualize_procedure_subgraph(
-    "PROCESS_PAYMENT",
-    depth=2
-)
-"""
+    # Create main procedure
+    main_proc = Entity(
+        id="",
+        type=EntityType.PROCEDURE,
+        name="PROCESS_PAYMENT",
+        qualified_name="payment_processor.tal::PROCESS_PAYMENT",
+        file_path="/path/to/payment_processor.tal",
+        start_line=10,
+        language="TAL",
+        metadata={
+            'is_main': True,
+            'return_type': 'INT',
+            'parameter_count': 3,
+            'statement_count': 45
+        }
+    )
+    kg.add_entity(main_proc)
     
-    print(code)
-    print("\nOutput: PNG/SVG/PDF files in ./visualizations/")
-    print("Example: full_graph.png, call_graph.png, file_structure.png")
-
-
-def demo_feature_2_llm_context():
-    """Demonstrate enhanced LLM context"""
-    print_banner("FEATURE 2: Enhanced LLM Context for Code Rewriting")
+    # Create helper procedures
+    validate_proc = Entity(
+        id="",
+        type=EntityType.PROCEDURE,
+        name="VALIDATE_AMOUNT",
+        qualified_name="payment_processor.tal::VALIDATE_AMOUNT",
+        file_path="/path/to/payment_processor.tal",
+        start_line=60,
+        language="TAL",
+        metadata={
+            'return_type': 'INT',
+            'parameter_count': 1,
+            'statement_count': 15
+        }
+    )
+    kg.add_entity(validate_proc)
     
-    print("""
-This feature generates comprehensive context for LLMs to help rewrite TAL code
-in other languages (Java, Python, etc.).
-
-What's Included:
-- Procedure signatures with actual code
-- Business logic summaries
-- Call chain analysis
-- Data structure definitions
-- Language-specific migration hints
-
-Example Usage:
-""")
+    check_proc = Entity(
+        id="",
+        type=EntityType.PROCEDURE,
+        name="CHECK_BALANCE",
+        qualified_name="payment_processor.tal::CHECK_BALANCE",
+        file_path="/path/to/payment_processor.tal",
+        start_line=80,
+        language="TAL",
+        metadata={
+            'return_type': 'INT',
+            'parameter_count': 2,
+            'statement_count': 20
+        }
+    )
+    kg.add_entity(check_proc)
     
-    code = """
-from code_rewriting_context import create_rewriting_context
-from knowledge_graph import KnowledgeGraph
-
-# After parsing your TAL code...
-kg = KnowledgeGraph()
-
-# Generate context for Java migration
-context = create_rewriting_context(
-    kg,
-    search_term="drawdown",
-    target_language="Java",
-    output_file="drawdown_migration.md"
-)
-
-# The context includes:
-# - All procedures related to "drawdown"
-# - Actual TAL source code snippets
-# - Call chains and dependencies
-# - Java-specific migration hints
-# - Data structure mappings
-
-# Use this context with Claude/GPT-4:
-# "Using the following TAL code context, rewrite it in Java..."
-"""
+    # External reference
+    ext_proc = Entity(
+        id="",
+        type=EntityType.PROCEDURE,
+        name="UPDATE_LEDGER",
+        qualified_name="external::UPDATE_LEDGER",
+        language="TAL",
+        metadata={
+            'is_external': True,
+            'return_type': 'INT'
+        }
+    )
+    kg.add_entity(ext_proc)
     
-    print(code)
-    print("\nOutput: Markdown file ready for LLM consumption")
-    print("Example content:")
-    print("""
-# TAL to Java Migration Context
-## Functionality: `drawdown`
-
-### 1. `PROCESS_DRAWDOWN`
-| Property | Value |
-|----------|-------|
-| Return Type | INT |
-| Parameters | account_id, amount |
-| Statements | 45 |
-
-**Source Code:**
-```tal
-PROC PROCESS_DRAWDOWN(account_id, amount);
-  INT status;
-  CALL VALIDATE_ACCOUNT(account_id);
-  ...
-END;
-```
-
-## Migration Hints for Java
-- Convert procedures to service methods
-- Use BigDecimal for money amounts
-- Implement proper exception handling
-""")
-
-
-def demo_feature_3_kuzu_fix():
-    """Demonstrate Kuzu fix"""
-    print_banner("FEATURE 3: Fixed Kuzu Persistence")
+    # Create some variables
+    var1 = Entity(
+        id="",
+        type=EntityType.VARIABLE,
+        name="payment_amount",
+        qualified_name="payment_processor.tal::PROCESS_PAYMENT::payment_amount",
+        file_path="/path/to/payment_processor.tal",
+        start_line=12,
+        language="TAL",
+        metadata={
+            'data_type': 'INT',
+            'scope': 'local'
+        }
+    )
+    kg.add_entity(var1)
     
-    print("""
-Previous Issue:
-  "Database path cannot be a directory" error
-
-Fix Applied:
-  - Proper database path handling
-  - Automatic cleanup of conflicting schemas
-  - Stable persistence layer
-
-Example Usage:
-""")
+    var2 = Entity(
+        id="",
+        type=EntityType.VARIABLE,
+        name="account_balance",
+        qualified_name="payment_processor.tal::PROCESS_PAYMENT::account_balance",
+        file_path="/path/to/payment_processor.tal",
+        start_line=13,
+        language="TAL",
+        metadata={
+            'data_type': 'FIXED(10,2)',
+            'scope': 'local'
+        }
+    )
+    kg.add_entity(var2)
     
-    code = """
-from knowledge_graph import KnowledgeGraph
-
-# Old way (would fail):
-# kg = KnowledgeGraph(backend="kuzu")  # ERROR!
-
-# New way (works perfectly):
-kg = KnowledgeGraph(
-    backend="kuzu",
-    db_path="./my_knowledge_graph"
-)
-
-# Parse and add data
-# ... data is now persisted in Kuzu ...
-
-# Reconnect later - data is still there!
-kg2 = KnowledgeGraph(
-    backend="kuzu",
-    db_path="./my_knowledge_graph"
-)
-stats = kg2.get_statistics()  # Loads persisted data
-
-# Or use the fix module directly
-from kuzu_fix import initialize_kuzu_database
-
-db, conn = initialize_kuzu_database(
-    "./my_db",
-    clean=True  # Clean start
-)
-"""
+    # Create relationships
+    kg.add_relationship(Relationship(
+        source_id=file1.id,
+        target_id=main_proc.id,
+        type=RelationType.DEFINES
+    ))
     
-    print(code)
-    print("\nBenefits:")
-    print("✓ Persistent storage across sessions")
-    print("✓ No more path errors")
-    print("✓ Production-ready database")
-
-
-def demo_complete_workflow():
-    """Demonstrate complete integrated workflow"""
-    print_banner("COMPLETE WORKFLOW: All Features Together")
+    kg.add_relationship(Relationship(
+        source_id=main_proc.id,
+        target_id=validate_proc.id,
+        type=RelationType.CALLS,
+        metadata={'line': 25}
+    ))
     
-    print("""
-Use all three features in a single workflow:
-""")
+    kg.add_relationship(Relationship(
+        source_id=main_proc.id,
+        target_id=check_proc.id,
+        type=RelationType.CALLS,
+        metadata={'line': 30}
+    ))
     
-    code = """
-from kg_integration import EnhancedKnowledgeGraphWorkflow
-
-# 1. Initialize with Kuzu backend (Feature 3)
-workflow = EnhancedKnowledgeGraphWorkflow(
-    backend="kuzu",
-    db_path="./payment_system_kg"
-)
-
-# 2. Parse TAL files
-results = workflow.parse_directory(
-    "./tal_source/payment_system",
-    recursive=True,
-    resolve_refs=True
-)
-
-print(f"Parsed {results['total_entities']} entities")
-
-# 3. Generate visualizations (Feature 1)
-viz_paths = workflow.visualize(
-    output_dir="./visualizations",
-    format="png"
-)
-
-print(f"Generated visualizations:")
-for viz_type, path in viz_paths.items():
-    print(f"  {viz_type}: {path}")
-
-# 4. Generate migration context (Feature 2)
-context = workflow.generate_migration_context(
-    search_term="drawdown",
-    target_language="Java",
-    output_file="drawdown_to_java.md"
-)
-
-print(f"Migration context: {len(context)} characters")
-
-# 5. Search for functionality
-search_results = workflow.search_functionality("payment")
-
-# 6. Export everything
-workflow.export_graph(output_dir="./export")
-
-print("Workflow complete!")
-print("  - Knowledge graph persisted in Kuzu")
-print("  - Visualizations in ./visualizations/")
-print("  - Migration context in drawdown_to_java.md")
-print("  - Graph data exported to ./export/")
-"""
+    kg.add_relationship(Relationship(
+        source_id=main_proc.id,
+        target_id=ext_proc.id,
+        type=RelationType.CALLS,
+        metadata={'line': 40, 'external': True}
+    ))
     
-    print(code)
-
-
-def demo_command_line():
-    """Demonstrate command line usage"""
-    print_banner("COMMAND LINE USAGE")
+    kg.add_relationship(Relationship(
+        source_id=main_proc.id,
+        target_id=var1.id,
+        type=RelationType.CONTAINS
+    ))
     
-    print("Quick one-liners for common tasks:\n")
+    kg.add_relationship(Relationship(
+        source_id=main_proc.id,
+        target_id=var2.id,
+        type=RelationType.CONTAINS
+    ))
     
-    commands = [
-        ("Parse and visualize", 
-         "python kg_integration.py ./tal_source --visualize"),
-        
-        ("Generate Java migration context",
-         "python kg_integration.py ./tal_source --migrate drawdown --target-language Java"),
-        
-        ("Use Kuzu backend",
-         "python kg_integration.py ./tal_source --backend kuzu --visualize"),
-        
-        ("Complete workflow",
-         "python kg_integration.py ./tal_source --visualize --migrate payment --export"),
-        
-        ("Search only",
-         "python kg_integration.py ./tal_source --search drawdown"),
-        
-        ("Export to SVG",
-         "python kg_integration.py ./tal_source --visualize --viz-format svg"),
-    ]
-    
-    for task, cmd in commands:
-        print(f"{task}:")
-        print(f"  $ {cmd}\n")
-
-
-def main():
-    """Run the demo"""
-    print("""
-╔══════════════════════════════════════════════════════════════════════╗
-║     Enhanced TAL Knowledge Graph System - Feature Demonstration      ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-This demo shows the three new features and how to use them.
-""")
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "--run-example":
-        print("\nRunning example workflow...\n")
-        
-        # Check if we have the necessary modules
-        try:
-            from kg_integration import EnhancedKnowledgeGraphWorkflow
-            print("✓ Modules loaded successfully")
-            
-            # You would run an actual example here with real TAL files
-            print("\nTo run with your TAL files:")
-            print("  python demo.py <tal_directory>")
-            
-        except ImportError as e:
-            print(f"✗ Missing module: {e}")
-            print("\nMake sure all required files are present:")
-            print("  - knowledge_graph.py")
-            print("  - parsers.py")
-            print("  - graph_visualizer.py")
-            print("  - code_rewriting_context.py")
-            print("  - kuzu_fix.py")
-            print("  - kg_integration.py")
-    else:
-        # Show feature demos
-        demo_feature_1_visualization()
-        input("\nPress Enter to continue...")
-        
-        demo_feature_2_llm_context()
-        input("\nPress Enter to continue...")
-        
-        demo_feature_3_kuzu_fix()
-        input("\nPress Enter to continue...")
-        
-        demo_complete_workflow()
-        input("\nPress Enter to continue...")
-        
-        demo_command_line()
-        
-        print("\n" + "="*70)
-        print("  Demo Complete!")
-        print("="*70)
-        print("\nNext Steps:")
-        print("  1. Review the code examples above")
-        print("  2. Install required dependencies (see README.md)")
-        print("  3. Run: python kg_integration.py <your_tal_directory>")
-        print("\nFor help:")
-        print("  python kg_integration.py --help")
-        print()
+    print("Sample entities created:")
+    print(f"  • 1 file")
+    print(f"  • 4 procedures (1 main, 1 external)")
+    print(f"  • 2 variables")
+    print(f"  • 6 relationships")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Demo: Complete knowledge graph workflow')
+    parser.add_argument('--tal-dir', help='Optional: Directory with TAL files to parse')
+    parser.add_argument('--output', default='./demo_output', help='Output directory')
+    
+    args = parser.parse_args()
+    
+    demo_workflow(tal_directory=args.tal_dir, output_dir=args.output)
