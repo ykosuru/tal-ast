@@ -117,6 +117,7 @@ class TALParser(ASTParser):
         self.language = "TAL"
         self.entity_lookup: Dict[str, Entity] = {}  # Track entities by qualified name
         self.procedure_calls: List[Tuple[str, str, int]] = []  # (caller, callee, line)
+        self.directives: List[Dict[str, Any]] = []  # Store directives for file metadata
     
     def parse_file(self, file_path: str, ast_data: Any) -> Entity:
         """
@@ -134,6 +135,7 @@ class TALParser(ASTParser):
         # Reset tracking for this file
         self.entity_lookup.clear()
         self.procedure_calls.clear()
+        self.directives.clear()
         
         # Determine AST format and extract root node
         root_node = self._extract_root_node(ast_data)
@@ -147,6 +149,11 @@ class TALParser(ASTParser):
         
         # Extract relationships from AST
         relationships = self.extract_relationships(root_node, entities)
+        
+        # Add directives to file metadata
+        if self.directives:
+            file_entity.metadata['directives'] = self.directives
+            file_entity.metadata['directive_count'] = len(self.directives)
         
         # Add to knowledge graph
         for entity in entities:
@@ -196,7 +203,6 @@ class TALParser(ASTParser):
         - Subprocs
         - Variables (global, local, parameters)
         - Structures
-        - Directives
         """
         entities = []
         
@@ -268,11 +274,9 @@ class TALParser(ASTParser):
                 entities.append(struct_entity)
                 self.entity_lookup[struct_entity.qualified_name] = struct_entity
         
-        # Extract directives
+        # Record directives (but don't create entities for them)
         elif 'directive' in node_type:
-            directive_entity = self._extract_directive_entity(node, file_entity)
-            if directive_entity:
-                entities.append(directive_entity)
+            self._record_directive(node)
         
         # Extract procedure calls (for relationship extraction later)
         elif node_type in ['call_stmt', 'system_function_call']:
@@ -318,6 +322,7 @@ class TALParser(ASTParser):
                 if param.type == 'parameter':
                     param_names.append(param.name)
             metadata['parameters'] = param_names
+            metadata['parameter_count'] = len(param_names)
         
         # Count local variables and statements
         local_count = 0
@@ -385,6 +390,7 @@ class TALParser(ASTParser):
                 if param.type == 'parameter':
                     param_names.append(param.name)
             metadata['parameters'] = param_names
+            metadata['parameter_count'] = len(param_names)
         
         # Create entity (using PROCEDURE type for subprocs too)
         entity = Entity(
@@ -549,36 +555,25 @@ class TALParser(ASTParser):
             
             fields.append(field_info)
     
-    def _extract_directive_entity(self, node, file_entity: Entity) -> Optional[Entity]:
-        """Extract Entity from directive nodes"""
+    def _record_directive(self, node):
+        """Record directive information for file metadata"""
         directive_type = node.type.replace('_directive', '').upper()
         
-        metadata = {
-            'directive_type': directive_type,
-            'value': node.value if hasattr(node, 'value') else ''
+        directive_info = {
+            'type': directive_type,
+            'line': node.location.line if node.location else 0,
+            'value': node.value if hasattr(node, 'value') and node.value else ''
         }
         
         # Add specific attributes based on directive type
         if directive_type == 'PAGE' and 'title' in node.attributes:
-            metadata['title'] = node.attributes['title']
+            directive_info['title'] = node.attributes['title']
         elif directive_type == 'SECTION' and 'section_name' in node.attributes:
-            metadata['section_name'] = node.attributes['section_name']
+            directive_info['section_name'] = node.attributes['section_name']
         elif directive_type == 'SOURCE' and 'function_name' in node.attributes:
-            metadata['function_name'] = node.attributes['function_name']
+            directive_info['function_name'] = node.attributes['function_name']
         
-        # Create entity
-        entity = Entity(
-            id="",
-            type=EntityType.DIRECTIVE,
-            name=f"{directive_type}_directive",
-            qualified_name=f"{file_entity.name}::{directive_type}_{node.location.line if node.location else 0}",
-            file_path=file_entity.file_path,
-            start_line=node.location.line if node.location else 0,
-            language=self.language,
-            metadata=metadata
-        )
-        
-        return entity
+        self.directives.append(directive_info)
     
     def _record_procedure_call(self, node, caller_context: Optional[str]):
         """Record procedure call for relationship extraction"""
@@ -716,13 +711,21 @@ if __name__ == "__main__":
         # Show some statistics
         procedures = [e for e in kg.entities.values() if e.type == EntityType.PROCEDURE]
         variables = [e for e in kg.entities.values() if e.type == EntityType.VARIABLE]
+        structures = [e for e in kg.entities.values() if e.type == EntityType.STRUCTURE]
         
         print(f"\nProcedures: {len(procedures)}")
         print(f"Variables: {len(variables)}")
+        print(f"Structures: {len(structures)}")
         
         # Show procedure calls
         calls = [r for r in kg.relationships if r.type == RelationType.CALLS]
         print(f"Procedure calls: {len(calls)}")
         
+        # Show directives if present
+        if 'directives' in file_entity.metadata:
+            print(f"Directives: {file_entity.metadata['directive_count']}")
+        
     except Exception as e:
         print(f"Error parsing file: {e}")
+        import traceback
+        traceback.print_exc()
