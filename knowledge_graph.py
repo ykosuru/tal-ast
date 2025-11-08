@@ -9,6 +9,11 @@ Core Features:
 - Multiple backend support (Kuzu, NetworkX, Neo4j)
 - RAG-ready export formats
 - Cypher-like query interface
+
+HASHABILITY:
+- Entity and Relationship classes are hashable for use in sets/dicts
+- Hashing based on immutable identifying fields only
+- Equality checks use same fields as hashing
 """
 
 from abc import ABC, abstractmethod
@@ -65,7 +70,27 @@ class RelationType(Enum):
 
 @dataclass
 class Entity:
-    """Represents a code entity in the knowledge graph"""
+    """
+    Represents a code entity in the knowledge graph
+    
+    HASHABILITY:
+    ------------
+    This class is hashable to support:
+    - Use in sets for deduplication
+    - Use as dictionary keys for fast lookups
+    - Graph database operations
+    
+    Hashing is based on immutable identifying fields:
+    - id: Unique identifier
+    - type: Entity type (enum)
+    - qualified_name: Fully qualified name
+    
+    Mutable fields (metadata, created_at) are NOT used in hashing to ensure
+    hash stability even when these fields change.
+    
+    IMPORTANT: Two entities with the same id, type, and qualified_name are
+    considered equal, even if they have different metadata or timestamps.
+    """
     id: str
     type: EntityType
     name: str
@@ -85,7 +110,39 @@ class Entity:
             self.type = EntityType(self.type)
         if not self.id:
             self.id = self._generate_id()
-            
+    
+    def __hash__(self) -> int:
+        """
+        Make Entity hashable based on immutable identifying fields
+        
+        Only uses id, type, and qualified_name for hashing because:
+        - These fields uniquely identify an entity
+        - They are immutable after creation
+        - metadata and created_at can change over time
+        
+        This ensures hash stability and allows entities to be used in
+        sets and as dictionary keys.
+        """
+        return hash((self.id, self.type, self.qualified_name))
+    
+    def __eq__(self, other) -> bool:
+        """
+        Check equality based on the same fields used for hashing
+        
+        Two entities are equal if they have the same id, type, and
+        qualified_name, regardless of other fields like metadata.
+        
+        This is consistent with __hash__ to satisfy Python's requirement
+        that objects which compare equal must have the same hash value.
+        """
+        if not isinstance(other, Entity):
+            return NotImplemented
+        return (
+            self.id == other.id and 
+            self.type == other.type and 
+            self.qualified_name == other.qualified_name
+        )
+    
     def _generate_id(self) -> str:
         """Generate unique ID based on entity properties"""
         key = f"{self.type.value}:{self.qualified_name}:{self.file_path or ''}"
@@ -97,11 +154,35 @@ class Entity:
         data['type'] = self.type.value
         data['created_at'] = self.created_at.isoformat()
         return data
+    
+    def __repr__(self) -> str:
+        """Provide clean string representation"""
+        return f"Entity(id='{self.id}', type={self.type.value}, name='{self.name}')"
 
 
 @dataclass
 class Relationship:
-    """Represents a relationship between entities"""
+    """
+    Represents a relationship between entities
+    
+    HASHABILITY:
+    ------------
+    This class is hashable to support:
+    - Use in sets for deduplication
+    - Use as dictionary keys for relationship lookups
+    - Graph database operations
+    
+    Hashing is based on immutable identifying fields:
+    - source_id: Source entity ID
+    - target_id: Target entity ID
+    - type: Relationship type (enum)
+    
+    Mutable fields (metadata, weight, created_at) are NOT used in hashing
+    to ensure hash stability.
+    
+    IMPORTANT: Two relationships with the same source_id, target_id, and type
+    are considered equal, even if they have different metadata or weights.
+    """
     source_id: str
     target_id: str
     type: RelationType
@@ -113,12 +194,48 @@ class Relationship:
         if isinstance(self.type, str):
             self.type = RelationType(self.type)
     
+    def __hash__(self) -> int:
+        """
+        Make Relationship hashable based on immutable identifying fields
+        
+        Only uses source_id, target_id, and type for hashing because:
+        - These fields uniquely identify a relationship
+        - They are immutable after creation
+        - metadata, weight, and created_at can change over time
+        
+        This ensures hash stability and allows relationships to be used
+        in sets and as dictionary keys.
+        """
+        return hash((self.source_id, self.target_id, self.type))
+    
+    def __eq__(self, other) -> bool:
+        """
+        Check equality based on the same fields used for hashing
+        
+        Two relationships are equal if they have the same source_id,
+        target_id, and type, regardless of metadata or weight.
+        
+        This is consistent with __hash__ to satisfy Python's requirement
+        that objects which compare equal must have the same hash value.
+        """
+        if not isinstance(other, Relationship):
+            return NotImplemented
+        return (
+            self.source_id == other.source_id and 
+            self.target_id == other.target_id and 
+            self.type == other.type
+        )
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization"""
         data = asdict(self)
         data['type'] = self.type.value
         data['created_at'] = self.created_at.isoformat()
         return data
+    
+    def __repr__(self) -> str:
+        """Provide clean string representation"""
+        return f"Relationship(source='{self.source_id}', target='{self.target_id}', type={self.type.value})"
 
 
 # ============================================================================
@@ -274,7 +391,11 @@ class NetworkXDatabase(GraphDatabase):
     def get_neighbors(self, entity_id: str,
                      rel_type: Optional[RelationType] = None,
                      direction: str = "outgoing") -> List[Entity]:
-        """Get neighboring entities"""
+        """
+        Get neighboring entities
+        
+        Note: Uses set() for deduplication, which requires Entity to be hashable
+        """
         if entity_id not in self.graph:
             return []
         
@@ -297,7 +418,8 @@ class NetworkXDatabase(GraphDatabase):
                 else:
                     neighbors.append(self.entities[predecessor])
         
-        return list(set(neighbors))  # Remove duplicates
+        # Remove duplicates using set (requires Entity to be hashable)
+        return list(set(neighbors))
     
     def execute_query(self, query: str, params: Optional[Dict] = None) -> List[Dict]:
         """Execute a custom query (simplified implementation)"""
@@ -745,3 +867,76 @@ class KnowledgeGraph:
             self.add_relationship(rel)
         
         logger.info(f"Loaded graph from {filepath}")
+
+
+# ============================================================================
+# Hashability Tests (Run on import to verify)
+# ============================================================================
+
+def _verify_hashability():
+    """Verify Entity and Relationship classes are properly hashable"""
+    try:
+        # Test Entity hashability
+        e1 = Entity(
+            id="test_1",
+            type=EntityType.PROCEDURE,
+            name="test_proc",
+            qualified_name="file::test_proc"
+        )
+        e2 = Entity(
+            id="test_1",
+            type=EntityType.PROCEDURE,
+            name="test_proc",
+            qualified_name="file::test_proc",
+            metadata={"different": "metadata"}  # Different metadata
+        )
+        
+        # Test hashing
+        _ = hash(e1)
+        _ = hash(e2)
+        
+        # Test equality
+        assert e1 == e2, "Entities with same ID should be equal"
+        
+        # Test in set
+        entity_set = {e1, e2}
+        assert len(entity_set) == 1, "Set should deduplicate equal entities"
+        
+        # Test as dict key
+        entity_dict = {e1: "value"}
+        assert entity_dict[e2] == "value", "Should retrieve by equal key"
+        
+        # Test Relationship hashability
+        r1 = Relationship(
+            source_id="src",
+            target_id="tgt",
+            type=RelationType.CALLS
+        )
+        r2 = Relationship(
+            source_id="src",
+            target_id="tgt",
+            type=RelationType.CALLS,
+            weight=2.0  # Different weight
+        )
+        
+        # Test hashing
+        _ = hash(r1)
+        _ = hash(r2)
+        
+        # Test equality
+        assert r1 == r2, "Relationships with same source/target/type should be equal"
+        
+        # Test in set
+        rel_set = {r1, r2}
+        assert len(rel_set) == 1, "Set should deduplicate equal relationships"
+        
+        logger.debug("✓ Hashability verification passed")
+        return True
+        
+    except Exception as e:
+        logger.error(f"✗ Hashability verification failed: {e}")
+        return False
+
+
+# Run verification on module import
+_verify_hashability()
