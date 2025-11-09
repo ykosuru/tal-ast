@@ -1,305 +1,319 @@
 #!/usr/bin/env python3
 """
-Complete Workflow Demo: Parse TAL Code -> Export Graph -> Generate Visualization
-
-This script demonstrates the full pipeline:
-1. Parse TAL files and build knowledge graph
-2. Export graph data to JSON
-3. Generate interactive HTML visualization
+Export ONLY entities related to a search term (focused subgraph)
+Shows the search matches + their direct relationships only
 """
 
-import sys
+from knowledge_graph import KnowledgeGraph, EntityType, RelationType
+import json
 from pathlib import Path
+import sys
+import re
 
-# Add necessary imports (adjust paths as needed)
-try:
-    from knowledge_graph import KnowledgeGraph
-    from parsers_updated import export_for_visualization, export_knowledge_graph
-    from graph_visualizer import generate_standalone_html
-    print("✓ All modules imported successfully")
-except ImportError as e:
-    print(f"Error importing modules: {e}")
-    print("\nMake sure these files are in the same directory:")
-    print("  - knowledge_graph.py")
-    print("  - parsers_updated.py (or parsers.py with updated functions)")
-    print("  - graph_visualizer.py")
-    sys.exit(1)
-
-
-def demo_workflow(tal_directory: str = None, output_dir: str = "./demo_output"):
+def export_focused_subgraph(kg: KnowledgeGraph, 
+                           search_term: str,
+                           output_dir: str = "./output",
+                           depth: int = 1,
+                           include_variables: bool = True):
     """
-    Run complete workflow demonstration
+    Export only entities matching search term and their relationships
     
     Args:
-        tal_directory: Directory containing TAL files (optional for demo)
-        output_dir: Output directory for exports and visualizations
-    """
-    print("""
-╔══════════════════════════════════════════════════════════════════════╗
-║           Knowledge Graph Workflow Demonstration                     ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-This demo shows the complete pipeline from parsing to visualization.
-    """)
+        kg: Knowledge graph
+        search_term: Term to search for
+        output_dir: Output directory
+        depth: How many relationship hops to include (1 = direct only)
+        include_variables: Include variables in subgraph
     
+    Returns:
+        Path to exported file
+    """
+    print(f"\n{'='*70}")
+    print(f"EXPORTING FOCUSED SUBGRAPH: '{search_term}'")
+    print(f"{'='*70}\n")
+    
+    all_entities = kg.query_entities()
+    
+    # Step 1: Find all entities matching search term
+    pattern = re.compile(re.escape(search_term), re.IGNORECASE)
+    matching_entities = []
+    
+    for entity in all_entities:
+        matches = (
+            pattern.search(entity.name) or 
+            pattern.search(entity.qualified_name) or
+            any(pattern.search(str(v)) for v in entity.metadata.values() if isinstance(v, str))
+        )
+        
+        if matches:
+            matching_entities.append(entity)
+    
+    print(f"Step 1: Found {len(matching_entities)} entities matching '{search_term}'")
+    
+    # Show what we found
+    type_counts = {}
+    for entity in matching_entities:
+        entity_type = entity.type.value
+        type_counts[entity_type] = type_counts.get(entity_type, 0) + 1
+        print(f"  • {entity.name} ({entity.type.value})")
+    
+    print(f"\nMatching entity types:")
+    for entity_type, count in sorted(type_counts.items()):
+        print(f"  {entity_type}: {count}")
+    
+    if not matching_entities:
+        print(f"\n❌ No entities found matching '{search_term}'")
+        sys.exit(1)
+    
+    # Step 2: Build subgraph by traversing relationships
+    subgraph_entities = {e.id: e for e in matching_entities}
+    subgraph_relationships = []
+    
+    print(f"\nStep 2: Finding related entities (depth={depth})...")
+    
+    for current_depth in range(depth):
+        current_entity_ids = set(subgraph_entities.keys())
+        new_entities = {}
+        
+        for entity_id in current_entity_ids:
+            # Get all relationships involving this entity
+            outgoing = kg.query_relationships(source_id=entity_id)
+            incoming = kg.query_relationships(target_id=entity_id)
+            
+            for rel in outgoing + incoming:
+                # Add the relationship
+                if rel not in subgraph_relationships:
+                    subgraph_relationships.append(rel)
+                
+                # Add the other entity
+                other_id = rel.target_id if rel.source_id == entity_id else rel.source_id
+                
+                if other_id not in subgraph_entities and other_id not in new_entities:
+                    other_entity = kg.get_entity(other_id)
+                    if other_entity:
+                        # Filter out files and optionally variables
+                        if other_entity.type == EntityType.FILE:
+                            continue
+                        if not include_variables and other_entity.type == EntityType.VARIABLE:
+                            continue
+                        
+                        new_entities[other_id] = other_entity
+        
+        print(f"  Depth {current_depth + 1}: Added {len(new_entities)} related entities")
+        subgraph_entities.update(new_entities)
+    
+    print(f"\nStep 3: Building export...")
+    print(f"  Total entities in subgraph: {len(subgraph_entities)}")
+    print(f"  Total relationships: {len(subgraph_relationships)}")
+    
+    # Step 3: Filter relationships to only those within subgraph
+    entity_ids_set = set(subgraph_entities.keys())
+    filtered_relationships = [
+        rel for rel in subgraph_relationships
+        if rel.source_id in entity_ids_set and rel.target_id in entity_ids_set
+    ]
+    
+    print(f"  Filtered relationships: {len(filtered_relationships)}")
+    
+    # Step 4: Convert to visualization format
+    nodes = []
+    for entity in subgraph_entities.values():
+        # Mark if this is a primary match
+        is_match = entity in matching_entities
+        
+        node = {
+            'id': entity.id,
+            'name': entity.name,
+            'type': entity.type.value,
+            'qualified_name': entity.qualified_name,
+            'file_path': entity.file_path,
+            'start_line': entity.start_line,
+            'end_line': entity.end_line,
+            'language': entity.language,
+            'metadata': {
+                **entity.metadata,
+                'is_search_match': is_match  # Mark primary matches
+            }
+        }
+        nodes.append(node)
+    
+    edges = []
+    for rel in filtered_relationships:
+        edge = {
+            'source': rel.source_id,
+            'target': rel.target_id,
+            'type': rel.type.value,
+            'weight': rel.weight,
+            'metadata': rel.metadata
+        }
+        edges.append(edge)
+    
+    vis_data = {
+        'nodes': nodes,
+        'edges': edges,
+        'statistics': kg.get_statistics(),
+        'metadata': {
+            'search_term': search_term,
+            'primary_matches': len(matching_entities),
+            'total_entities_in_subgraph': len(subgraph_entities),
+            'relationships': len(filtered_relationships),
+            'depth': depth,
+            'is_focused_subgraph': True
+        }
+    }
+    
+    # Step 5: Save
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True, parents=True)
     
-    # ========================================================================
-    # STEP 1: Create Sample Knowledge Graph
-    # ========================================================================
+    safe_search_term = re.sub(r'[^\w\-]', '_', search_term)
+    output_file = output_path / f"subgraph_{safe_search_term}.json"
     
-    print("\n" + "="*70)
-    print("STEP 1: Creating Sample Knowledge Graph")
-    print("="*70 + "\n")
+    with open(output_file, 'w') as f:
+        json.dump(vis_data, f, indent=2)
     
-    kg = KnowledgeGraph(backend="networkx")
+    print(f"\n{'='*70}")
+    print("EXPORT COMPLETE")
+    print(f"{'='*70}")
+    print(f"\n✓ Saved to: {output_file}")
     
-    if tal_directory and Path(tal_directory).exists():
-        print(f"Parsing TAL files from: {tal_directory}")
-        # Here you would call your TAL parsing code
-        # For demo, we'll create sample data
-    else:
-        print("Creating sample graph data for demonstration...\n")
-        create_sample_graph(kg)
+    print(f"\nSubgraph contents:")
+    print(f"  Primary matches (with '{search_term}'): {len(matching_entities)}")
     
-    stats = kg.get_statistics()
-    print(f"\nGraph created successfully!")
-    print(f"  Entities: {stats['total_entities']}")
-    print(f"  Relationships: {stats['total_relationships']}")
+    # Count types in subgraph
+    subgraph_type_counts = {}
+    for node in nodes:
+        node_type = node['type']
+        subgraph_type_counts[node_type] = subgraph_type_counts.get(node_type, 0) + 1
     
-    # ========================================================================
-    # STEP 2: Export Graph Data
-    # ========================================================================
+    print(f"  Total entities: {len(nodes)}")
+    for entity_type, count in sorted(subgraph_type_counts.items()):
+        print(f"    • {entity_type}: {count}")
     
-    print("\n" + "="*70)
-    print("STEP 2: Exporting Graph Data")
-    print("="*70 + "\n")
+    print(f"  Relationships: {len(edges)}")
     
-    vis_file = export_knowledge_graph(kg, output_dir=output_dir)
+    # Count relationship types
+    rel_type_counts = {}
+    for edge in edges:
+        rel_type = edge['type']
+        rel_type_counts[rel_type] = rel_type_counts.get(rel_type, 0) + 1
     
-    print(f"\n✓ Graph data exported successfully")
-    print(f"  Visualization data: {vis_file}")
+    for rel_type, count in sorted(rel_type_counts.items()):
+        print(f"    • {rel_type}: {count}")
     
-    # ========================================================================
-    # STEP 3: Generate HTML Visualization
-    # ========================================================================
+    print(f"\n{'='*70}")
+    print("NEXT STEP")
+    print(f"{'='*70}")
+    print(f"\nGenerate visualization:")
+    print(f"  python graph_visualizer.py {output_file} -t '{search_term} Subgraph'")
+    print()
     
-    print("\n" + "="*70)
-    print("STEP 3: Generating Interactive HTML Visualization")
-    print("="*70 + "\n")
-    
-    html_file = output_path / "graph_visualization.html"
-    generate_standalone_html(
-        json_file=vis_file,
-        output_file=str(html_file),
-        title="Demo Knowledge Graph"
-    )
-    
-    # ========================================================================
-    # SUMMARY
-    # ========================================================================
-    
-    print("\n" + "="*70)
-    print("✓ WORKFLOW COMPLETE!")
-    print("="*70)
-    
-    print(f"""
-Generated Files:
-  📄 Full graph data:      {output_path / 'knowledge_graph.json'}
-  📄 Visualization data:   {output_path / 'graph_data.json'}
-  📄 Procedures summary:   {output_path / 'procedures.json'}
-  📄 Call graph:           {output_path / 'call_graph.json'}
-  📄 Statistics:           {output_path / 'statistics.json'}
-  
-  🌐 Interactive HTML:     {html_file}
-
-Next Steps:
-  1. Open {html_file} in your web browser
-  2. Use the interactive controls to explore the graph
-  3. Search for nodes, filter by type, zoom and pan
-  4. Click nodes to highlight connections
-  5. Export to SVG if needed
-
-Real Usage:
-  # Parse your TAL code
-  python parsers.py ./your_tal_directory --export ./output
-  
-  # Generate visualization
-  python graph_visualizer.py ./output/graph_data.json
-  
-  # Open graph_visualization.html in browser
-    """)
-    
-    print("="*70 + "\n")
+    return str(output_file)
 
 
-def create_sample_graph(kg: KnowledgeGraph):
-    """Create sample graph data for demonstration"""
-    from knowledge_graph import Entity, Relationship, EntityType, RelationType
+def list_matching_entities(kg: KnowledgeGraph, search_term: str):
+    """List all entities matching a search term"""
+    all_entities = kg.query_entities()
+    pattern = re.compile(re.escape(search_term), re.IGNORECASE)
     
-    # Create file entity
-    file1 = Entity(
-        id="",
-        type=EntityType.FILE,
-        name="payment_processor.tal",
-        qualified_name="payment_processor.tal",
-        file_path="/path/to/payment_processor.tal",
-        language="TAL",
-        metadata={'extension': '.tal'}
-    )
-    kg.add_entity(file1)
+    matching = []
+    for entity in all_entities:
+        if (pattern.search(entity.name) or 
+            pattern.search(entity.qualified_name)):
+            matching.append(entity)
     
-    # Create main procedure
-    main_proc = Entity(
-        id="",
-        type=EntityType.PROCEDURE,
-        name="PROCESS_PAYMENT",
-        qualified_name="payment_processor.tal::PROCESS_PAYMENT",
-        file_path="/path/to/payment_processor.tal",
-        start_line=10,
-        language="TAL",
-        metadata={
-            'is_main': True,
-            'return_type': 'INT',
-            'parameter_count': 3,
-            'statement_count': 45
-        }
-    )
-    kg.add_entity(main_proc)
+    print(f"\n{'='*70}")
+    print(f"ENTITIES MATCHING: '{search_term}'")
+    print(f"{'='*70}\n")
     
-    # Create helper procedures
-    validate_proc = Entity(
-        id="",
-        type=EntityType.PROCEDURE,
-        name="VALIDATE_AMOUNT",
-        qualified_name="payment_processor.tal::VALIDATE_AMOUNT",
-        file_path="/path/to/payment_processor.tal",
-        start_line=60,
-        language="TAL",
-        metadata={
-            'return_type': 'INT',
-            'parameter_count': 1,
-            'statement_count': 15
-        }
-    )
-    kg.add_entity(validate_proc)
+    if not matching:
+        print(f"No entities found matching '{search_term}'")
+        return
     
-    check_proc = Entity(
-        id="",
-        type=EntityType.PROCEDURE,
-        name="CHECK_BALANCE",
-        qualified_name="payment_processor.tal::CHECK_BALANCE",
-        file_path="/path/to/payment_processor.tal",
-        start_line=80,
-        language="TAL",
-        metadata={
-            'return_type': 'INT',
-            'parameter_count': 2,
-            'statement_count': 20
-        }
-    )
-    kg.add_entity(check_proc)
+    # Group by type
+    by_type = {}
+    for entity in matching:
+        entity_type = entity.type.value
+        if entity_type not in by_type:
+            by_type[entity_type] = []
+        by_type[entity_type].append(entity)
     
-    # External reference
-    ext_proc = Entity(
-        id="",
-        type=EntityType.PROCEDURE,
-        name="UPDATE_LEDGER",
-        qualified_name="external::UPDATE_LEDGER",
-        language="TAL",
-        metadata={
-            'is_external': True,
-            'return_type': 'INT'
-        }
-    )
-    kg.add_entity(ext_proc)
+    for entity_type, entities in sorted(by_type.items()):
+        print(f"\n{entity_type.upper()} ({len(entities)}):")
+        for entity in entities:
+            print(f"  • {entity.name}")
+            print(f"    File: {Path(entity.file_path).name if entity.file_path else 'N/A'}")
+            print(f"    Line: {entity.start_line}")
+            if entity.type.value == 'procedure' and 'parameters' in entity.metadata:
+                params = entity.metadata.get('parameters', [])
+                print(f"    Params: {', '.join(params) if params else 'none'}")
     
-    # Create some variables
-    var1 = Entity(
-        id="",
-        type=EntityType.VARIABLE,
-        name="payment_amount",
-        qualified_name="payment_processor.tal::PROCESS_PAYMENT::payment_amount",
-        file_path="/path/to/payment_processor.tal",
-        start_line=12,
-        language="TAL",
-        metadata={
-            'data_type': 'INT',
-            'scope': 'local'
-        }
-    )
-    kg.add_entity(var1)
-    
-    var2 = Entity(
-        id="",
-        type=EntityType.VARIABLE,
-        name="account_balance",
-        qualified_name="payment_processor.tal::PROCESS_PAYMENT::account_balance",
-        file_path="/path/to/payment_processor.tal",
-        start_line=13,
-        language="TAL",
-        metadata={
-            'data_type': 'FIXED(10,2)',
-            'scope': 'local'
-        }
-    )
-    kg.add_entity(var2)
-    
-    # Create relationships
-    kg.add_relationship(Relationship(
-        source_id=file1.id,
-        target_id=main_proc.id,
-        type=RelationType.DEFINES
-    ))
-    
-    kg.add_relationship(Relationship(
-        source_id=main_proc.id,
-        target_id=validate_proc.id,
-        type=RelationType.CALLS,
-        metadata={'line': 25}
-    ))
-    
-    kg.add_relationship(Relationship(
-        source_id=main_proc.id,
-        target_id=check_proc.id,
-        type=RelationType.CALLS,
-        metadata={'line': 30}
-    ))
-    
-    kg.add_relationship(Relationship(
-        source_id=main_proc.id,
-        target_id=ext_proc.id,
-        type=RelationType.CALLS,
-        metadata={'line': 40, 'external': True}
-    ))
-    
-    kg.add_relationship(Relationship(
-        source_id=main_proc.id,
-        target_id=var1.id,
-        type=RelationType.CONTAINS
-    ))
-    
-    kg.add_relationship(Relationship(
-        source_id=main_proc.id,
-        target_id=var2.id,
-        type=RelationType.CONTAINS
-    ))
-    
-    print("Sample entities created:")
-    print(f"  • 1 file")
-    print(f"  • 4 procedures (1 main, 1 external)")
-    print(f"  • 2 variables")
-    print(f"  • 6 relationships")
+    print(f"\n{'='*70}")
+    print(f"Total: {len(matching)} entities")
+    print(f"{'='*70}\n")
 
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Demo: Complete knowledge graph workflow')
-    parser.add_argument('--tal-dir', help='Optional: Directory with TAL files to parse')
-    parser.add_argument('--output', default='./demo_output', help='Output directory')
+    parser = argparse.ArgumentParser(
+        description='Export focused subgraph for a search term',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Export subgraph for "drawdown" (direct connections only)
+  python export_subgraph.py knowledge_graph.json drawdown
+  
+  # Include 2 levels of relationships
+  python export_subgraph.py knowledge_graph.json drawdown --depth 2
+  
+  # Exclude variables from subgraph
+  python export_subgraph.py knowledge_graph.json drawdown --no-variables
+  
+  # Just list what matches (don't export)
+  python export_subgraph.py knowledge_graph.json drawdown --list-only
+        """
+    )
+    
+    parser.add_argument('graph_file', help='Path to knowledge_graph.json')
+    parser.add_argument('search_term', help='Search term (e.g., "drawdown")')
+    parser.add_argument('--depth', type=int, default=1, 
+                       help='Relationship depth (default: 1 = direct connections only)')
+    parser.add_argument('--no-variables', action='store_true',
+                       help='Exclude variables from subgraph')
+    parser.add_argument('--list-only', action='store_true',
+                       help='Just list matching entities, don\'t export')
+    parser.add_argument('-o', '--output', default='./output',
+                       help='Output directory (default: ./output)')
     
     args = parser.parse_args()
     
-    demo_workflow(tal_directory=args.tal_dir, output_dir=args.output)
+    # Load knowledge graph
+    print(f"\nLoading graph from: {args.graph_file}")
+    
+    if not Path(args.graph_file).exists():
+        print(f"Error: File not found: {args.graph_file}")
+        sys.exit(1)
+    
+    kg = KnowledgeGraph()
+    kg.load_from_json(args.graph_file)
+    
+    stats = kg.get_statistics()
+    print(f"Loaded graph:")
+    print(f"  Entities: {stats['total_entities']}")
+    print(f"  Relationships: {stats['total_relationships']}")
+    
+    # List or export
+    if args.list_only:
+        list_matching_entities(kg, args.search_term)
+    else:
+        output_file = export_focused_subgraph(
+            kg,
+            search_term=args.search_term,
+            output_dir=args.output,
+            depth=args.depth,
+            include_variables=not args.no_variables
+        )
+        
+        print(f"Run this to visualize:")
+        print(f"  python graph_visualizer.py {output_file} -t '{args.search_term} Analysis'")
