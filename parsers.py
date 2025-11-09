@@ -628,9 +628,21 @@ class TALParser(ASTParser):
         self.directives.append(directive_info)
     
     def _record_procedure_call(self, node, caller_context: Optional[str]):
-        """Record procedure call for relationship extraction"""
+        """Record procedure call for relationship extraction (filters out intrinsics)"""
+        # remove system calls in graph (e.g., $len, send, receive..)
         callee_name = node.attributes.get('function', '')
         if not callee_name:
+            return
+        
+        # **KEY CHANGE**: Filter out TAL system intrinsics
+        callee_lower = callee_name.lower()
+        if callee_lower in self.TAL_INTRINSICS:
+            logger.debug(f"Skipping system intrinsic: {callee_name}")
+            return
+        
+        # Also skip if it starts with $ (catches any we might have missed)
+        if callee_name.startswith('$'):
+            logger.debug(f"Skipping $-prefixed system call: {callee_name}")
             return
         
         line = node.location.line if node.location else 0
