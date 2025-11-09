@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-JSON Graph Merger - Merge two graph JSON files based on node IDs
+JSON Graph Merger - Merge two graph JSON files (OUTER JOIN on node IDs)
 
-Merges nodes and edges from two JSON graph files, deduplicating by ID.
-Useful for combining knowledge graphs, subgraphs, or incremental updates.
+Merges nodes and edges from two JSON graph files:
+- Keeps ALL nodes from both files (OUTER JOIN)
+- For matching IDs: merges node data
+- Removes duplicate edges
 """
 
 import json
 import sys
 from pathlib import Path
 from typing import Dict, List, Any, Set
+from copy import deepcopy
 
 
 def load_json_file(filepath: str) -> Dict[str, Any]:
@@ -44,8 +47,179 @@ def load_json_file(filepath: str) -> Dict[str, Any]:
     return result
 
 
+def normalize_metadata(metadata: Any) -> Dict:
+    """Normalize metadata to dict format"""
+    if metadata is None:
+        return {}
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str):
+        try:
+            return json.loads(metadata)
+        except:
+            return {'raw': metadata}
+    return {'value': metadata}
+
+
+def merge_node_data(node1: Dict, node2: Dict) -> Dict:
+    """
+    Deep merge two nodes with the same ID
+    
+    Strategy:
+    - Keep all fields from both nodes
+    - For conflicts, prefer non-empty values
+    - For metadata: deep merge dictionaries, combine lists
+    """
+    # Start with deep copy of first node
+    merged = deepcopy(node1)
+    
+    # Merge each field from node2
+    for key, value2 in node2.items():
+        if key == 'id':
+            # ID must be the same, skip
+            continue
+        
+        if key not in merged:
+            # New field from node2, add it
+            merged[key] = deepcopy(value2)
+        else:
+            value1 = merged[key]
+            
+            # Both have this field - merge intelligently
+            if key == 'metadata':
+                # Special handling for metadata
+                meta1 = normalize_metadata(value1)
+                meta2 = normalize_metadata(value2)
+                merged[key] = deep_merge_dicts(meta1, meta2)
+            
+            elif isinstance(value1, dict) and isinstance(value2, dict):
+                # Merge dictionaries
+                merged[key] = deep_merge_dicts(value1, value2)
+            
+            elif isinstance(value1, list) and isinstance(value2, list):
+                # Combine lists, remove duplicates (for simple types)
+                try:
+                    merged[key] = list(set(value1 + value2))
+                except TypeError:
+                    # Not hashable, just concatenate
+                    merged[key] = value1 + value2
+            
+            elif value2 is not None and (value1 is None or value1 == '' or value1 == 0):
+                # Prefer non-empty value from node2
+                merged[key] = value2
+            
+            elif value1 != value2:
+                # Conflict - keep both in a special field if different
+                if value2 is not None and value2 != '':
+                    # For most fields, prefer node2 (newer data)
+                    if key not in ['name', 'type', 'qualified_name']:
+                        merged[key] = value2
+                    # Keep node1 value for core identity fields
+    
+    return merged
+
+
+def deep_merge_dicts(dict1: Dict, dict2: Dict) -> Dict:
+    """
+    Deep merge two dictionaries
+    
+    For conflicts:
+    - Lists: combine and deduplicate
+    - Dicts: recursively merge
+    - Scalars: prefer non-empty value from dict2
+    """
+    merged = deepcopy(dict1)
+    
+    for key, value2 in dict2.items():
+        if key not in merged:
+            merged[key] = deepcopy(value2)
+        else:
+            value1 = merged[key]
+            
+            if isinstance(value1, dict) and isinstance(value2, dict):
+                # Recursively merge dicts
+                merged[key] = deep_merge_dicts(value1, value2)
+            
+            elif isinstance(value1, list) and isinstance(value2, list):
+                # Combine lists
+                try:
+                    # Try to deduplicate
+                    merged[key] = list(set(value1 + value2))
+                except TypeError:
+                    # Not hashable, concatenate
+                    merged[key] = value1 + value2
+            
+            elif value2 is not None and (value1 is None or value1 == ''):
+                # Prefer non-empty
+                merged[key] = value2
+            
+            else:
+                # Keep value2 (newer data)
+                merged[key] = value2
+    
+    return merged
+
+
+def merge_nodes_outer_join(nodes1: List[Dict], nodes2: List[Dict]) -> tuple[List[Dict], Dict[str, str]]:
+    """
+    Merge nodes using OUTER JOIN semantics
+    
+    - Keeps ALL nodes from both lists
+    - For matching IDs: merges node data
+    - Returns merged nodes and statistics
+    
+    Returns:
+        (merged_nodes, stats_dict)
+    """
+    nodes_by_id = {}
+    
+    # Track where nodes came from
+    node_sources = {}  # id -> 'file1', 'file2', or 'both'
+    
+    # Add all nodes from file1
+    for node in nodes1:
+        node_id = node.get('id')
+        if node_id:
+            nodes_by_id[node_id] = deepcopy(node)
+            node_sources[node_id] = 'file1'
+    
+    file1_count = len(nodes_by_id)
+    
+    # Process nodes from file2
+    new_from_file2 = 0
+    merged_count = 0
+    
+    for node in nodes2:
+        node_id = node.get('id')
+        if not node_id:
+            continue
+        
+        if node_id in nodes_by_id:
+            # MATCH - merge the two nodes
+            existing = nodes_by_id[node_id]
+            merged_node = merge_node_data(existing, node)
+            nodes_by_id[node_id] = merged_node
+            node_sources[node_id] = 'both'
+            merged_count += 1
+        else:
+            # NEW from file2 - add it
+            nodes_by_id[node_id] = deepcopy(node)
+            node_sources[node_id] = 'file2'
+            new_from_file2 += 1
+    
+    # Create stats
+    stats = {
+        'only_in_file1': sum(1 for s in node_sources.values() if s == 'file1'),
+        'only_in_file2': new_from_file2,
+        'in_both': merged_count,
+        'node_sources': node_sources
+    }
+    
+    return list(nodes_by_id.values()), stats
+
+
 def get_edge_key(edge: Dict[str, Any]) -> tuple:
-    """Generate a unique key for an edge based on source, target, and type"""
+    """Generate a unique key for an edge"""
     source_id = edge.get('source') or edge.get('source_id')
     target_id = edge.get('target') or edge.get('target_id')
     edge_type = edge.get('type', 'unknown')
@@ -59,92 +233,23 @@ def get_edge_key(edge: Dict[str, Any]) -> tuple:
     return (source_id, target_id, edge_type)
 
 
-def merge_nodes(nodes1: List[Dict], nodes2: List[Dict], 
-                strategy: str = 'prefer_first') -> List[Dict]:
-    """
-    Merge two lists of nodes, deduplicating by ID
-    
-    Args:
-        nodes1: First list of nodes
-        nodes2: Second list of nodes
-        strategy: How to handle duplicates:
-            - 'prefer_first': Keep node from first list
-            - 'prefer_second': Keep node from second list (overwrite)
-            - 'merge': Merge metadata from both (second overwrites first)
-    
-    Returns:
-        Merged list of nodes
-    """
-    nodes_by_id = {}
-    
-    # Add nodes from first list
-    for node in nodes1:
-        node_id = node.get('id')
-        if node_id:
-            nodes_by_id[node_id] = node.copy()
-    
-    # Process nodes from second list
-    for node in nodes2:
-        node_id = node.get('id')
-        if not node_id:
-            continue
-        
-        if node_id in nodes_by_id:
-            # Duplicate found - apply strategy
-            if strategy == 'prefer_first':
-                # Keep existing, skip this one
-                pass
-            elif strategy == 'prefer_second':
-                # Replace with new one
-                nodes_by_id[node_id] = node.copy()
-            elif strategy == 'merge':
-                # Merge metadata
-                existing = nodes_by_id[node_id]
-                new_node = node.copy()
-                
-                # Merge metadata fields
-                existing_meta = existing.get('metadata', {})
-                new_meta = new_node.get('metadata', {})
-                
-                if isinstance(existing_meta, str):
-                    try:
-                        existing_meta = json.loads(existing_meta)
-                    except:
-                        existing_meta = {}
-                
-                if isinstance(new_meta, str):
-                    try:
-                        new_meta = json.loads(new_meta)
-                    except:
-                        new_meta = {}
-                
-                # Merge: new overwrites existing
-                merged_meta = {**existing_meta, **new_meta}
-                new_node['metadata'] = merged_meta
-                
-                # Keep other fields from new node
-                nodes_by_id[node_id] = new_node
-        else:
-            # New node, add it
-            nodes_by_id[node_id] = node.copy()
-    
-    return list(nodes_by_id.values())
-
-
 def merge_edges(edges1: List[Dict], edges2: List[Dict], 
-                valid_node_ids: Set[str]) -> List[Dict]:
+                valid_node_ids: Set[str]) -> tuple[List[Dict], Dict[str, int]]:
     """
-    Merge two lists of edges, deduplicating and filtering
+    Merge edges from both files, removing duplicates
     
-    Args:
-        edges1: First list of edges
-        edges2: Second list of edges
-        valid_node_ids: Set of valid node IDs (edges referencing missing nodes are filtered)
+    Only keeps edges where both source and target nodes exist
     
     Returns:
-        Merged list of edges
+        (merged_edges, stats_dict)
     """
     edges_by_key = {}
+    
+    # Track stats
+    from_file1 = 0
+    from_file2 = 0
+    duplicates = 0
+    orphaned = 0
     
     # Process first list
     for edge in edges1:
@@ -154,14 +259,16 @@ def merge_edges(edges1: List[Dict], edges2: List[Dict],
         # Only keep edge if both nodes exist
         if source_id in valid_node_ids and target_id in valid_node_ids:
             if edge_key not in edges_by_key:
-                # Normalize edge format
                 edges_by_key[edge_key] = {
                     'source': source_id,
                     'target': target_id,
                     'type': edge.get('type', 'unknown'),
                     'weight': edge.get('weight', 1.0),
-                    'metadata': edge.get('metadata', {})
+                    'metadata': normalize_metadata(edge.get('metadata', {}))
                 }
+                from_file1 += 1
+        else:
+            orphaned += 1
     
     # Process second list
     for edge in edges2:
@@ -176,74 +283,57 @@ def merge_edges(edges1: List[Dict], edges2: List[Dict],
                     'target': target_id,
                     'type': edge.get('type', 'unknown'),
                     'weight': edge.get('weight', 1.0),
-                    'metadata': edge.get('metadata', {})
+                    'metadata': normalize_metadata(edge.get('metadata', {}))
                 }
-            # If duplicate exists, could merge metadata here if needed
-    
-    return list(edges_by_key.values())
-
-
-def merge_metadata(meta1: Dict, meta2: Dict) -> Dict:
-    """Merge metadata from two graphs"""
-    merged = {}
-    
-    # Combine metadata fields, prefer arrays for lists
-    all_keys = set(meta1.keys()) | set(meta2.keys())
-    
-    for key in all_keys:
-        val1 = meta1.get(key)
-        val2 = meta2.get(key)
-        
-        if val1 is None:
-            merged[key] = val2
-        elif val2 is None:
-            merged[key] = val1
-        else:
-            # Both exist - try to combine
-            if isinstance(val1, list) and isinstance(val2, list):
-                # Combine lists, remove duplicates
-                merged[key] = list(set(val1 + val2))
-            elif isinstance(val1, dict) and isinstance(val2, dict):
-                # Recursively merge dicts
-                merged[key] = {**val1, **val2}
+                from_file2 += 1
             else:
-                # Take second value (or could store both)
-                merged[key] = val2
+                # Duplicate - merge metadata if needed
+                existing_meta = edges_by_key[edge_key]['metadata']
+                new_meta = normalize_metadata(edge.get('metadata', {}))
+                edges_by_key[edge_key]['metadata'] = deep_merge_dicts(existing_meta, new_meta)
+                duplicates += 1
+        else:
+            orphaned += 1
     
-    return merged
+    stats = {
+        'unique_from_file1': from_file1,
+        'unique_from_file2': from_file2,
+        'duplicates': duplicates,
+        'orphaned': orphaned
+    }
+    
+    return list(edges_by_key.values()), stats
 
 
-def merge_json_graphs(file1: str, file2: str, output: str,
-                      strategy: str = 'prefer_first') -> Dict[str, Any]:
+def merge_json_graphs(file1: str, file2: str, output: str) -> Dict[str, Any]:
     """
-    Merge two JSON graph files
+    Merge two JSON graph files using OUTER JOIN semantics
     
     Args:
         file1: Path to first JSON file
         file2: Path to second JSON file
         output: Path to output merged JSON file
-        strategy: Merge strategy for duplicate nodes
     
     Returns:
         Merged graph data with statistics
     """
     print(f"\n{'='*70}")
-    print("MERGING JSON GRAPH FILES")
+    print("MERGING JSON GRAPH FILES (OUTER JOIN)")
     print(f"{'='*70}\n")
     
     # Load both files
     graph1 = load_json_file(file1)
     graph2 = load_json_file(file2)
     
-    print(f"\nMerge strategy: {strategy}")
-    print(f"\nMerging nodes...")
+    print(f"\nMerging nodes (OUTER JOIN on id)...")
     
-    # Merge nodes
-    merged_nodes = merge_nodes(graph1['nodes'], graph2['nodes'], strategy=strategy)
-    print(f"  Result: {len(merged_nodes)} nodes")
-    print(f"    From file1: {len(graph1['nodes'])}")
-    print(f"    From file2: {len(graph2['nodes'])}")
-    print(f"    Duplicates removed: {len(graph1['nodes']) + len(graph2['nodes']) - len(merged_nodes)}")
+    # Merge nodes with OUTER JOIN semantics
+    merged_nodes, node_stats = merge_nodes_outer_join(graph1['nodes'], graph2['nodes'])
+    
+    print(f"  Total merged nodes: {len(merged_nodes)}")
+    print(f"    Only in file1: {node_stats['only_in_file1']}")
+    print(f"    Only in file2: {node_stats['only_in_file2']}")
+    print(f"    In both (merged): {node_stats['in_both']}")
     
     # Get valid node IDs for edge filtering
     valid_node_ids = {node['id'] for node in merged_nodes}
@@ -251,14 +341,17 @@ def merge_json_graphs(file1: str, file2: str, output: str,
     print(f"\nMerging edges...")
     
     # Merge edges
-    merged_edges = merge_edges(graph1['edges'], graph2['edges'], valid_node_ids)
-    print(f"  Result: {len(merged_edges)} edges")
-    print(f"    From file1: {len(graph1['edges'])}")
-    print(f"    From file2: {len(graph2['edges'])}")
-    print(f"    Duplicates removed: {len(graph1['edges']) + len(graph2['edges']) - len(merged_edges)}")
+    merged_edges, edge_stats = merge_edges(graph1['edges'], graph2['edges'], valid_node_ids)
+    
+    print(f"  Total merged edges: {len(merged_edges)}")
+    print(f"    Unique from file1: {edge_stats['unique_from_file1']}")
+    print(f"    Unique from file2: {edge_stats['unique_from_file2']}")
+    print(f"    Duplicates merged: {edge_stats['duplicates']}")
+    if edge_stats['orphaned'] > 0:
+        print(f"    Orphaned (filtered): {edge_stats['orphaned']}")
     
     # Merge metadata
-    merged_metadata = merge_metadata(graph1['metadata'], graph2['metadata'])
+    merged_metadata = deep_merge_dicts(graph1['metadata'], graph2['metadata'])
     
     # Build result
     result = {
@@ -268,13 +361,17 @@ def merge_json_graphs(file1: str, file2: str, output: str,
             **merged_metadata,
             'merge_info': {
                 'source_files': [file1, file2],
-                'merge_strategy': strategy,
+                'merge_type': 'outer_join',
                 'file1_nodes': len(graph1['nodes']),
                 'file2_nodes': len(graph2['nodes']),
                 'merged_nodes': len(merged_nodes),
+                'nodes_only_in_file1': node_stats['only_in_file1'],
+                'nodes_only_in_file2': node_stats['only_in_file2'],
+                'nodes_merged': node_stats['in_both'],
                 'file1_edges': len(graph1['edges']),
                 'file2_edges': len(graph2['edges']),
-                'merged_edges': len(merged_edges)
+                'merged_edges': len(merged_edges),
+                'edge_duplicates': edge_stats['duplicates']
             }
         }
     }
@@ -310,7 +407,10 @@ def merge_json_graphs(file1: str, file2: str, output: str,
     print(f"Output: {output_path}")
     print(f"\nFinal statistics:")
     print(f"  Total nodes: {len(merged_nodes)}")
-    print(f"  Total edges: {len(merged_edges)}")
+    print(f"    From file1 only: {node_stats['only_in_file1']}")
+    print(f"    From file2 only: {node_stats['only_in_file2']}")
+    print(f"    Merged (in both): {node_stats['in_both']}")
+    print(f"\n  Total edges: {len(merged_edges)}")
     print(f"\n  Node types:")
     for node_type, count in sorted(node_types.items()):
         print(f"    {node_type}: {count}")
@@ -326,24 +426,35 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Merge two JSON graph files based on node IDs',
+        description='Merge two JSON graph files using OUTER JOIN on node IDs',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+OUTER JOIN Behavior:
+  - Keeps ALL nodes from both files
+  - For nodes with matching IDs: deep merges their data
+  - Edges are deduplicated by (source, target, type)
+
 Examples:
-  # Basic merge (prefer nodes from first file on conflict)
-  python3 merge_graphs.py graph1.json graph2.json -o merged.json
+  # Merge two subgraphs
+  python3 merge_graphs.py subgraph1.json subgraph2.json -o combined.json
   
-  # Prefer nodes from second file
-  python3 merge_graphs.py graph1.json graph2.json -o merged.json --prefer-second
+  # Merge subgraph into full graph
+  python3 merge_graphs.py full_graph.json new_subgraph.json -o updated.json
   
-  # Merge metadata from both files
-  python3 merge_graphs.py graph1.json graph2.json -o merged.json --merge
+  # Combine multiple incremental results
+  python3 merge_graphs.json parse1.json parse2.json -o temp.json
+  python3 merge_graphs.json temp.json parse3.json -o final.json
+
+Merge Strategy:
+  Nodes:
+    - All nodes from file1 are kept
+    - All nodes from file2 are kept
+    - Matching IDs: metadata is deeply merged
   
-Use cases:
-  - Combine multiple subgraphs into one
-  - Add new nodes/edges to existing graph
-  - Update graph with new information
-  - Merge incremental parsing results
+  Edges:
+    - All unique edges from both files
+    - Duplicates (same source+target+type) are removed
+    - Orphaned edges (missing nodes) are filtered out
         """
     )
     
@@ -351,13 +462,6 @@ Use cases:
     parser.add_argument('file2', help='Second JSON graph file')
     parser.add_argument('-o', '--output', required=True,
                        help='Output file path')
-    parser.add_argument('--strategy', '--prefer-second', action='store_const',
-                       const='prefer_second', default='prefer_first',
-                       dest='strategy',
-                       help='Prefer nodes from second file on conflict')
-    parser.add_argument('--merge', action='store_const',
-                       const='merge', dest='strategy',
-                       help='Merge metadata from both files')
     
     args = parser.parse_args()
     
@@ -371,13 +475,8 @@ Use cases:
         sys.exit(1)
     
     try:
-        result = merge_json_graphs(
-            args.file1,
-            args.file2,
-            args.output,
-            strategy=args.strategy
-        )
-        print(f"Success! Merged graph saved to: {args.output}")
+        result = merge_json_graphs(args.file1, args.file2, args.output)
+        print(f"✓ Success! Merged graph saved to: {args.output}")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
