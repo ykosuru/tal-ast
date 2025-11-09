@@ -34,43 +34,6 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-"""
-AST Parser Interface for Knowledge Graph - TAL Parser
-Modified to work with tal_proc_parser and enhanced TAL parser ASTs
-
-Features:
-- Parse TAL AST into knowledge graph entities and relationships
-- Handle external procedure references
-- Advanced search capabilities for finding functionality
-- Support for multiple file parsing
-"""
-
-from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Optional, Set, Tuple
-from pathlib import Path
-import re
-from dataclasses import dataclass
-import logging
-import sys
-
-from knowledge_graph import (
-    Entity, Relationship, EntityType, RelationType, KnowledgeGraph
-)
-
-# Import the TAL parser modules
-try:
-    import tal_proc_parser
-    from enhanced_tal_parser import EnhancedTALParser
-    TAL_PARSERS_AVAILABLE = True
-except ImportError:
-    TAL_PARSERS_AVAILABLE = False
-    logging.warning("TAL parser modules not available")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
 # ============================================================================
 # Abstract Parser Interface
 # ============================================================================
