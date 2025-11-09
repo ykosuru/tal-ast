@@ -103,7 +103,7 @@ class TALCodeExtractor:
         
         self.proc_boundaries_cache[file_path_str] = boundaries
         return boundaries
-    
+
     def extract_procedure_code(self, entity) -> Optional[str]:
         """Extract the actual source code for a procedure."""
         if not entity.file_path:
@@ -124,6 +124,7 @@ class TALCodeExtractor:
         
         proc_name_upper = entity.name.upper()
         
+        # Primary path: Use pre-calculated boundaries (RELIABLE)
         if proc_name_upper in boundaries:
             boundary = boundaries[proc_name_upper]
             start = boundary['start'] - 1
@@ -132,6 +133,7 @@ class TALCodeExtractor:
             code = ''.join(lines[start:end])
             return code
         
+        # Fallback path: Calculate boundaries manually (FIXED)
         elif entity.start_line:
             print(f"Warning: Using fallback extraction for {entity.name}")
             start = entity.start_line - 1
@@ -139,18 +141,56 @@ class TALCodeExtractor:
             if entity.end_line and entity.end_line > entity.start_line:
                 end = entity.end_line
             else:
-                end = start + 100
-                for i in range(start + 1, min(len(lines), start + 500)):
+                # FIXED: Track BEGIN/END nesting to find procedure end
+                end = start + 1
+                begin_count = 0
+                end_count = 0
+                found_begin = False
+                
+                for i in range(start, min(len(lines), start + 1000)):
                     line = lines[i].strip().upper()
-                    if line.startswith('END') or line.startswith('PROC '):
+                    
+                    # Skip comments
+                    comment_pos = line.find('!')
+                    if comment_pos >= 0:
+                        line = line[:comment_pos].strip()
+                    
+                    # Count BEGIN keywords
+                    if 'BEGIN' in line:
+                        begin_count += line.count('BEGIN')
+                        found_begin = True
+                    
+                    # Count END keywords
+                    if 'END' in line:
+                        # Check if it's actually END keyword (not part of identifier)
+                        if re.search(r'\bEND\b', line):
+                            end_count += 1
+                    
+                    # Stop at next PROC (different procedure)
+                    if i > start and re.search(r'\bPROC\b', line):
+                        end = i
+                        break
+                    
+                    # If we found BEGIN and all BEGINs are closed
+                    if found_begin and begin_count > 0 and begin_count == end_count:
                         end = i + 1
                         break
+                    
+                    # If no BEGIN found but we hit END, assume simple procedure
+                    if not found_begin and end_count > 0:
+                        end = i + 1
+                        break
+                
+                # Safety fallback
+                if end == start + 1:
+                    end = min(start + 200, len(lines))
             
             code = ''.join(lines[start:end])
             return code
         
         print(f"Warning: Could not find procedure {entity.name} in {file_path}")
         return None
+    
     
     def extract_structure_code(self, entity) -> Optional[str]:
         """Extract structure definition from source file."""
