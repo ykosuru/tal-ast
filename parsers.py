@@ -25,7 +25,7 @@ from knowledge_graph import (
 # Import the TAL parser modules
 try:
     import tal_proc_parser
-    from enhanced_tal_parser import EnhancedTALParser
+    from talparser import EnhancedTALParser
     TAL_PARSERS_AVAILABLE = True
 except ImportError:
     TAL_PARSERS_AVAILABLE = False
@@ -1118,7 +1118,7 @@ def parse_tal_directory(directory: str, knowledge_graph: KnowledgeGraph) -> List
     """
     from pathlib import Path
     
-    tal_files = list(Path(directory).rglob("*.tal"))
+    tal_files = list(Path(directory).rglob("*.TXT"))
     file_entities = []
     
     for tal_file in tal_files:
@@ -1257,12 +1257,12 @@ def parse_tal_directory_recursive(directory: str, knowledge_graph: KnowledgeGrap
     
     # Find all TAL files
     if recursive:
-        tal_files = list(dir_path.rglob("*.tal"))
+        tal_files = list(dir_path.rglob("*.TXT"))
     else:
-        tal_files = list(dir_path.glob("*.tal"))
+        tal_files = list(dir_path.glob("*.TXT"))
     
     if not tal_files:
-        logger.warning(f"No .tal files found in {directory}")
+        logger.warning(f"No .TXT files found in {directory}")
         return {
             'success': False,
             'file_count': 0,
