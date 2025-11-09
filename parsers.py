@@ -161,6 +161,37 @@ class TALParser(ASTParser):
     - Creates placeholder entities for unresolved calls
     - Tracks directives in file metadata
     """
+     # Add this constant at class level
+    TAL_INTRINSICS = {
+        # String/Array functions
+        '$len', '$occurs', '$move', '$movl', '$fill', '$fillw',
+        '$bounds', '$bitoffset', '$carry', '$comp', '$dbl',
+        
+        # Numeric functions  
+        '$min', '$max', '$abs', '$int', '$fix', '$dbl', '$float',
+        '$udbl', '$ifix', '$efix', '$fup', '$lfix',
+        
+        # Bit manipulation
+        '$bit', '$bitpos', '$carry', '$overflow', '$xadr',
+        
+        # I/O and system
+        '$read', '$write', '$readx', '$writex', '$readupdatex',
+        '$writeunlock', '$control', '$setmode',
+        '$fileinfo', '$filename', '$param',
+        
+        # Process/system
+        '$createprocess', '$process_getinfo', '$process_stop',
+        '$mysegment', '$myterm', '$lastreceive',
+        
+        # Conversion
+        '$numeric', '$alpha', '$special', '$usercode',
+        
+        # High-pin procedures
+        '$axadr', '$bounds', '$type', '$occurs', '$offset',
+        '$len', '$extent', '$scale', '$point',
+        
+        # Add more as you discover them in your codebase
+    }
     
     def __init__(self, knowledge_graph: KnowledgeGraph):
         super().__init__(knowledge_graph)
