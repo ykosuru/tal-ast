@@ -868,6 +868,212 @@ class KnowledgeGraph:
         
         logger.info(f"Loaded graph from {filepath}")
 
+    def extract_call_subgraph(self, 
+                             entry_procedures: List[str],
+                             max_depth: int = 10,
+                             exclude_procedures: Optional[Set[str]] = None,
+                             include_variables: bool = True,
+                             include_structures: bool = True) -> Dict[str, Any]:
+        """
+        Extract subgraph starting from entry point procedures
+        
+        Args:
+            entry_procedures: List of procedure names to start from
+            max_depth: Maximum call depth to traverse
+            exclude_procedures: Set of procedure names to exclude (e.g., common utilities)
+            include_variables: Include variables used by procedures
+            include_structures: Include structure definitions
+        
+        Returns:
+            Dict with subgraph entities and relationships
+        """
+        if exclude_procedures is None:
+            exclude_procedures = set()
+        
+        # Find entry point entities
+        all_procedures = self.query_entities(entity_type=EntityType.PROCEDURE)
+        entry_entities = []
+        for proc_name in entry_procedures:
+            for proc in all_procedures:
+                if proc.name == proc_name:
+                    entry_entities.append(proc)
+                    break
+        
+        if not entry_entities:
+            logger.warning(f"No entry procedures found from: {entry_procedures}")
+            return {
+                'entities': [],
+                'relationships': [],
+                'entry_points': entry_procedures,
+                'error': 'No entry procedures found'
+            }
+        
+        logger.info(f"Starting subgraph extraction from {len(entry_entities)} entry points")
+        
+        # BFS traversal of call graph
+        visited_procedures = set()
+        subgraph_entities = []
+        subgraph_entity_ids = set()
+        current_level = entry_entities
+        
+        for depth in range(max_depth + 1):
+            if not current_level:
+                break
+            
+            logger.info(f"Depth {depth}: Processing {len(current_level)} procedures")
+            next_level = []
+            
+            for proc in current_level:
+                if proc.id in visited_procedures:
+                    continue
+                
+                # Skip if in exclusion list
+                if proc.name in exclude_procedures:
+                    logger.debug(f"Skipping excluded procedure: {proc.name}")
+                    continue
+                
+                visited_procedures.add(proc.id)
+                subgraph_entities.append(proc)
+                subgraph_entity_ids.add(proc.id)
+                
+                # Get called procedures (outgoing CALLS relationships)
+                callees = self.get_neighbors(
+                    proc.id,
+                    rel_type=RelationType.CALLS,
+                    direction="outgoing"
+                )
+                
+                for callee in callees:
+                    if (callee.id not in visited_procedures and 
+                        callee.name not in exclude_procedures):
+                        next_level.append(callee)
+            
+            current_level = next_level
+        
+        logger.info(f"Found {len(subgraph_entities)} procedures in call chain")
+        
+        # Include variables if requested
+        if include_variables:
+            for proc in subgraph_entities:
+                # Get variables contained in this procedure
+                variables = self.get_neighbors(
+                    proc.id,
+                    rel_type=RelationType.CONTAINS,
+                    direction="outgoing"
+                )
+                for var in variables:
+                    if var.type == EntityType.VARIABLE:
+                        if var.id not in subgraph_entity_ids:
+                            subgraph_entities.append(var)
+                            subgraph_entity_ids.add(var.id)
+        
+        # Include structures if requested
+        if include_structures:
+            structures = self.query_entities(entity_type=EntityType.STRUCTURE)
+            for struct in structures:
+                # Check if any procedure in subgraph references this structure
+                # This is a simple heuristic - you might want more sophisticated logic
+                if struct.file_path in [p.file_path for p in subgraph_entities[:len(visited_procedures)]]:
+                    if struct.id not in subgraph_entity_ids:
+                        subgraph_entities.append(struct)
+                        subgraph_entity_ids.add(struct.id)
+        
+        # Get all relationships between entities in subgraph
+        subgraph_relationships = []
+        all_relationships = self.query_relationships()
+        
+        for rel in all_relationships:
+            if (rel.source_id in subgraph_entity_ids and 
+                rel.target_id in subgraph_entity_ids):
+                subgraph_relationships.append(rel)
+        
+        logger.info(f"Subgraph: {len(subgraph_entities)} entities, "
+                   f"{len(subgraph_relationships)} relationships")
+        
+        return {
+            'entities': subgraph_entities,
+            'relationships': subgraph_relationships,
+            'entry_points': entry_procedures,
+            'excluded_procedures': list(exclude_procedures),
+            'max_depth': max_depth,
+            'statistics': {
+                'total_entities': len(subgraph_entities),
+                'total_relationships': len(subgraph_relationships),
+                'procedure_count': len(visited_procedures),
+                'variable_count': sum(1 for e in subgraph_entities if e.type == EntityType.VARIABLE),
+                'structure_count': sum(1 for e in subgraph_entities if e.type == EntityType.STRUCTURE)
+            }
+        }
+    
+    def get_call_chain(self, from_procedure: str, to_procedure: str, 
+                       exclude_procedures: Optional[Set[str]] = None) -> List[List[str]]:
+        """
+        Find all call paths from one procedure to another
+        
+        Args:
+            from_procedure: Starting procedure name
+            to_procedure: Target procedure name
+            exclude_procedures: Procedures to exclude from paths
+        
+        Returns:
+            List of call paths (each path is a list of procedure names)
+        """
+        if self.backend != "networkx":
+            raise NotImplementedError("Call path finding only implemented for NetworkX")
+        
+        # Find procedure entities
+        procedures = self.query_entities(entity_type=EntityType.PROCEDURE)
+        start_proc = next((p for p in procedures if p.name == from_procedure), None)
+        end_proc = next((p for p in procedures if p.name == to_procedure), None)
+        
+        if not start_proc or not end_proc:
+            return []
+        
+        # Build filtered call graph
+        import networkx as nx
+        call_graph = nx.DiGraph()
+        
+        for rel in self.query_relationships(rel_type=RelationType.CALLS):
+            source_entity = self.get_entity(rel.source_id)
+            target_entity = self.get_entity(rel.target_id)
+            
+            if source_entity and target_entity:
+                # Skip excluded procedures
+                if exclude_procedures and (
+                    source_entity.name in exclude_procedures or 
+                    target_entity.name in exclude_procedures
+                ):
+                    continue
+                
+                call_graph.add_edge(
+                    source_entity.id, 
+                    target_entity.id,
+                    source_name=source_entity.name,
+                    target_name=target_entity.name
+                )
+        
+        # Find all simple paths
+        try:
+            paths = list(nx.all_simple_paths(
+                call_graph, 
+                start_proc.id, 
+                end_proc.id, 
+                cutoff=10
+            ))
+            
+            # Convert entity IDs to procedure names
+            name_paths = []
+            for path in paths:
+                name_path = []
+                for entity_id in path:
+                    entity = self.get_entity(entity_id)
+                    if entity:
+                        name_path.append(entity.name)
+                name_paths.append(name_path)
+            
+            return name_paths
+        except nx.NodeNotFound:
+            return []
 
 # ============================================================================
 # Hashability Tests (Run on import to verify)
