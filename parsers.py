@@ -1041,6 +1041,128 @@ class KnowledgeGraphSearch:
 # Convenience Functions
 # ============================================================================
 
+def extract_and_export_subgraph(kg: KnowledgeGraph,
+                                entry_procedures: List[str],
+                                output_file: str = "./output/graph_data.json",
+                                exclude_common: Optional[List[str]] = None,
+                                max_depth: int = 10) -> str:
+    """
+    Extract subgraph from entry procedures and export for visualization
+    
+    Args:
+        kg: Knowledge graph
+        entry_procedures: List of entry point procedure names
+        output_file: Output file path
+        exclude_common: List of common utility procedures to exclude
+        max_depth: Maximum call depth
+    
+    Returns:
+        Path to output file
+    """
+    from pathlib import Path
+    
+    # Default common utilities to exclude
+    if exclude_common is None:
+        exclude_common = []
+    
+    exclude_set = set(exclude_common)
+    
+    print(f"\n{'='*70}")
+    print("EXTRACTING SUBGRAPH")
+    print(f"{'='*70}")
+    print(f"Entry procedures: {', '.join(entry_procedures)}")
+    print(f"Excluded utilities: {', '.join(exclude_common) if exclude_common else '(none)'}")
+    print(f"Max depth: {max_depth}")
+    print(f"{'='*70}\n")
+    
+    # Extract subgraph
+    subgraph = kg.extract_call_subgraph(
+        entry_procedures=entry_procedures,
+        max_depth=max_depth,
+        exclude_procedures=exclude_set,
+        include_variables=True,
+        include_structures=True
+    )
+    
+    if 'error' in subgraph:
+        print(f"Error: {subgraph['error']}")
+        return None
+    
+    # Display statistics
+    stats = subgraph['statistics']
+    print(f"Subgraph Statistics:")
+    print(f"  Total entities: {stats['total_entities']}")
+    print(f"  Procedures: {stats['procedure_count']}")
+    print(f"  Variables: {stats['variable_count']}")
+    print(f"  Structures: {stats['structure_count']}")
+    print(f"  Relationships: {stats['total_relationships']}\n")
+    
+    # Convert to visualization format
+    nodes = []
+    for entity in subgraph['entities']:
+        # Mark entry points
+        is_entry = entity.name in entry_procedures
+        
+        node = {
+            'id': entity.id,
+            'name': entity.name,
+            'type': entity.type.value,
+            'qualified_name': entity.qualified_name,
+            'file_path': entity.file_path,
+            'start_line': entity.start_line,
+            'language': entity.language,
+            'metadata': entity.metadata,
+            'is_entry_point': is_entry
+        }
+        nodes.append(node)
+    
+    edges = []
+    for rel in subgraph['relationships']:
+        edge = {
+            'source': rel.source_id,
+            'target': rel.target_id,
+            'type': rel.type.value,
+            'weight': rel.weight,
+            'metadata': rel.metadata
+        }
+        edges.append(edge)
+    
+    # Create output
+    output_data = {
+        'nodes': nodes,
+        'edges': edges,
+        'metadata': {
+            'entry_points': entry_procedures,
+            'excluded_procedures': list(exclude_set),
+            'max_depth': max_depth,
+            'extraction_type': 'call_subgraph'
+        },
+        'statistics': stats
+    }
+    
+    # Save to file
+    output_path = Path(output_file)
+    output_path.parent.mkdir(exist_ok=True, parents=True)
+    
+    with open(output_path, 'w') as f:
+        json.dump(output_data, f, indent=2)
+    
+    print(f"✓ Subgraph exported to: {output_path}\n")
+    
+    # Show call chains for first few procedures
+    procedures = [e for e in subgraph['entities'] if e.type == EntityType.PROCEDURE]
+    print(f"Sample call relationships:")
+    for proc in procedures[:5]:
+        callees = [e.name for e in subgraph['entities'] 
+                  if any(r.source_id == proc.id and r.target_id == e.id 
+                        for r in subgraph['relationships'])]
+        if callees:
+            print(f"  {proc.name} → {', '.join(callees[:5])}")
+    
+    print(f"\n{'='*70}\n")
+    
+    return str(output_path)
+                                    
 def parse_tal_file_to_kg(file_path: str, knowledge_graph: KnowledgeGraph) -> Entity:
     """
     Parse a TAL file and add to knowledge graph
