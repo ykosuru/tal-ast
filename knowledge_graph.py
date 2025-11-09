@@ -852,31 +852,22 @@ class KnowledgeGraph:
         logger.info(f"Saved graph to {filepath}")
     
     def load_from_json(self, filepath: str) -> None:
-    """Load graph from JSON file"""
-    from datetime import datetime
-    
-    with open(filepath, 'r') as f:
-        data = json.load(f)
-    
-    # Add entities
-    for entity_data in data['entities']:
-        # FIX: Parse datetime string
-        if 'created_at' in entity_data and isinstance(entity_data['created_at'], str):
-            entity_data['created_at'] = datetime.fromisoformat(entity_data['created_at'])
+        """Load graph from JSON file"""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
         
-        entity = Entity(**entity_data)
-        self.add_entity(entity)
-    
-    # Add relationships
-    for rel_data in data['relationships']:
-        # FIX: Parse datetime string
-        if 'created_at' in rel_data and isinstance(rel_data['created_at'], str):
-            rel_data['created_at'] = datetime.fromisoformat(rel_data['created_at'])
+        # Add entities
+        for entity_data in data['entities']:
+            entity = Entity(**entity_data)
+            self.add_entity(entity)
         
-        rel = Relationship(**rel_data)
-        self.add_relationship(rel)
-    
-    logger.info(f"Loaded graph from {filepath}")
+        # Add relationships
+        for rel_data in data['relationships']:
+            rel = Relationship(**rel_data)
+            self.add_relationship(rel)
+        
+        logger.info(f"Loaded graph from {filepath}")
+
 
 # ============================================================================
 # Hashability Tests (Run on import to verify)
