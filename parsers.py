@@ -1555,7 +1555,7 @@ def export_knowledge_graph(kg: KnowledgeGraph, output_dir: str = "./output"):
 def export_for_visualization(kg: KnowledgeGraph, 
                              include_files: bool = False,
                              include_variables: bool = False,
-                             max_nodes: int = 500) -> Dict[str, Any]:
+                             max_nodes: int = 1000) -> Dict[str, Any]:
     """
     Export knowledge graph in visualization-ready format
     
