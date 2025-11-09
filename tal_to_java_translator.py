@@ -71,6 +71,230 @@ class TALCodeExtractor:
             return None
     
     def _get_procedure_boundaries(self, file_path: Path) -> Dict[str, Dict[str, int]]:
+        """
+        Get all procedure boundaries in a file using tal_proc_parser.
+        
+        This uses tal_proc_parser.find_procedure_declarations() to get accurate
+        procedure start positions, then calculates where each procedure ends.
+        """
+        file_path_str = str(file_path)
+        
+        # Check cache first
+        if file_path_str in self.proc_boundaries_cache:
+            return self.proc_boundaries_cache[file_path_str]
+        
+        lines = self._get_file_contents(file_path)
+        if not lines:
+            return {}
+        
+        # Use tal_proc_parser to find all procedure declarations
+        content = ''.join(lines)
+        proc_declarations = tal_proc_parser.find_procedure_declarations(content)
+        
+        boundaries = {}
+        for i, (start_line, proc_name, declaration) in enumerate(proc_declarations):
+            # Calculate how many lines the declaration spans
+            declaration_line_count = declaration.count('\n') + 1
+            declaration_end_line = start_line + declaration_line_count - 1
+            
+            # Find where this procedure ends
+            # It ends at the start of the next procedure, or at end of file
+            if i + 1 < len(proc_declarations):
+                end_line = proc_declarations[i + 1][0] - 1
+            else:
+                end_line = len(lines)
+            
+            # Store boundaries (case-insensitive lookup)
+            boundaries[proc_name.upper()] = {
+                'start': start_line,
+                'declaration_end': declaration_end_line,
+                'end': end_line,
+                'original_name': proc_name
+            }
+        
+        # Cache the results
+        self.proc_boundaries_cache[file_path_str] = boundaries
+        return boundaries
+    
+    def extract_procedure_code(self, entity) -> Optional[str]:
+        """Extract the actual source code for a procedure."""
+        if not entity.file_path:
+            print(f"Warning: No file_path for entity {entity.name}")
+            return None
+        
+        file_path = Path(entity.file_path)
+        
+        if not file_path.is_absolute():
+            file_path = self.source_dir / file_path
+        
+        lines = self._get_file_contents(file_path)
+        if not lines:
+            print(f"Warning: Could not read file {file_path}")
+            return None
+        
+        boundaries = self._get_procedure_boundaries(file_path)
+        
+        proc_name_upper = entity.name.upper()
+        
+        # Primary path: Use pre-calculated boundaries (RELIABLE)
+        if proc_name_upper in boundaries:
+            boundary = boundaries[proc_name_upper]
+            start = boundary['start'] - 1  # Convert to 0-indexed
+            end = boundary['end']
+            
+            code = ''.join(lines[start:end])
+            return code
+        
+        # Fallback path: Calculate boundaries manually (WITH PROPER BEGIN/END TRACKING)
+        elif entity.start_line:
+            print(f"Warning: Using fallback extraction for {entity.name}")
+            start = entity.start_line - 1
+            
+            if entity.end_line and entity.end_line > entity.start_line:
+                end = entity.end_line
+            else:
+                # FIXED: Track BEGIN/END nesting to find procedure end
+                end = start + 1
+                begin_count = 0
+                end_count = 0
+                found_begin = False
+                
+                for i in range(start, min(len(lines), start + 1000)):
+                    line = lines[i].strip().upper()
+                    
+                    # Skip comments
+                    comment_pos = line.find('!')
+                    if comment_pos >= 0:
+                        line = line[:comment_pos].strip()
+                    
+                    # Count BEGIN keywords
+                    if 'BEGIN' in line:
+                        begin_count += line.count('BEGIN')
+                        found_begin = True
+                    
+                    # Count END keywords (as whole words only)
+                    if re.search(r'\bEND\b', line):
+                        end_count += 1
+                    
+                    # Stop at next PROC (different procedure)
+                    if i > start and re.search(r'\bPROC\b', line):
+                        end = i
+                        break
+                    
+                    # If we found BEGIN and all BEGINs are closed
+                    if found_begin and begin_count > 0 and begin_count == end_count:
+                        end = i + 1
+                        break
+                    
+                    # If no BEGIN found but we hit END, assume simple procedure
+                    if not found_begin and end_count > 0:
+                        end = i + 1
+                        break
+                
+                # Safety fallback
+                if end == start + 1:
+                    end = min(start + 200, len(lines))
+            
+            code = ''.join(lines[start:end])
+            return code
+        
+        print(f"Warning: Could not find procedure {entity.name} in {file_path}")
+        return None
+    
+    def extract_structure_code(self, entity) -> Optional[str]:
+        """Extract structure definition from source file."""
+        if not entity.file_path:
+            return None
+        
+        file_path = Path(entity.file_path)
+        
+        if not file_path.is_absolute():
+            file_path = self.source_dir / file_path
+        
+        lines = self._get_file_contents(file_path)
+        if not lines:
+            return None
+        
+        if not entity.start_line:
+            return None
+        
+        start = entity.start_line - 1
+        
+        # For structures, look for the closing pattern
+        # STRUCT can have BEGIN...END blocks or simple semicolon termination
+        end = start + 1
+        found_begin = False
+        begin_count = 0
+        end_count = 0
+        
+        for i in range(start, min(len(lines), start + 200)):
+            line = lines[i].strip().upper()
+            
+            # Track BEGIN/END for nested structures
+            if 'BEGIN' in line:
+                found_begin = True
+                begin_count += line.count('BEGIN')
+            if 'END' in line:
+                end_count += line.count('END')
+            
+            # If we have nested BEGIN/END, wait for all to close
+            if found_begin:
+                if begin_count > 0 and begin_count == end_count:
+                    end = i + 1
+                    break
+            # Otherwise look for semicolon
+            elif line.endswith(';'):
+                end = i + 1
+                break
+        
+        code = ''.join(lines[start:end])
+        return code
+    
+    def extract_file_section(self, file_path: str, start_line: int, end_line: int) -> Optional[str]:
+        """Extract a section of a file by line numbers."""
+        path = Path(file_path)
+        
+        if not path.is_absolute():
+            path = self.source_dir / path
+        
+        lines = self._get_file_contents(path)
+        if not lines:
+            return None
+        
+        start = max(0, start_line - 1)
+        end = min(len(lines), end_line)
+        
+        return ''.join(lines[start:end])
+        
+
+class TALCodeExtractorOLD:
+    """Extract actual TAL source code from files using tal_proc_parser for accuracy."""
+    
+    def __init__(self, tal_source_dir: str):
+        self.source_dir = Path(tal_source_dir)
+        self.file_cache = {}
+        self.proc_boundaries_cache = {}
+    
+    def _get_file_contents(self, file_path: Path) -> Optional[List[str]]:
+        """Get file contents with caching."""
+        file_path_str = str(file_path)
+        
+        if file_path_str in self.file_cache:
+            return self.file_cache[file_path_str]
+        
+        if not file_path.exists():
+            return None
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            self.file_cache[file_path_str] = lines
+            return lines
+        except Exception as e:
+            print(f"Warning: Error reading file {file_path}: {e}")
+            return None
+    
+    def _get_procedure_boundaries(self, file_path: Path) -> Dict[str, Dict[str, int]]:
         """Get all procedure boundaries in a file using tal_proc_parser."""
         file_path_str = str(file_path)
         
