@@ -1,9 +1,13 @@
 """
-Hybrid Modernization System
+Hybrid Modernization System (Updated for subgraph.py integration)
 Uses YOUR Knowledge Graph for analysis, Aider/Cursor/OpenHands for code generation
 
 Architecture:
     Your KG (analysis) → Context Builder → Coding Agent (generation)
+    
+Integration Points:
+    - Uses subgraph.py for call graph extraction
+    - Works with JSON files directly (no KG dependency for subsystem mode)
 """
 
 import json
@@ -14,15 +18,26 @@ from dataclasses import dataclass
 import sys
 
 # Import your existing KG
-# Adjust the import path based on your project structure
 try:
     from knowledge_graph import KnowledgeGraph, Entity, EntityType, RelationType
 except ImportError:
     print("Note: Import your knowledge_graph module")
-    # Mock for standalone usage
     class KnowledgeGraph: pass
     class EntityType: pass
     class RelationType: pass
+
+# Import subgraph extraction (your existing script)
+try:
+    from subgraph import (
+        load_graph_json,
+        find_procedures_by_name,
+        extract_call_subgraph as extract_subgraph_from_json,
+        build_call_graph_index
+    )
+    SUBGRAPH_AVAILABLE = True
+except ImportError:
+    print("Warning: subgraph.py not found - subsystem mode requires subgraph.py")
+    SUBGRAPH_AVAILABLE = False
 
 
 @dataclass
@@ -53,15 +68,34 @@ class ModernizationContext:
 class ContextBuilder:
     """
     Builds rich context from your Knowledge Graph for coding agents
-    This is the KEY component - uses your KG for intelligence
+    Works with EITHER KG objects OR JSON files (via subgraph.py)
     """
     
-    def __init__(self, kg: KnowledgeGraph):
+    def __init__(self, kg: Optional[KnowledgeGraph] = None, kg_json_path: Optional[str] = None):
         """
         Args:
-            kg: Your existing KnowledgeGraph instance
+            kg: Your existing KnowledgeGraph instance (optional if using JSON)
+            kg_json_path: Path to KG JSON file (optional if using KG object)
         """
         self.kg = kg
+        self.kg_json_path = kg_json_path
+        
+        # For JSON-based mode
+        self.json_data = None
+        self.node_by_id = {}
+        self.call_index = None
+        
+        if kg_json_path and not kg:
+            self._load_json_data()
+    
+    def _load_json_data(self):
+        """Load and index JSON data for direct access"""
+        if not SUBGRAPH_AVAILABLE:
+            raise RuntimeError("subgraph.py required for JSON mode")
+        
+        self.json_data = load_graph_json(self.kg_json_path)
+        self.node_by_id = {n['id']: n for n in self.json_data['nodes']}
+        self.call_index = build_call_graph_index(self.json_data['edges'])
     
     def build_context(
         self, 
@@ -70,14 +104,17 @@ class ContextBuilder:
     ) -> ModernizationContext:
         """
         Extract comprehensive context for a procedure
-        
-        Args:
-            procedure_name: Name of procedure to modernize
-            rag_system: Optional RAG system for business docs
-            
-        Returns:
-            ModernizationContext with all relevant information
+        Works with both KG objects and JSON data
         """
+        if self.kg:
+            return self._build_context_from_kg(procedure_name, rag_system)
+        elif self.json_data:
+            return self._build_context_from_json(procedure_name, rag_system)
+        else:
+            raise ValueError("Must provide either kg or kg_json_path")
+    
+    def _build_context_from_kg(self, procedure_name: str, rag_system: Optional[Any]) -> ModernizationContext:
+        """Build context using KnowledgeGraph object"""
         # Find procedure entity
         procedures = self.kg.query_entities(entity_type=EntityType.PROCEDURE)
         entity = next((p for p in procedures if p.name == procedure_name), None)
@@ -85,7 +122,7 @@ class ContextBuilder:
         if not entity:
             raise ValueError(f"Procedure '{procedure_name}' not found in KG")
         
-        # Get direct calls (what this procedure calls)
+        # Get direct calls
         callees = self.kg.get_neighbors(
             entity.id,
             rel_type=RelationType.CALLS,
@@ -93,7 +130,7 @@ class ContextBuilder:
         )
         direct_calls = [c.name for c in callees]
         
-        # Get callers (who calls this procedure)
+        # Get callers
         callers = self.kg.get_neighbors(
             entity.id,
             rel_type=RelationType.CALLS,
@@ -111,11 +148,9 @@ class ContextBuilder:
             )
             data_deps.extend([d.name for d in deps])
         
-        # Compute coupling score
-        coupling_score = self._compute_coupling(entity.id)
-        
-        # Compute call depth
-        call_depth = self._compute_call_depth(entity.id)
+        # Compute metrics
+        coupling_score = self._compute_coupling_kg(entity.id)
+        call_depth = self._compute_call_depth_kg(entity.id)
         
         # Generate warnings
         warnings = self._generate_warnings(
@@ -125,15 +160,13 @@ class ContextBuilder:
             len(data_deps)
         )
         
-        # Get recommendation
         recommendation = self._get_recommendation(coupling_score)
         
-        # Query RAG for business context (if available)
+        # Query RAG if available
         business_context = None
         domain_docs = None
         if rag_system:
             business_context = self._query_rag(rag_system, procedure_name, entity)
-            domain_docs = self._extract_domain_docs(rag_system, entity)
         
         return ModernizationContext(
             procedure_name=entity.name,
@@ -152,8 +185,94 @@ class ContextBuilder:
             domain_docs=domain_docs
         )
     
-    def _compute_coupling(self, entity_id: str) -> float:
-        """Compute coupling score (0-1)"""
+    def _build_context_from_json(self, procedure_name: str, rag_system: Optional[Any]) -> ModernizationContext:
+        """Build context using JSON data (via subgraph.py)"""
+        # Find procedure node
+        proc_node = None
+        for node in self.json_data['nodes']:
+            if node.get('type') == 'procedure' and node.get('name') == procedure_name:
+                proc_node = node
+                break
+        
+        if not proc_node:
+            raise ValueError(f"Procedure '{procedure_name}' not found in JSON")
+        
+        proc_id = proc_node['id']
+        
+        # Get direct calls
+        direct_call_ids = self.call_index['outgoing'].get(proc_id, [])
+        direct_calls = []
+        for call_id in direct_call_ids:
+            if call_id in self.node_by_id:
+                direct_calls.append(self.node_by_id[call_id].get('name', 'unknown'))
+        
+        # Get callers
+        caller_ids = self.call_index['incoming'].get(proc_id, [])
+        called_by = []
+        for caller_id in caller_ids:
+            if caller_id in self.node_by_id:
+                called_by.append(self.node_by_id[caller_id].get('name', 'unknown'))
+        
+        # Get data dependencies (simplified - look for REFERENCES/USES edges)
+        data_deps = []
+        for edge in self.json_data['edges']:
+            source_id = edge.get('source') or edge.get('source_id')
+            if isinstance(source_id, dict):
+                source_id = source_id.get('id')
+            
+            if source_id == proc_id and edge.get('type') in ['references', 'uses']:
+                target_id = edge.get('target') or edge.get('target_id')
+                if isinstance(target_id, dict):
+                    target_id = target_id.get('id')
+                
+                if target_id in self.node_by_id:
+                    data_deps.append(self.node_by_id[target_id].get('name', 'unknown'))
+        
+        # Compute metrics
+        coupling_score = self._compute_coupling_json(proc_id)
+        call_depth = self._compute_call_depth_json(proc_id)
+        
+        # Generate warnings
+        warnings = self._generate_warnings(
+            len(direct_calls),
+            len(called_by),
+            coupling_score,
+            len(data_deps)
+        )
+        
+        recommendation = self._get_recommendation(coupling_score)
+        
+        # Extract source code and metadata
+        metadata = proc_node.get('metadata', {})
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except:
+                metadata = {}
+        
+        source_code = metadata.get('source_code', '') or proc_node.get('source_code', '')
+        language = proc_node.get('language', 'TAL')
+        file_path = proc_node.get('file_path', '')
+        
+        return ModernizationContext(
+            procedure_name=proc_node.get('name'),
+            procedure_id=proc_id,
+            source_code=source_code,
+            language=language,
+            file_path=file_path,
+            direct_calls=direct_calls,
+            called_by=called_by,
+            call_depth=call_depth,
+            coupling_score=coupling_score,
+            data_dependencies=data_deps,
+            warnings=warnings,
+            recommendation=recommendation,
+            business_context=None,
+            domain_docs=None
+        )
+    
+    def _compute_coupling_kg(self, entity_id: str) -> float:
+        """Compute coupling score using KG"""
         outgoing = len(self.kg.get_neighbors(
             entity_id,
             rel_type=RelationType.CALLS,
@@ -165,10 +284,17 @@ class ContextBuilder:
             direction="incoming"
         ))
         total = outgoing + incoming
-        return min(total / 20.0, 1.0)  # Normalize to 0-1
+        return min(total / 20.0, 1.0)
     
-    def _compute_call_depth(self, entity_id: str, max_depth: int = 5) -> int:
-        """Compute maximum call depth from this procedure"""
+    def _compute_coupling_json(self, node_id: str) -> float:
+        """Compute coupling score using JSON data"""
+        outgoing = len(self.call_index['outgoing'].get(node_id, []))
+        incoming = len(self.call_index['incoming'].get(node_id, []))
+        total = outgoing + incoming
+        return min(total / 20.0, 1.0)
+    
+    def _compute_call_depth_kg(self, entity_id: str, max_depth: int = 5) -> int:
+        """Compute call depth using KG"""
         visited = set()
         
         def dfs_depth(current_id: str, depth: int) -> int:
@@ -193,6 +319,29 @@ class ContextBuilder:
             return max_child_depth
         
         return dfs_depth(entity_id, 0)
+    
+    def _compute_call_depth_json(self, node_id: str, max_depth: int = 5) -> int:
+        """Compute call depth using JSON data"""
+        visited = set()
+        
+        def dfs_depth(current_id: str, depth: int) -> int:
+            if depth >= max_depth or current_id in visited:
+                return depth
+            
+            visited.add(current_id)
+            callees = self.call_index['outgoing'].get(current_id, [])
+            
+            if not callees:
+                return depth
+            
+            max_child_depth = depth
+            for callee_id in callees:
+                child_depth = dfs_depth(callee_id, depth + 1)
+                max_child_depth = max(max_child_depth, child_depth)
+            
+            return max_child_depth
+        
+        return dfs_depth(node_id, 0)
     
     def _generate_warnings(
         self, 
@@ -239,10 +388,10 @@ class ContextBuilder:
         else:
             return "HIGH COUPLING: Modernize as part of a group to avoid interface issues."
     
-    def _query_rag(self, rag_system: Any, proc_name: str, entity: Entity) -> str:
+    def _query_rag(self, rag_system: Any, proc_name: str, entity: Any) -> str:
         """Query RAG system for business context"""
         try:
-            # Extract business terms from procedure
+            # Extract business terms
             terms = [proc_name]
             if 'payment' in proc_name.lower():
                 terms.append('payment processing')
@@ -263,11 +412,6 @@ class ContextBuilder:
             return '\n'.join(context_parts)
         except:
             return None
-    
-    def _extract_domain_docs(self, rag_system: Any, entity: Entity) -> str:
-        """Extract domain-specific documentation"""
-        # Similar to _query_rag but focused on domain concepts
-        return None
 
 
 class AgentPromptGenerator:
@@ -284,14 +428,6 @@ class AgentPromptGenerator:
     ) -> Path:
         """
         Generate comprehensive context file for coding agent
-        
-        Args:
-            context: Context from KG
-            target_language: Target language
-            output_path: Where to save context files
-            
-        Returns:
-            Path to generated context file
         """
         output_path.mkdir(exist_ok=True, parents=True)
         
@@ -381,11 +517,6 @@ class AgentPromptGenerator:
             sections.append(context.business_context)
             sections.append("")
         
-        if context.domain_docs:
-            sections.append("## Domain Knowledge")
-            sections.append(context.domain_docs)
-            sections.append("")
-        
         # Requirements
         sections.append("## Modernization Requirements")
         sections.append("")
@@ -416,7 +547,7 @@ class AgentPromptGenerator:
             sections.append("   - Maintain data integrity")
         sections.append("")
         
-        # Special considerations for payment processing
+        # Payment processing specific
         if any(term in context.procedure_name.lower() 
                for term in ['payment', 'wire', 'transfer', 'ofac', 'transaction']):
             sections.append("## 🔒 Payment Processing Specific")
@@ -465,24 +596,31 @@ Requirements:
 class HybridModernizer:
     """
     Main orchestrator: Your KG for analysis, Aider/Cursor for generation
+    Works with EITHER KG objects OR JSON files (via subgraph.py)
     """
     
     def __init__(
         self,
-        kg: KnowledgeGraph,
+        kg: Optional[KnowledgeGraph] = None,
+        kg_json_path: Optional[str] = None,
         agent: str = "aider",
         rag_system: Optional[Any] = None
     ):
         """
         Args:
-            kg: Your KnowledgeGraph instance
-            agent: Coding agent to use ('aider', 'cursor', or command)
+            kg: Your KnowledgeGraph instance (optional if using JSON)
+            kg_json_path: Path to KG JSON file (optional if using KG object)
+            agent: Coding agent to use ('aider', 'cursor', or 'custom')
             rag_system: Optional RAG system
         """
+        if not kg and not kg_json_path:
+            raise ValueError("Must provide either kg or kg_json_path")
+        
         self.kg = kg
+        self.kg_json_path = kg_json_path
         self.agent = agent
         self.rag_system = rag_system
-        self.context_builder = ContextBuilder(kg)
+        self.context_builder = ContextBuilder(kg, kg_json_path)
         self.prompt_generator = AgentPromptGenerator()
     
     def modernize_procedure(
@@ -494,15 +632,6 @@ class HybridModernizer:
     ) -> Dict[str, Any]:
         """
         Modernize a single procedure using hybrid approach
-        
-        Args:
-            procedure_name: Name of procedure to modernize
-            target_language: Target language
-            output_dir: Where to save modernized code
-            context_dir: Where to save context files
-            
-        Returns:
-            Dict with results and paths
         """
         print(f"\n{'='*70}")
         print(f"MODERNIZING: {procedure_name}")
@@ -567,45 +696,55 @@ class HybridModernizer:
         context_dir: Path = Path("./agent_context")
     ) -> Dict[str, Any]:
         """
-        Modernize entire subsystem using KG subgraph extraction + agent
+        Modernize entire subsystem using subgraph extraction + agent
         
-        Args:
-            entry_procedures: Entry point procedure names
-            target_language: Target language
-            exclude_utilities: Common utilities to exclude
-            max_depth: Max call depth
-            output_dir: Output directory
-            context_dir: Context directory
-            
-        Returns:
-            Dict with results
+        NOTE: This requires subgraph.py to be available
         """
+        if not SUBGRAPH_AVAILABLE:
+            raise RuntimeError("subsystem mode requires subgraph.py")
+        
+        if not self.kg_json_path:
+            raise RuntimeError("subsystem mode requires kg_json_path")
+        
         print(f"\n{'='*70}")
         print(f"SUBSYSTEM MODERNIZATION")
         print(f"{'='*70}")
         print(f"Entry points: {', '.join(entry_procedures)}")
         print(f"{'='*70}\n")
         
-        # Step 1: Use YOUR excellent extract_call_subgraph
-        print("🔍 Extracting call subgraph from Knowledge Graph...")
-        subgraph = self.kg.extract_call_subgraph(
-            entry_procedures=entry_procedures,
+        # Step 1: Use subgraph.py to extract call subgraph
+        print("🔍 Extracting call subgraph...")
+        graph_data = load_graph_json(self.kg_json_path)
+        
+        # Find entry procedure nodes
+        entry_proc_nodes = find_procedures_by_name(graph_data['nodes'], entry_procedures)
+        
+        if not entry_proc_nodes:
+            raise ValueError(f"No procedures found matching: {', '.join(entry_procedures)}")
+        
+        print(f"  Found {len(entry_proc_nodes)} entry procedures")
+        
+        # Extract subgraph
+        subgraph = extract_subgraph_from_json(
+            graph_data['nodes'],
+            graph_data['edges'],
+            entry_proc_nodes,
+            exclude_utilities or set(),
             max_depth=max_depth,
-            exclude_procedures=exclude_utilities or set(),
             include_variables=True,
             include_structures=True
         )
         
-        procedures = [e for e in subgraph['entities'] if e.type == EntityType.PROCEDURE]
-        print(f"  ✓ Found {len(procedures)} procedures")
-        print(f"  ✓ Total entities: {subgraph['statistics']['total_entities']}")
+        # Get procedure nodes from subgraph
+        procedure_nodes = [n for n in subgraph['nodes'] if n.get('type') == 'procedure']
+        print(f"  ✓ Found {len(procedure_nodes)} procedures in subsystem")
         
-        # Step 2: Sequence by coupling (low coupling first)
+        # Step 2: Sequence by coupling
         print(f"\n📋 Sequencing procedures by coupling...")
-        sequenced_procedures = self._sequence_by_coupling(procedures)
+        sequenced_procedures = self._sequence_by_coupling_json(procedure_nodes, subgraph['edges'])
         
         for i, (proc, coupling) in enumerate(sequenced_procedures[:10], 1):
-            print(f"  {i}. {proc.name:40} (coupling: {coupling:.2f})")
+            print(f"  {i}. {proc.get('name'):40} (coupling: {coupling:.2f})")
         if len(sequenced_procedures) > 10:
             print(f"  ... and {len(sequenced_procedures) - 10} more")
         
@@ -613,26 +752,27 @@ class HybridModernizer:
         print(f"\n🔄 Modernizing {len(sequenced_procedures)} procedures...\n")
         
         results = []
-        for i, (proc_entity, coupling) in enumerate(sequenced_procedures, 1):
-            print(f"\n[{i}/{len(sequenced_procedures)}] {proc_entity.name}")
+        for i, (proc_node, coupling) in enumerate(sequenced_procedures, 1):
+            proc_name = proc_node.get('name')
+            print(f"\n[{i}/{len(sequenced_procedures)}] {proc_name}")
             print(f"  Coupling: {coupling:.2f}")
             
             try:
                 result = self.modernize_procedure(
-                    proc_entity.name,
+                    proc_name,
                     target_language,
                     output_dir,
                     context_dir
                 )
                 results.append({
-                    'procedure': proc_entity.name,
+                    'procedure': proc_name,
                     'status': 'success',
                     'result': result
                 })
             except Exception as e:
                 print(f"  ❌ Error: {e}")
                 results.append({
-                    'procedure': proc_entity.name,
+                    'procedure': proc_name,
                     'status': 'failed',
                     'error': str(e)
                 })
@@ -659,14 +799,19 @@ class HybridModernizer:
             }
         }
     
-    def _sequence_by_coupling(self, procedures: List[Entity]) -> List[tuple]:
-        """Sequence procedures by coupling score (low first)"""
+    def _sequence_by_coupling_json(self, procedure_nodes: List[Dict], edges: List[Dict]) -> List[tuple]:
+        """Sequence procedures by coupling score using JSON data"""
+        call_index = build_call_graph_index(edges)
+        
         scored = []
-        for proc in procedures:
-            coupling = self.context_builder._compute_coupling(proc.id)
+        for proc in procedure_nodes:
+            proc_id = proc['id']
+            outgoing = len(call_index['outgoing'].get(proc_id, []))
+            incoming = len(call_index['incoming'].get(proc_id, []))
+            coupling = min((outgoing + incoming) / 20.0, 1.0)
             scored.append((proc, coupling))
         
-        # Sort by coupling (low first = easier to modernize)
+        # Sort by coupling (low first)
         scored.sort(key=lambda x: x[1])
         return scored
     
@@ -689,12 +834,7 @@ class HybridModernizer:
         context_file: Path,
         output_dir: Path
     ) -> Dict[str, Any]:
-        """
-        Call the coding agent (Aider/Cursor/etc.)
-        
-        Returns:
-            Dict with agent results
-        """
+        """Call the coding agent"""
         if self.agent == "aider":
             return self._call_aider(context, target_language, source_file, context_file, output_dir)
         elif self.agent == "cursor":
@@ -711,14 +851,11 @@ class HybridModernizer:
         output_dir: Path
     ) -> Dict[str, Any]:
         """Call Aider with context"""
-        
-        # Generate short prompt
         prompt = self.prompt_generator.generate_short_prompt(context, target_language)
         
-        # Aider command
         cmd = [
             "aider",
-            "--yes",  # Auto-accept
+            "--yes",
             "--message", prompt,
             str(source_file),
             str(context_file)
@@ -799,24 +936,25 @@ class HybridModernizer:
 def main():
     """Example usage"""
     print("""
-Hybrid Modernization System
+Hybrid Modernization System (Updated for subgraph.py)
 Uses your Knowledge Graph for analysis, Aider/Cursor for generation
 
-Usage:
+Usage with KG object:
     from hybrid_modernizer import HybridModernizer
     from knowledge_graph import KnowledgeGraph
     
-    # Initialize your KG
     kg = KnowledgeGraph(backend="networkx")
     kg.load_from_json("tal_system.json")
     
-    # Create hybrid modernizer
-    modernizer = HybridModernizer(kg, agent="aider")
-    
-    # Modernize single procedure
+    modernizer = HybridModernizer(kg=kg, agent="aider")
     result = modernizer.modernize_procedure("PROCESS_WIRE_TRANSFER", "Python")
+
+Usage with JSON file (for subsystem mode):
+    modernizer = HybridModernizer(
+        kg_json_path="tal_system.json",
+        agent="aider"
+    )
     
-    # Or modernize subsystem
     result = modernizer.modernize_subsystem(
         entry_procedures=["PROCESS_WIRE_TRANSFER"],
         exclude_utilities={"LOG_MESSAGE", "FORMAT_DATE"}
