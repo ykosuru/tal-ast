@@ -451,8 +451,7 @@ class TranslationContextBuilder:
                     'line': p['entity'].start_line,
                     'parameters': p['entity'].metadata.get('parameters', []),
                     'return_type': p['entity'].metadata.get('return_type'),
-                    'code': p['code'],
-                    'is_external': p['entity'].metadata.get('is_external', False)
+                    'code': p['code']
                 }
                 for p in procedures_with_code if p['is_primary']
             ],
