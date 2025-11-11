@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
 TAL to Java Translation Assistant using LLM + RAG
+Now with comprehensive prompt generation for complete translations
 
 This program:
 1. Uses knowledge graph to find functionality (e.g., drawdown) TAL code
 2. Gathers all relevant context (procedures, data structures, dependencies)
 3. Reads actual TAL source code
 4. Builds comprehensive LLM context
-5. Generates Java translation using LLM (Claude, GPT, etc.)
+5. Generates comprehensive prompts ensuring complete line-by-line translation
+6. Optional direct LLM API integration
 
 Features:
 - Automatic code discovery using knowledge graph search
-- Full dependency tracking
+- Full dependency tracking with call graph analysis
 - Data structure extraction
-- Call graph analysis
-- LLM-ready prompt generation
-- Optional direct LLM API integration
-- This keeps the full graph in memory, it walks through it finding the functionality and deps
+- Built-in diagnostics for missing procedures
+- Comprehensive 4-phase prompt methodology
+- Financial code precision requirements
+- Verification checklists
 
 Usage:
     python tal_to_java_translator.py <tal_source_dir> <functionality> [options]
@@ -36,6 +38,9 @@ from parsers import (
     KnowledgeGraphSearch,
     resolve_external_references
 )
+
+# Import the comprehensive prompt generator
+from comprehensive_prompt_generator import ComprehensivePromptGenerator
 
 
 class TALCodeExtractor:
@@ -114,12 +119,13 @@ class TALCodeExtractor:
         return boundaries
     
     def find_missing_procedure(self, name: str):
+        """Find and display detailed info about a missing procedure using repair_graph."""
         import repair_graph
         graph = repair_graph.load_graph('./output/knowledge_graph.json')
         matches = repair_graph.find_procedure_in_graph(name, graph)
         
         if not matches:
-            print(f"✗ No procedure found matching '{args.find}!'")
+            print(f"✗ No procedure found matching '{name}!'")
         else:
             print(f"✓ Found {len(matches)} match(es):\n")
             for i, proc in enumerate(matches, 1):
@@ -160,6 +166,8 @@ class TALCodeExtractor:
         
         file_path = Path(entity.file_path)
         
+        # NOTE: Commented out to use paths as-is from knowledge graph
+        # Your version uses paths directly without making them absolute
         #if not file_path.is_absolute():
         #    file_path = self.source_dir / file_path
         
@@ -244,6 +252,7 @@ class TALCodeExtractor:
         
         file_path = Path(entity.file_path)
         
+        # NOTE: Commented out to use paths as-is from knowledge graph
         #if not file_path.is_absolute():
         #    file_path = self.source_dir / file_path
         
@@ -290,6 +299,7 @@ class TALCodeExtractor:
         """Extract a section of a file by line numbers."""
         path = Path(file_path)
         
+        # NOTE: Commented out to use paths as-is from knowledge graph
         #if not path.is_absolute():
         #    path = self.source_dir / path
         
@@ -311,10 +321,11 @@ class TranslationContextBuilder:
         self.extractor = code_extractor
         self.search = KnowledgeGraphSearch(kg)
     
-    def build_context_for_functionality(self, functionality: str, 
+    def build_context_for_functionality(self, 
+                                       functionality: str, 
                                        depth: int = 2) -> Dict[str, Any]:
         """
-        Build comprehensive translation context for a functionality
+        Build comprehensive translation context for a functionality.
         
         Args:
             functionality: Search term (e.g., "drawdown")
@@ -324,7 +335,7 @@ class TranslationContextBuilder:
             Dict with all context needed for translation
         """
         print(f"\n{'='*70}")
-        print(f"BUILDING LLM CONTEXT: '{functionality}'")
+        print(f"BUILDING TRANSLATION CONTEXT: '{functionality}'")
         print(f"{'='*70}\n")
         
         # Step 1: Find all related entities
@@ -339,11 +350,17 @@ class TranslationContextBuilder:
         print(f"  Found {len(related_vars)} related variables")
         print(f"  Found {len(related_structs)} related structures")
         
+        if not primary_procedures:
+            print(f"\n⚠️  WARNING: No procedures found for '{functionality}'")
+            print("    Try a different search term or check knowledge graph")
+        
         # Step 2: Build dependency graph
         print(f"\nStep 2: Building dependency graph (depth={depth})...")
         all_procedures = set(primary_procedures)
         all_structures = set(related_structs)
         all_variables = set(related_vars)
+        
+        procedure_dependencies = {}
         
         # Expand by depth
         current_procs = list(primary_procedures)
@@ -351,6 +368,14 @@ class TranslationContextBuilder:
             next_procs = []
             
             for proc in current_procs:
+                if proc.name not in procedure_dependencies:
+                    procedure_dependencies[proc.name] = {
+                        'calls': [],
+                        'called_by': [],
+                        'uses_structures': [],
+                        'uses_variables': []
+                    }
+                
                 # Find what this proc calls
                 callees = self.kg.get_neighbors(
                     proc.id,
@@ -365,6 +390,13 @@ class TranslationContextBuilder:
                     direction="incoming"
                 )
                 
+                # Find structures used
+                uses_structs = self.kg.get_neighbors(
+                    proc.id,
+                    rel_type=RelationType.USES,
+                    direction="outgoing"
+                )
+                
                 # Find variables contained in this proc
                 contained = self.kg.get_neighbors(
                     proc.id,
@@ -373,17 +405,27 @@ class TranslationContextBuilder:
                 )
                 
                 for callee in callees:
-                    if callee not in all_procedures and callee.type == EntityType.PROCEDURE:
-                        all_procedures.add(callee)
-                        next_procs.append(callee)
+                    if callee.type == EntityType.PROCEDURE:
+                        procedure_dependencies[proc.name]['calls'].append(callee.name)
+                        if callee not in all_procedures:
+                            all_procedures.add(callee)
+                            next_procs.append(callee)
                 
                 for caller in callers:
-                    if caller not in all_procedures and caller.type == EntityType.PROCEDURE:
-                        all_procedures.add(caller)
-                        next_procs.append(caller)
+                    if caller.type == EntityType.PROCEDURE:
+                        procedure_dependencies[proc.name]['called_by'].append(caller.name)
+                        if caller not in all_procedures:
+                            all_procedures.add(caller)
+                            next_procs.append(caller)
+                
+                for struct in uses_structs:
+                    if struct.type == EntityType.STRUCTURE:
+                        procedure_dependencies[proc.name]['uses_structures'].append(struct.name)
+                        all_structures.add(struct)
                 
                 for var in contained:
                     if var.type == EntityType.VARIABLE:
+                        procedure_dependencies[proc.name]['uses_variables'].append(var.name)
                         all_variables.add(var)
             
             print(f"  Depth {d+1}: Added {len(next_procs)} procedures")
@@ -397,13 +439,40 @@ class TranslationContextBuilder:
         # Step 3: Extract source code
         print(f"\nStep 3: Extracting source code...")
         procedures_with_code = []
+        code_extraction_stats = {
+            'success': 0,
+            'failed': 0,
+            'empty': 0,
+            'total_chars': 0
+        }
+        
         for proc in all_procedures:
             code = self.extractor.extract_procedure_code(proc)
+            code_length = len(code) if code else 0
+            
+            if code:
+                code_extraction_stats['success'] += 1
+                code_extraction_stats['total_chars'] += code_length
+                
+                if code_length < 10:
+                    code_extraction_stats['empty'] += 1
+                    print(f"  ⚠️  Very short code for {proc.name} ({code_length} chars)")
+            else:
+                code_extraction_stats['failed'] += 1
+                print(f"  ✗ Failed to extract code for {proc.name}")
+            
             procedures_with_code.append({
                 'entity': proc,
                 'code': code,
+                'code_length': code_length,  # Required by comprehensive prompt generator
                 'is_primary': proc in primary_procedures
             })
+        
+        print(f"\n  Code extraction summary:")
+        print(f"    ✓ Success: {code_extraction_stats['success']}")
+        print(f"    ✗ Failed: {code_extraction_stats['failed']}")
+        print(f"    ⚠  Empty: {code_extraction_stats['empty']}")
+        print(f"    Total characters: {code_extraction_stats['total_chars']:,}")
         
         structures_with_code = []
         for struct in all_structures:
@@ -413,28 +482,7 @@ class TranslationContextBuilder:
                 'code': code
             })
         
-        # Step 4: Analyze call relationships
-        print(f"\nStep 4: Analyzing call graph...")
-        call_graph = {}
-        for proc in all_procedures:
-            callees = self.kg.get_neighbors(
-                proc.id,
-                rel_type=RelationType.CALLS,
-                direction="outgoing"
-            )
-            
-            callers = self.kg.get_neighbors(
-                proc.id,
-                rel_type=RelationType.CALLS,
-                direction="incoming"
-            )
-            
-            call_graph[proc.name] = {
-                'calls': [c.name for c in callees],
-                'called_by': [c.name for c in callers]
-            }
-        
-        # Step 5: Build context dictionary
+        # Step 4: Build context dictionary (compatible with comprehensive prompt generator)
         context = {
             'functionality': functionality,
             'summary': {
@@ -442,7 +490,8 @@ class TranslationContextBuilder:
                 'total_procedures': len(all_procedures),
                 'total_variables': len(all_variables),
                 'total_structures': len(all_structures),
-                'depth': depth
+                'depth': depth,
+                'code_extraction': code_extraction_stats  # Required by comprehensive generator
             },
             'primary_procedures': [
                 {
@@ -451,7 +500,9 @@ class TranslationContextBuilder:
                     'line': p['entity'].start_line,
                     'parameters': p['entity'].metadata.get('parameters', []),
                     'return_type': p['entity'].metadata.get('return_type'),
-                    'code': p['code']
+                    'code': p['code'],
+                    'code_length': p['code_length'],  # Required by comprehensive generator
+                    'dependencies': procedure_dependencies.get(p['entity'].name, {})
                 }
                 for p in procedures_with_code if p['is_primary']
             ],
@@ -463,7 +514,9 @@ class TranslationContextBuilder:
                     'parameters': p['entity'].metadata.get('parameters', []),
                     'return_type': p['entity'].metadata.get('return_type'),
                     'code': p['code'],
-                    'is_external': p['entity'].metadata.get('is_external', False)
+                    'code_length': p['code_length'],  # Required by comprehensive generator
+                    'is_external': p['entity'].metadata.get('is_external', False),
+                    'dependencies': procedure_dependencies.get(p['entity'].name, {})
                 }
                 for p in procedures_with_code if not p['is_primary']
             ],
@@ -483,320 +536,23 @@ class TranslationContextBuilder:
                 }
                 for v in all_variables
             ],
-            'call_graph': call_graph
+            'call_graph': procedure_dependencies
         }
+        
+        # Validation
+        primary_with_code = [p for p in context['primary_procedures'] if p['code']]
+        if len(primary_with_code) < len(primary_procedures):
+            print(f"\n  ⚠️  WARNING: Only {len(primary_with_code)}/{len(primary_procedures)} "
+                  f"primary procedures have source code!")
+            print("      Translation quality may be affected.")
         
         print(f"\n✓ Context built successfully")
         
         return context
 
 
-class LLMPromptGenerator:
-    """Generate LLM prompts for TAL to Java translation"""
-    
-    @staticmethod
-    def generate_translation_prompt(context: Dict[str, Any],
-                                    target_procedure: Optional[str] = None) -> str:
-        """
-        Generate a comprehensive prompt for LLM translation
-        
-        Args:
-            context: Translation context from TranslationContextBuilder
-            target_procedure: Optional specific procedure to translate
-        
-        Returns:
-            Complete LLM prompt
-        """
-        
-        prompt = f"""# TAL to Java Translation Task
-
-## Objective
-
-Convert the following TAL (Transaction Application Language) code implementing **{context['functionality']}** functionality
-that aligns with Wells Fargo's current technology standards.
-
----
-
-## Key Requirements
-
-1. **Modern Java Practices**:
-   - Use **Java 17+** features where appropriate.
-   - Apply **Java best principles**, clean code practices, and proper exception handling.
-   - Ensure thread safety and scalability for enterprise-grade systems.
-
-2. **Frameworks & Architecture**:
-   - Implement using **Spring Boot** for application structure.
-   - Integrate **Apache Kafka** for messaging where applicable.
-   - Use **ISO 20022 message types** for financial messaging standards:
-     - Consider **pain** (Payment Initiation), **pacs** (Payments Clearing and Settlement), and **camt** (Cash Management)
-     - Select the appropriate message type (e.g., `pain.001`, `funcs.003`, `camt.054`) based on the drawdown context.
-   - Assume older TAL/HPE systems are **deprecated** and unavailable.
-
-3. **Testing**:
-   - Generate **unit tests** (JUnit 5 + Mockito).
-   - Provide **functional/integration tests** using Spring Boot Test.
-   - Ensure high code coverage and test readability.
-
-4. **System Context**:
-   - This code is part of a **larger distributed system**.
-   - Design for **modularity**, **reusability**, and **future extensibility**.
-   - Include **logging** (SLF4J/Logback) and **error handling** consistent with enterprise standards.
-
-5. **Output Expectations**:
-   - Fully functional **Java class(es)** implementing the drawdown logic.
-   - **DTOs**, **service layer**, and **Kafka producer/consumer** if messaging is involved.
-   - **ISO 20022-compliant message mapping** where applicable.
-   - Complete **unit and functional tests**.
-
-## Context Summary
-
-- Primary procedures: {context['summary']['primary_procedures']}
-- Total procedures in context: {context['summary']['total_procedures']}
-- Data structures: {context['summary']['total_structures']}
-- Variables: {context['summary']['total_variables']}
-- db or dbtr refers to debtor
-- cr or crdtr refers to creditors
-- acct refers to account, trn is payment transaction
-- ^ represents delimiter or word separators in TAL language as naming convention
-- FAIN is the older payment message type
-- Host messages and MQs are no longer relevant
-- Prioritize understanding how the functionality is implemented
-- GSMOS refers to OFAC/sanctions
-
----
-
-## TAL Language Overview
-
-TAL (Transaction Application Language) is a block-structured language designed for HP NonStop systems. Key characteristics:
-
-### Syntax Differences from Java:
-
-- **Procedure Declaration**: `PROC procedure_name(params);` instead of `public void method()`
-- **Variable Types**: `INT`, `STRING`, `FIXED` instead of `int`, `String`, `double`
-- **Pointers**: `.EXT` for extended pointers (64-bit addresses)
-- **Arrays**: `ARRAY[0:9]` instead of `[]`
-- **String Operations**: `@` for address-of, `':='` for string assignment
-- **Control Flow**: `IF...THEN`, `FOR...TO...DO`, `WHILE...DO`
-- **Procedure Calls**: `CALL procedure_name(args)` or just `procedure_name(args)`
-- **Block Delimiters**: `BEGIN...END` instead of `{{}}`
-- **Assignment**: `:=` instead of `=`
-- **Comments**: `!` instead of `//` or `/* */`
-- **send and receieve** are OS (Guardian) functions
-- **$len** returns length of a string
-
-### Common TAL Patterns:
-
-```tal
-! Comment
-INT variable;
-STRING .str;
-PROC my_proc(param1, param2);
-  BEGIN
-    IF condition THEN
-      statement;
-  END;
-```
-
----
-
-## Primary Procedures ({context['functionality']} functionality)
-
-"""
-        
-        # Add primary procedures
-        for i, proc in enumerate(context['primary_procedures'], 1):
-            prompt += f"""
-### {i}. {proc['name']}
-
-**Location**: `{proc['file']}:{proc['line']}`
-**Parameters**: {', '.join(proc['parameters']) if proc['parameters'] else 'none'}
-**Returns**: {proc['return_type'] or 'void'}
-
-```tal
-{proc['code'] or '// Code not available'}
-```
-
-"""
-        
-        # Add data structures
-        if context['structures']:
-            prompt += f"""
-
----
-
-## Data Structures
-
-These structures are used by the {context['functionality']} functionality:
-
-"""
-            for struct in context['structures']:
-                prompt += f"""
-### {struct['name']}
-
-**Fields**: {len(struct['fields'])}
-
-```tal
-{struct['code'] or '// Structure definition not available'}
-```
-
-"""
-                if struct['fields']:
-                    prompt += "Fields:\n"
-                    for field in struct['fields']:
-                        prompt += f"- `{field['name']}`: {field.get('type', 'unknown')}\n"
-                prompt += "\n"
-        
-        # Add dependency procedures (summary)
-        if context['dependency_procedures']:
-            prompt += f"""
-
----
-
-## Dependency Procedures
-
-These procedures are called by or call the {context['functionality']} functionality:
-
-"""
-            for proc in context['dependency_procedures'][:10]:  # Limit to first 10
-                
-                print(f"----> {proc}")
-                is_external = proc.get('is_external', False)
-                external_marker = " (EXTERNAL)" if is_external else ""
-                prompt += f"""
-
-### {proc['name']}{external_marker}
-
-**Location**: `{proc['file']}:{proc['line']}`
-**Parameters**: {', '.join(proc['parameters']) if proc['parameters'] else 'none'}
-**Returns**: {proc['return_type'] or 'void'}
-
-```tal
-{proc['code'][:1000] if proc['code'] else '// Code not available'}...
-```
-
-"""
-        
-        # Add call graph
-        prompt += """
-
----
-
-## Call Graph
-
-The following shows the procedure call relationships:
-
-```
-"""
-        # Show call graph for primary procedures
-        for proc in context['primary_procedures']:
-            proc_name = proc['name']
-            if proc_name in context['call_graph']:
-                graph = context['call_graph'][proc_name]
-                prompt += f"{proc_name}:\n"
-                
-                if graph['calls']:
-                    prompt += f"  Calls:\n"
-                    for callee in graph['calls'][:5]:
-                        prompt += f"    → {callee}\n"
-                    if len(graph['calls']) > 5:
-                        prompt += f"    → ... and {len(graph['calls']) - 5} more\n"
-                
-                if graph['called_by']:
-                    prompt += f"  Called by:\n"
-                    for caller in graph['called_by'][:5]:
-                        prompt += f"    ← {caller}\n"
-                    if len(graph['called_by']) > 5:
-                        prompt += f"    ← ... and {len(graph['called_by']) - 5} more\n"
-                
-                prompt += "\n"
-        
-        prompt += "```\n\n"
-        
-        # Add translation requirements
-        prompt += """
-
----
-
-## Translation Requirements
-
-### Java Translation Guidelines:
-
-1. **Package Structure**:
-   - Create appropriate package: `com.wellsfargo.epe.<functionality>`
-   - Separate concerns: services, models, utils
-
-2. **Class Design**:
-   - Convert TAL procedures to Java methods in appropriate classes
-   - Use object-oriented design principles
-   - Primary procedures → Public service methods
-   - Helper procedures → Private helper methods
-   - External procedures → Interface definitions
-
-3. **Data Structures**:
-   - TAL STRUCT → Java class(es) and/or database structures
-   - Use appropriate Java types (String, int, BigDecimal for financial data)
-   - Add proper encapsulation (getters/setters or records)
-
-4. **Error Handling**:
-   - Replace TAL error codes with Java exceptions
-   - Create custom exception types where appropriate
-   - Use try-catch-finally blocks
-
-5. **Best Practices**:
-   - Use Java naming conventions (camelCase for methods/variables)
-   - Add comprehensive Javadoc comments
-   - Include logging (Log4j)
-   - Use modern Java features (streams, optionals, etc.)
-   - Add input validation
-   - Make thread-safe where appropriate
-   - Check for security vulnerabilities
-
-6. **Financial Data**:
-   - Use `BigDecimal` for all monetary amounts
-   - Use `LocalDateTime` for timestamps
-   - Maintain precision in calculations
-
-### Expected Output:
-
-For each TAL procedure, provide:
-
-1. **Java Class** with proper package and imports
-2. **Method signatures** with types and parameters
-3. **Full implementation** with comments
-4. **Unit test skeleton** (JUnit 5)
-
----
-
-## Translation Task
-
-Please translate the {context['functionality']} functionality from TAL to Java, following the guidelines above.
-
-Provide:
-
-1. Main service class with primary methods
-2. Supporting classes (DTOs, models, etc.)
-3. Interface definitions for external dependencies
-4. Brief explanation of design decisions
-5. Migration notes (things to watch out for)
-
-Start with the main class implementing the core functionality.
-
-Focus on creating production-quality, maintainable Java code that preserves the business logic
-while following modern Java best practices.
-"""
-        
-        return prompt
-    
-    @staticmethod
-    def save_prompt(prompt: str, output_file: str):
-        """Save prompt to a file"""
-        with open(output_file, 'w') as f:
-            f.write(prompt)
-        print(f"✓ Saved prompt to: {output_file}")
-
-
 class TALToJavaTranslator:
-    """Main orchestrator for TAL to Java translation"""
+    """Main orchestrator for TAL to Java translation with comprehensive prompts"""
     
     def __init__(self, tal_source_dir: str, use_api: bool = False, api_key: Optional[str] = None):
         self.source_dir = tal_source_dir
@@ -828,8 +584,9 @@ class TALToJavaTranslator:
         
         print(f"\nStep 2: Resolving external references...")
         resolution = resolve_external_references(self.kg)
-        print(f"  Resolved: {len(resolution['resolved'])}")
-        print(f"  Unresolved: {len(resolution['unresolved'])}")
+        print(f"  ✓ Resolved: {len(resolution['resolved'])}")
+        if resolution['unresolved']:
+            print(f"  ⚠  Unresolved: {len(resolution['unresolved'])}")
         
         print(f"\nStep 3: Initializing code extractor...")
         self.code_extractor = TALCodeExtractor(self.source_dir)
@@ -837,21 +594,33 @@ class TALToJavaTranslator:
         
         print(f"\nStep 4: Initializing context builder...")
         self.context_builder = TranslationContextBuilder(self.kg, self.code_extractor)
+        print(f"  ✓ Context builder ready")
         
+        stats = self.kg.get_statistics()
         print(f"\n✓ Initialization complete")
-        print(f"  Total entities: {self.kg.get_statistics()['total_entities']}")
-        print(f"  Total relationships: {self.kg.get_statistics()['total_relationships']}")
+        print(f"  Total entities: {stats['total_entities']}")
+        print(f"  Total relationships: {stats['total_relationships']}")
+        print(f"  Procedures: {stats['entity_counts'].get('PROCEDURE', 0)}")
+        print(f"  Structures: {stats['entity_counts'].get('STRUCTURE', 0)}")
+        print(f"  Variables: {stats['entity_counts'].get('VARIABLE', 0)}")
     
-    def translate_functionality(self, functionality: str,
+    def translate_functionality(self, 
+                               functionality: str,
                                output_dir: str = "./llm_context",
-                               depth: int = 2):
+                               depth: int = 2,
+                               strict_mode: bool = True,
+                               financial_code: bool = True,
+                               include_validation: bool = True):
         """
-        Translate a specific functionality from TAL to Java
+        Translate a specific functionality from TAL to Java using comprehensive prompts.
         
         Args:
             functionality: Search term for functionality (e.g., "drawdown")
-            output_dir: Directory to save compressed prompts
+            output_dir: Directory to save prompts
             depth: Dependency depth to include
+            strict_mode: Enable strict translation requirements
+            financial_code: Enable financial code specific requirements
+            include_validation: Include validation checklists
         """
         if not self.kg:
             self.initialize()
@@ -859,55 +628,108 @@ class TALToJavaTranslator:
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True, parents=True)
         
-        # Step 1: Build context
+        # Build context
         context = self.context_builder.build_context_for_functionality(
             functionality,
             depth=depth
         )
         
-        # Step 2: Save context as JSON
+        # Validate context
+        print(f"\n{'='*70}")
+        print("CONTEXT VALIDATION")
+        print(f"{'='*70}")
+        
+        primary_procs = context['primary_procedures']
+        print(f"\nPrimary Procedures ({len(primary_procs)}):")
+        for proc in primary_procs:
+            status = "✓" if proc.get('code') else "✗"
+            code_len = proc.get('code_length', 0)
+            print(f"  {status} {proc['name']}: {code_len:,} chars")
+            if not proc.get('code'):
+                print(f"      Location: {proc['file']}:{proc['line']}")
+        
+        dep_procs = context['dependency_procedures']
+        procs_with_code = [p for p in dep_procs if p.get('code')]
+        print(f"\nDependency Procedures ({len(dep_procs)} total, {len(procs_with_code)} with code)")
+        
+        # Save context JSON
         context_file = output_path / f"{functionality}_context.json"
-        with open(context_file, 'w') as f:
-            # Make entities serializable
-            serializable_context = {
-                **context,
-                'primary_procedures': context['primary_procedures'],
-                'dependency_procedures': context['dependency_procedures'],
+        with open(context_file, 'w', encoding='utf-8') as f:
+            # Create serializable version (without code to keep file size reasonable)
+            json_context = {
+                'functionality': context['functionality'],
+                'summary': context['summary'],
+                'primary_procedures': [
+                    {k: v for k, v in proc.items() if k != 'code'}
+                    for proc in context['primary_procedures']
+                ],
+                'dependency_procedures': [
+                    {k: v for k, v in proc.items() if k != 'code'}
+                    for proc in context['dependency_procedures']
+                ],
                 'structures': context['structures'],
                 'variables': context['variables'],
                 'call_graph': context['call_graph']
             }
-            json.dump(serializable_context, f, indent=2, default=str)
+            json.dump(json_context, f, indent=2, default=str)
         
-        print(f"\n✓\n Saved context to: {context_file}")
+        print(f"\n✓ Saved context metadata to: {context_file}")
         
-        # Step 3: Generate LLM prompt
-        prompt = LLMPromptGenerator.generate_translation_prompt(context)
+        # Generate comprehensive prompt using the imported generator
+        print(f"\nGenerating comprehensive translation prompt...")
+        prompt = ComprehensivePromptGenerator.generate_translation_prompt(
+            context,
+            strict_mode=strict_mode,
+            include_validation=include_validation,
+            financial_code=financial_code
+        )
         
-        prompt_file = output_path / f"{functionality}_coding_agent_prompt.md"
-        LLMPromptGenerator.save_prompt(prompt, str(prompt_file))
+        # Save prompt
+        prompt_file = output_path / f"{functionality}_comprehensive_translation_prompt.md"
+        ComprehensivePromptGenerator.save_prompt(prompt, str(prompt_file))
         
-        # Step 4: If using API, call LLM
+        # Call API if configured
+        java_file = None
         if self.use_api and self.api_key:
-            print(f"\nStep 5: Calling LLM API for translation...")
+            print(f"\nCalling LLM API for translation...")
             java_code = self._call_llm_api(prompt)
             
-            java_file = output_path / f"{functionality.capitalize()}Service.java"
-            with open(java_file, 'w') as f:
-                f.write(java_code)
-            
-            print(f"✓ Saved Java translation to: {java_file}")
+            if java_code:
+                java_file = output_path / f"{functionality.capitalize()}Service.java"
+                with open(java_file, 'w', encoding='utf-8') as f:
+                    f.write(java_code)
+                print(f"✓ Saved Java translation to: {java_file}")
+            else:
+                print(f"✗ Failed to get LLM response")
         else:
-            print(f"\nNext steps:")
-            print(f"  1. Review the prompt: {prompt_file}")
-            print(f"  2. Copy the prompt to your LLM (Claude, GPT-4, etc.)")
-            print(f"  3. Save the generated Java code")
-            print(f"\n  Or run with --use-api to translate automatically")
+            print(f"\n{'='*70}")
+            print("NEXT STEPS FOR TRANSLATION")
+            print(f"{'='*70}")
+            print(f"\nThe comprehensive prompt ensures:")
+            print(f"  ✓ Complete logic translation (no placeholders)")
+            print(f"  ✓ 4-phase methodology (Analyze → Map → Implement → Verify)")
+            print(f"  ✓ Financial code precision (BigDecimal for amounts)")
+            print(f"  ✓ Line-by-line traceability")
+            print(f"  ✓ Verification checklist for each procedure")
+            print(f"\nTo translate:")
+            print(f"  1. Copy the comprehensive prompt from: {prompt_file}")
+            print(f"  2. Paste into Claude/GPT-4")
+            print(f"  3. Review the generated Java code carefully")
+            print(f"  4. Verify completeness using the built-in checklists")
+            print(f"\nOr run with --use-api to translate automatically")
         
         return {
             'context_file': str(context_file),
             'prompt_file': str(prompt_file),
-            'output_dir': str(output_path)
+            'java_file': str(java_file) if java_file else None,
+            'output_dir': str(output_path),
+            'validation': {
+                'primary_procedures': len(primary_procs),
+                'procedures_with_code': len([p for p in primary_procs if p.get('code')]),
+                'total_code_chars': sum(p.get('code_length', 0) for p in primary_procs),
+                'dependency_procedures': len(dep_procs),
+                'structures': len(context['structures'])
+            }
         }
     
     def _call_llm_api(self, prompt: str) -> str:
@@ -942,33 +764,47 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='TAL to Java Translation Assistant with LLM + RAG',
+        description='TAL to Java Translation Assistant with Comprehensive Prompts',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Build translation context for drawdown functionality
-    python tal_to_java_translator.py ./tal_source drawdown
-    
-    # Include deeper dependency chain
+    # Basic translation with comprehensive prompt
     python tal_to_java_translator.py ./tal_source drawdown --depth 3
     
-    # Use Claude API directly for translation
-    python tal_to_java_translator.py ./tal_source drawdown --use-api --api-key sk-ant-...
+    # With API call
+    python tal_to_java_translator.py ./tal_source payment --use-api --api-key sk-...
     
     # Custom output directory
-    python tal_to_java_translator.py ./tal_source payment --output ./prompts
+    python tal_to_java_translator.py ./tal_source wire_transfer --output ./output --depth 4
+    
+    # Non-financial code (skip BigDecimal requirements)
+    python tal_to_java_translator.py ./tal_source utility --no-financial
+
+The comprehensive prompt ensures:
+  ✓ Complete logic translation (no placeholders)
+  ✓ 4-phase methodology (Analyze → Map → Implement → Verify)
+  ✓ Financial code precision (BigDecimal)
+  ✓ Line-by-line traceability  
+  ✓ Verification checklist for each procedure
 """
     )
     
     parser.add_argument('tal_source_dir', help='Directory containing TAL source code')
     parser.add_argument('functionality', help='Functionality to translate (e.g., "drawdown", "payment")')
     parser.add_argument('--depth', type=int, default=2, 
-                       help='Dependency depth to include (default: 2)')
+                       help='Dependency depth (default: 2)')
     parser.add_argument('--output', default='./llm_context',
-                       help='Output directory for prompts (default: ./llm_context)')
+                       help='Output directory (default: ./llm_context)')
     parser.add_argument('--use-api', action='store_true',
-                       help='Use Claude API for direct translation')
-    parser.add_argument('--api-key', help='API key for Claude (or set ANTHROPIC_API_KEY env var)')
+                       help='Call LLM API directly')
+    parser.add_argument('--api-key', help='API key for LLM service')
+    parser.add_argument('--no-strict', dest='strict_mode', action='store_false',
+                       help='Disable strict translation requirements')
+    parser.add_argument('--no-financial', dest='financial_code', action='store_false',
+                       help='Disable financial code specific requirements')
+    parser.add_argument('--no-validation', dest='include_validation', action='store_false',
+                       help='Disable validation checklists')
+    parser.set_defaults(strict_mode=True, financial_code=True, include_validation=True)
     
     args = parser.parse_args()
     
@@ -983,14 +819,26 @@ Examples:
     result = translator.translate_functionality(
         functionality=args.functionality,
         output_dir=args.output,
-        depth=args.depth
+        depth=args.depth,
+        strict_mode=args.strict_mode,
+        financial_code=args.financial_code,
+        include_validation=args.include_validation
     )
     
+    # Summary
     print(f"\n{'='*70}")
-    print("TRANSLATION CONTEXT READY")
+    print("TRANSLATION PREPARATION COMPLETE")
     print(f"{'='*70}")
     print(f"Context: {result['context_file']}")
     print(f"Prompt: {result['prompt_file']}")
+    if result['java_file']:
+        print(f"Java: {result['java_file']}")
+    print(f"\nValidation:")
+    print(f"  Primary procedures: {result['validation']['primary_procedures']}")
+    print(f"  With source code: {result['validation']['procedures_with_code']}")
+    print(f"  Total code: {result['validation']['total_code_chars']:,} characters")
+    print(f"  Dependencies: {result['validation']['dependency_procedures']}")
+    print(f"  Structures: {result['validation']['structures']}")
     print(f"{'='*70}\n")
 
 
