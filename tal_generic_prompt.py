@@ -144,8 +144,8 @@ INT status                       | int status
 STRING .name                     | String name
 FIXED(2) amount                  | BigDecimal amount
 ARRAY[0:9] OF INT                | int[] (size 10)
-IF x = 1 THEN                    | if (x == 1) {
-FOR i := 0 TO 9 DO               | for (int i = 0; i <= 9; i++) {
+IF x = 1 THEN                    | if (x == 1) {{
+FOR i := 0 TO 9 DO               | for (int i = 0; i <= 9; i++) {{
 CALL VALIDATE(param)             | validate(param)
 status := -1                     | status = -1
 ```
@@ -161,7 +161,7 @@ Write Java code with:
     * Maps to TAL file: [filename]
     */
    @Service  // or appropriate annotation
-   public class [ServiceName] {
+   public class [ServiceName] {{
    ```
 
 2. **Method Implementation**:
@@ -175,13 +175,13 @@ Write Java code with:
     * TAL equivalent: [PROCEDURE_NAME]
     * TAL location: [file:line]
     */
-   public ReturnType methodName(ParamType param1) {
+   public ReturnType methodName(ParamType param1) {{
        // TAL line X-Y: [What this section does]
        [Java code implementing those TAL lines]
        
        // TAL line Z: [Specific logic]
        [Java code for that line]
-   }
+   }}
    ```
 
 3. **Inline Documentation**:
@@ -267,10 +267,10 @@ This code handles financial transactions. **EVERY DETAIL IS CRITICAL**.
    
    ```java
    // ✅ CORRECT: Exact threshold, BigDecimal comparison
-   if (amount.compareTo(new BigDecimal("10000.00")) > 0) {
+   if (amount.compareTo(new BigDecimal("10000.00")) > 0) {{
    
    // ❌ WRONG: Approximate or simplified
-   if (amount > 10000) {  // Wrong: loses precision, uses double
+   if (amount > 10000) {{  // Wrong: loses precision, uses double
    ```
 
 4. **Validation Order** (PRESERVE EXACTLY):
@@ -303,7 +303,7 @@ This code handles financial transactions. **EVERY DETAIL IS CRITICAL**.
    - Preserve: timestamps, user IDs, amounts, status changes
    
    ```java
-   log.info("Wire transfer processed: id={}, amount={}, status={}, user={}", 
+   log.info("Wire transfer processed: id={{}}, amount={{}}, status={{}}, user={{}}", 
             wireId, amount, status, userId);
    ```
 
@@ -321,9 +321,9 @@ This code handles financial transactions. **EVERY DETAIL IS CRITICAL**.
    
    ```java
    // ✅ CORRECT: Exact translation
-   if (sanctionsList.contains(country)) {
+   if (sanctionsList.contains(country)) {{
        blockTransaction();
-   }
+   }}
    
    // ❌ WRONG: Simplified or skipped
    // TODO: Add sanctions check  // FORBIDDEN
@@ -341,11 +341,11 @@ This code handles financial transactions. **EVERY DETAIL IS CRITICAL**.
    ```java
    // Java equivalent
    @Transactional
-   public void processTransfer() {
+   public void processTransfer() {{
        updateAccount();
        updateLedger();
        // Commit handled by @Transactional
-   }
+   }}
    ```
 
 9. **Regulatory Requirements**:
@@ -371,63 +371,63 @@ STRING                  →  String
 STRING .ptr             →  String (pointer ignored in Java)
 FIXED(n)                →  BigDecimal (n = decimal places)
 REAL                    →  double (but use BigDecimal for money!)
-UNSIGNED               →  int (Java doesn't have unsigned, handle carefully)
+UNSIGNED                →  int (Java doesn't have unsigned, handle carefully)
 ```
 
 #### Arrays:
 ```tal
-ARRAY[0:9] OF INT      →  int[] array = new int[10];
-ARRAY[1:100] OF STRING →  String[] array = new String[100];
-                          // Note: TAL arrays can start at any index
-                          // Java always starts at 0
+ARRAY[0:9] OF INT       →  int[] array = new int[10];
+ARRAY[1:100] OF STRING  →  String[] array = new String[100];
+                           // Note: TAL arrays can start at any index
+                           // Java always starts at 0
 ```
 
 #### Structures:
 ```tal
-STRUCT payment_record;  →  public class PaymentRecord {
+STRUCT payment_record;  →  public class PaymentRecord {{
 BEGIN                   →      // Fields
   INT transaction_id;   →      private int transactionId;
   STRING .payee;        →      private String payee;
   FIXED(2) amount;      →      private BigDecimal amount;
-END;                    →  }
+END;                    →  }}
 ```
 
 #### Procedures:
 ```tal
-PROC validate(amount);  →  public int validate(BigDecimal amount) {
+PROC validate(amount);  →  public int validate(BigDecimal amount) {{
   BEGIN                 →      // method body
     ...                 →      ...
-  END;                  →  }
+  END;                  →  }}
 ```
 
 #### Control Flow:
 ```tal
-IF condition THEN       →  if (condition) {
+IF condition THEN       →  if (condition) {{
   statement;            →      statement;
-                        →  }
+                        →  }}
 
-IF x THEN               →  if (x) {
+IF x THEN               →  if (x) {{
   statement1            →      statement1;
-ELSE                    →  } else {
+ELSE                    →  }} else {{
   statement2;           →      statement2;
-                        →  }
+                        →  }}
 
-FOR i := 0 TO 9 DO      →  for (int i = 0; i <= 9; i++) {
+FOR i := 0 TO 9 DO      →  for (int i = 0; i <= 9; i++) {{
   statement;            →      statement;
-                        →  }
+                        →  }}
 
-WHILE condition DO      →  while (condition) {
+WHILE condition DO      →  while (condition) {{
   statement;            →      statement;
-                        →  }
+                        →  }}
 
-CASE status OF          →  switch (status) {
+CASE status OF          →  switch (status) {{
   BEGIN                 →      case -1:
     -1: action1;        →          action1; break;
     -2: action2;        →      case -2:
     OTHERWISE: default; →          action2; break;
   END;                  →      default:
                         →          default; break;
-                        →  }
+                        →  }}
 ```
 
 #### Operators:
@@ -456,16 +456,28 @@ result := procedure();  →  result = procedure();
 ```tal
 @variable               →  // Address-of operator (usually not needed in Java)
 variable ':=' "text"    →  variable = "text";
+$len(str)               →  str.length()
 ```
 
-#### Special Patterns:
+#### Special TAL Constructs:
 ```tal
-BEGIN                   →  {
-END                     →  }
-PROC name;              →  public void name() {
+BEGIN                   →  {{
+END                     →  }}
+PROC name;              →  public void name() {{
   FORWARD;              →      // Forward declaration - create interface
-END;                    →  }
+END;                    →  }}
+send(), receive()       →  // OS (Guardian) functions - modernize
 ```
+
+#### Domain-Specific Context:
+- **db** or **dbtr** refers to **debtor**
+- **cr** or **crdtr** refers to **creditors**
+- **acct** refers to **account**
+- **trn** is **payment transaction**
+- **^** represents delimiter or word separators in TAL
+- **FAIN** is the older payment message type
+- **GSMOS** refers to OFAC/sanctions
+- **Host messages and MQs** are no longer relevant
 
 ---
 
@@ -474,7 +486,7 @@ END;                    →  }
         # Add the actual translation section
         prompt += f"""## 📝 PROCEDURES TO TRANSLATE
 
-You are translating {len(context['primary_procedures'])} procedures completely.
+You are translating {len(context['primary_procedures'])} primary procedures completely.
 
 ### Translation Requirements:
 1. Start with **logic analysis** for each procedure
@@ -782,7 +794,7 @@ import java.math.BigDecimal;
  * 
  * @author Generated from TAL
  */
-public class [ClassName] {
+public class [ClassName] {{
     
     /**
      * [Method description matching TAL procedure purpose]
@@ -791,7 +803,7 @@ public class [ClassName] {
      * @return [description from TAL]
      * @throws [Exception] if [condition from TAL error handling]
      */
-    public [ReturnType] [methodName]([parameters]) {
+    public [ReturnType] [methodName]([parameters]) {{
         // TAL lines X-Y: [What this section does]
         [Complete implementation]
         
@@ -799,8 +811,8 @@ public class [ClassName] {
         [Implementation]
         
         // Continue for EVERY line of TAL code
-    }
-}
+    }}
+}}
 ```
 
 STEP 3: VERIFICATION
@@ -821,20 +833,20 @@ STEP 4: UNIT TEST SKELETON
 ────────────────────────────────────────────────────────────────
 ```java
 @Test
-public void test_[scenarioDescription]() {
+public void test_[scenarioDescription]() {{
     // Given: [Test setup based on TAL input parameters]
     
     // When: [Call the method]
     
     // Then: [Verify based on TAL expected outputs]
-}
+}}
 
 @Test
-public void test_[errorScenario]() {
+public void test_[errorScenario]() {{
     // Given: [Setup for error condition from TAL]
     
     // When/Then: [Verify error handling]
-}
+}}
 ```
 ```
 
@@ -846,9 +858,9 @@ For each data structure:
  * [Structure description]
  * TAL equivalent: [STRUCT_NAME]
  */
-public class [ClassName] {
+public class [ClassName] {{
     [Complete implementation with all fields]
-}
+}}
 ```
 
 ### Part 4: Summary and Migration Notes
@@ -948,65 +960,3 @@ Remember:
         print(f"✓ Comprehensive translation prompt saved to: {output_file}")
         print(f"  Prompt size: {len(prompt):,} characters")
         print(f"  Estimated tokens: ~{len(prompt) // 4:,}")
-
-
-def example_usage():
-    """Show how to use the comprehensive prompt generator."""
-    
-    # Mock context for demonstration
-    context = {
-        'functionality': 'wire_transfer_processing',
-        'summary': {
-            'primary_procedures': 3,
-            'total_procedures': 8,
-            'total_structures': 2,
-            'code_extraction': {
-                'total_chars': 15000
-            }
-        },
-        'primary_procedures': [
-            {
-                'name': 'PROCESS_WIRE_TRANSFER',
-                'file': 'wire.tal',
-                'line': 100,
-                'parameters': ['wire_id', 'amount', 'dest_account'],
-                'return_type': 'INT',
-                'code': 'PROC PROCESS_WIRE_TRANSFER(wire_id, amount, dest_account);\n  BEGIN\n    ...\n  END;',
-                'code_length': 500,
-                'dependencies': {
-                    'calls': ['VALIDATE_WIRE', 'CHECK_LIMITS'],
-                    'called_by': ['MAIN_HANDLER'],
-                    'uses_structures': ['WIRE_RECORD'],
-                    'uses_variables': ['transaction_log']
-                }
-            }
-        ],
-        'dependency_procedures': [],
-        'structures': [],
-        'call_graph': {}
-    }
-    
-    # Generate comprehensive prompt
-    generator = ComprehensivePromptGenerator()
-    prompt = generator.generate_translation_prompt(
-        context,
-        strict_mode=True,
-        include_validation=True,
-        financial_code=True
-    )
-    
-    # Save it
-    generator.save_prompt(prompt, "./output/comprehensive_translation_prompt.md")
-    
-    print("\n✓ Comprehensive prompt generated!")
-    print("\nThis prompt ensures:")
-    print("  1. Complete logic analysis before coding")
-    print("  2. Line-by-line TAL to Java mapping")
-    print("  3. Full implementation (no placeholders)")
-    print("  4. Verification checklist for each procedure")
-    print("  5. Financial code precision requirements")
-    print("  6. Unit test skeletons")
-
-
-if __name__ == "__main__":
-    example_usage()
