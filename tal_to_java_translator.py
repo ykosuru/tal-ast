@@ -42,6 +42,9 @@ from parsers import (
 # Import the comprehensive prompt generator
 from comprehensive_prompt_generator import ComprehensivePromptGenerator
 
+# Import the multi-agent prompt generator
+from multi_agent_prompt_generator import generate_multi_agent_prompts
+
 
 class TALCodeExtractor:
     """Extract actual TAL source code from files using tal_proc_parser for accuracy."""
@@ -610,7 +613,8 @@ class TALToJavaTranslator:
                                depth: int = 2,
                                strict_mode: bool = True,
                                financial_code: bool = True,
-                               include_validation: bool = True):
+                               include_validation: bool = True,
+                               multi_agent: bool = False):
         """
         Translate a specific functionality from TAL to Java using comprehensive prompts.
         
@@ -621,6 +625,7 @@ class TALToJavaTranslator:
             strict_mode: Enable strict translation requirements
             financial_code: Enable financial code specific requirements
             include_validation: Include validation checklists
+            multi_agent: Use multi-agent workflow (planning + workers + consolidation)
         """
         if not self.kg:
             self.initialize()
@@ -675,62 +680,110 @@ class TALToJavaTranslator:
         
         print(f"\n✓ Saved context metadata to: {context_file}")
         
-        # Generate comprehensive prompt using the imported generator
-        print(f"\nGenerating comprehensive translation prompt...")
-        prompt = ComprehensivePromptGenerator.generate_translation_prompt(
-            context,
-            strict_mode=strict_mode,
-            include_validation=include_validation,
-            financial_code=financial_code
-        )
-        
-        # Save prompt
-        prompt_file = output_path / f"{functionality}_comprehensive_translation_prompt.md"
-        ComprehensivePromptGenerator.save_prompt(prompt, str(prompt_file))
-        
-        # Call API if configured
-        java_file = None
-        if self.use_api and self.api_key:
-            print(f"\nCalling LLM API for translation...")
-            java_code = self._call_llm_api(prompt)
-            
-            if java_code:
-                java_file = output_path / f"{functionality.capitalize()}Service.java"
-                with open(java_file, 'w', encoding='utf-8') as f:
-                    f.write(java_code)
-                print(f"✓ Saved Java translation to: {java_file}")
-            else:
-                print(f"✗ Failed to get LLM response")
-        else:
+        # Choose prompt generation strategy
+        if multi_agent:
             print(f"\n{'='*70}")
-            print("NEXT STEPS FOR TRANSLATION")
+            print("MULTI-AGENT MODE")
             print(f"{'='*70}")
-            print(f"\nThe comprehensive prompt ensures:")
-            print(f"  ✓ Complete logic translation (no placeholders)")
-            print(f"  ✓ 4-phase methodology (Analyze → Map → Implement → Verify)")
-            print(f"  ✓ Financial code precision (BigDecimal for amounts)")
-            print(f"  ✓ Line-by-line traceability")
-            print(f"  ✓ Verification checklist for each procedure")
-            print(f"\nTo translate:")
-            print(f"  1. Copy the comprehensive prompt from: {prompt_file}")
-            print(f"  2. Paste into Claude/GPT-4")
-            print(f"  3. Review the generated Java code carefully")
-            print(f"  4. Verify completeness using the built-in checklists")
-            print(f"\nOr run with --use-api to translate automatically")
-        
-        return {
-            'context_file': str(context_file),
-            'prompt_file': str(prompt_file),
-            'java_file': str(java_file) if java_file else None,
-            'output_dir': str(output_path),
-            'validation': {
-                'primary_procedures': len(primary_procs),
-                'procedures_with_code': len([p for p in primary_procs if p.get('code')]),
-                'total_code_chars': sum(p.get('code_length', 0) for p in primary_procs),
-                'dependency_procedures': len(dep_procs),
-                'structures': len(context['structures'])
+            print(f"\nGenerating multi-agent prompts...")
+            print(f"  - 1 System prompt (reused by all agents)")
+            print(f"  - 1 Planning agent prompt")
+            print(f"  - {len(primary_procs)} Worker agent prompts (one per procedure)")
+            print(f"  - 1 Consolidation agent prompt")
+            
+            # Generate multi-agent prompts
+            multi_agent_result = generate_multi_agent_prompts(
+                context=context,
+                output_dir=str(output_path),
+                financial_code=financial_code
+            )
+            
+            result = {
+                'context_file': str(context_file),
+                'mode': 'multi-agent',
+                'output_dir': str(output_path),
+                'multi_agent_files': multi_agent_result['files'],
+                'statistics': multi_agent_result['statistics'],
+                'validation': {
+                    'primary_procedures': len(primary_procs),
+                    'procedures_with_code': len([p for p in primary_procs if p.get('code')]),
+                    'total_code_chars': sum(p.get('code_length', 0) for p in primary_procs),
+                    'dependency_procedures': len(dep_procs),
+                    'structures': len(context['structures'])
+                }
             }
-        }
+            
+            print(f"\n{'='*70}")
+            print("MULTI-AGENT WORKFLOW")
+            print(f"{'='*70}")
+            print(f"\nExecution Steps:")
+            print(f"  1. Use system prompt as base for all agents")
+            print(f"  2. Run planning agent → Get translation strategy")
+            print(f"  3. Run {len(primary_procs)} worker agents (can parallelize)")
+            print(f"  4. Run consolidation agent → Get final code")
+            print(f"\nSee: {functionality}_EXECUTION_MANIFEST.md for details")
+            
+        else:
+            # Generate comprehensive single prompt (original approach)
+            print(f"\nGenerating comprehensive translation prompt...")
+            prompt = ComprehensivePromptGenerator.generate_translation_prompt(
+                context,
+                strict_mode=strict_mode,
+                include_validation=include_validation,
+                financial_code=financial_code
+            )
+            
+            # Save prompt
+            prompt_file = output_path / f"{functionality}_comprehensive_translation_prompt.md"
+            ComprehensivePromptGenerator.save_prompt(prompt, str(prompt_file))
+            
+            result = {
+                'context_file': str(context_file),
+                'prompt_file': str(prompt_file),
+                'mode': 'single-prompt',
+                'java_file': None,
+                'output_dir': str(output_path),
+                'validation': {
+                    'primary_procedures': len(primary_procs),
+                    'procedures_with_code': len([p for p in primary_procs if p.get('code')]),
+                    'total_code_chars': sum(p.get('code_length', 0) for p in primary_procs),
+                    'dependency_procedures': len(dep_procs),
+                    'structures': len(context['structures'])
+                }
+            }
+            
+            # Call API if configured
+            java_file = None
+            if self.use_api and self.api_key:
+                print(f"\nCalling LLM API for translation...")
+                java_code = self._call_llm_api(prompt)
+                
+                if java_code:
+                    java_file = output_path / f"{functionality.capitalize()}Service.java"
+                    with open(java_file, 'w', encoding='utf-8') as f:
+                        f.write(java_code)
+                    print(f"✓ Saved Java translation to: {java_file}")
+                    result['java_file'] = str(java_file)
+                else:
+                    print(f"✗ Failed to get LLM response")
+            else:
+                print(f"\n{'='*70}")
+                print("NEXT STEPS FOR TRANSLATION")
+                print(f"{'='*70}")
+                print(f"\nThe comprehensive prompt ensures:")
+                print(f"  ✓ Complete logic translation (no placeholders)")
+                print(f"  ✓ 4-phase methodology (Analyze → Map → Implement → Verify)")
+                print(f"  ✓ Financial code precision (BigDecimal for amounts)")
+                print(f"  ✓ Line-by-line traceability")
+                print(f"  ✓ Verification checklist for each procedure")
+                print(f"\nTo translate:")
+                print(f"  1. Copy the comprehensive prompt from: {prompt_file}")
+                print(f"  2. Paste into Claude/GPT-4")
+                print(f"  3. Review the generated Java code carefully")
+                print(f"  4. Verify completeness using the built-in checklists")
+                print(f"\nOr run with --use-api to translate automatically")
+        
+        return result
     
     def _call_llm_api(self, prompt: str) -> str:
         """Call LLM API (Claude) for translation"""
@@ -768,8 +821,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic translation with comprehensive prompt
+    # Single comprehensive prompt (default)
     python tal_to_java_translator.py ./tal_source drawdown --depth 3
+    
+    # Multi-agent workflow (recommended for large codebases)
+    python tal_to_java_translator.py ./tal_source drawdown --multi-agent --depth 3
     
     # With API call
     python tal_to_java_translator.py ./tal_source payment --use-api --api-key sk-...
@@ -779,6 +835,10 @@ Examples:
     
     # Non-financial code (skip BigDecimal requirements)
     python tal_to_java_translator.py ./tal_source utility --no-financial
+
+Translation Modes:
+  Single-prompt: One comprehensive prompt with all procedures (good for <10 procedures)
+  Multi-agent:   Separate prompts for planning, each procedure, consolidation (scales to 100+ procedures)
 
 The comprehensive prompt ensures:
   ✓ Complete logic translation (no placeholders)
@@ -795,8 +855,10 @@ The comprehensive prompt ensures:
                        help='Dependency depth (default: 2)')
     parser.add_argument('--output', default='./llm_context',
                        help='Output directory (default: ./llm_context)')
+    parser.add_argument('--multi-agent', action='store_true',
+                       help='Use multi-agent workflow (planning + workers + consolidation)')
     parser.add_argument('--use-api', action='store_true',
-                       help='Call LLM API directly')
+                       help='Call LLM API directly (only works with single-prompt mode)')
     parser.add_argument('--api-key', help='API key for LLM service')
     parser.add_argument('--no-strict', dest='strict_mode', action='store_false',
                        help='Disable strict translation requirements')
@@ -807,6 +869,12 @@ The comprehensive prompt ensures:
     parser.set_defaults(strict_mode=True, financial_code=True, include_validation=True)
     
     args = parser.parse_args()
+    
+    # Validate arguments
+    if args.use_api and args.multi_agent:
+        print("Error: --use-api cannot be used with --multi-agent")
+        print("Multi-agent mode requires manual execution of each agent")
+        sys.exit(1)
     
     # Create translator
     translator = TALToJavaTranslator(
@@ -822,17 +890,36 @@ The comprehensive prompt ensures:
         depth=args.depth,
         strict_mode=args.strict_mode,
         financial_code=args.financial_code,
-        include_validation=args.include_validation
+        include_validation=args.include_validation,
+        multi_agent=args.multi_agent
     )
     
     # Summary
     print(f"\n{'='*70}")
     print("TRANSLATION PREPARATION COMPLETE")
     print(f"{'='*70}")
+    print(f"Mode: {result['mode']}")
     print(f"Context: {result['context_file']}")
-    print(f"Prompt: {result['prompt_file']}")
-    if result['java_file']:
-        print(f"Java: {result['java_file']}")
+    
+    if result['mode'] == 'multi-agent':
+        print(f"\nMulti-Agent Files:")
+        files = result['multi_agent_files']
+        print(f"  System: {files['system_prompt']}")
+        print(f"  Planning: {files['planning_prompt']}")
+        print(f"  Workers: {len(files['worker_prompts'])} files")
+        print(f"  Consolidation: {files['consolidation_prompt']}")
+        print(f"  Manifest: {files['manifest']}")
+        print(f"\nStatistics:")
+        stats = result['statistics']
+        print(f"  Total size: {stats['total_chars']:,} chars (~{stats['estimated_tokens']:,} tokens)")
+        print(f"  Avg worker: {stats['avg_worker_chars']:,} chars")
+        print(f"\nExecution:")
+        print(f"  See {args.functionality}_EXECUTION_MANIFEST.md for step-by-step instructions")
+    else:
+        print(f"Prompt: {result['prompt_file']}")
+        if result['java_file']:
+            print(f"Java: {result['java_file']}")
+    
     print(f"\nValidation:")
     print(f"  Primary procedures: {result['validation']['primary_procedures']}")
     print(f"  With source code: {result['validation']['procedures_with_code']}")
