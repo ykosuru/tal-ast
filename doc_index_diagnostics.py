@@ -48,23 +48,43 @@ def analyze_keyword_coverage(
             keywords_data = yaml.safe_load(f)
     
     # Parse keywords structure
-    # Supports both flat list and categorized structure
+    # Supports multiple formats:
+    # 1. Flat list: ['wire', 'ach']
+    # 2. Simple dict: {'payment': ['wire', 'ach']}
+    # 3. Nested with priority: {'payment': {'priority': 'high', 'keywords': ['wire', 'ach']}}
+    
+    all_keywords = []
+    keyword_categories = {}
+    keyword_priorities = {}
+    
     if isinstance(keywords_data, dict):
-        # Categorized: {'payment': ['wire', 'ach'], 'compliance': ['ofac', 'aml']}
-        all_keywords = []
-        keyword_categories = {}
-        for category, terms in keywords_data.items():
-            if isinstance(terms, list):
-                all_keywords.extend(terms)
-                for term in terms:
+        for category, content in keywords_data.items():
+            if isinstance(content, dict):
+                # Nested structure with priority
+                priority = content.get('priority', 'medium')
+                terms = content.get('keywords', [])
+                
+                if terms:
+                    all_keywords.extend(terms)
+                    for term in terms:
+                        keyword_categories[term] = category
+                        keyword_priorities[term] = priority
+            elif isinstance(content, list):
+                # Simple list: {'payment': ['wire', 'ach']}
+                all_keywords.extend(content)
+                for term in content:
                     keyword_categories[term] = category
+                    keyword_priorities[term] = 'medium'
             else:
+                # Single term
                 all_keywords.append(category)
                 keyword_categories[category] = 'uncategorized'
+                keyword_priorities[category] = 'medium'
     else:
         # Flat list: ['wire', 'ach', 'ofac', 'aml']
         all_keywords = keywords_data
         keyword_categories = {kw: 'uncategorized' for kw in all_keywords}
+        keyword_priorities = {kw: 'medium' for kw in all_keywords}
     
     print(f"  Total keywords: {len(all_keywords)}")
     if keyword_categories:
@@ -107,6 +127,7 @@ def analyze_keyword_coverage(
         keyword_stats[keyword] = {
             'keyword': keyword,
             'category': keyword_categories.get(keyword, 'uncategorized'),
+            'priority': keyword_priorities.get(keyword, 'medium'),
             'doc_count': len(matching_files),
             'chunk_count': len(matching_chunks),
             'documents': sorted(list(matching_files)),
@@ -121,18 +142,29 @@ def analyze_keyword_coverage(
     )
     
     # Display results
-    print("="*70)
-    print(f"{'KEYWORD':<30} {'DOCS':<8} {'CHUNKS':<10} {'CATEGORY':<20}")
-    print("="*70)
+    print("="*90)
+    print(f"{'KEYWORD':<40} {'DOCS':<8} {'CHUNKS':<10} {'PRIORITY':<12} {'CATEGORY':<20}")
+    print("="*90)
     
     found_count = 0
     missing_count = 0
+    critical_missing = []
+    high_missing = []
     
     for keyword, stats in sorted_keywords:
         if stats['doc_count'] >= min_docs:
             found_count += 1
+            priority = stats['priority']
             category = stats['category'][:18]
-            print(f"{keyword:<30} {stats['doc_count']:<8} {stats['chunk_count']:<10} {category:<20}")
+            
+            # Color-code by priority (for terminals that support it)
+            priority_marker = {
+                'critical': '🔴',
+                'high': '🟡',
+                'medium': '🟢'
+            }.get(priority, '⚪')
+            
+            print(f"{keyword:<40} {stats['doc_count']:<8} {stats['chunk_count']:<10} {priority_marker} {priority:<10} {category:<20}")
             
             if show_docs and stats['documents']:
                 for doc in stats['documents'][:5]:  # Show first 5 docs
@@ -142,17 +174,40 @@ def analyze_keyword_coverage(
                 print()
         else:
             missing_count += 1
+            if stats['priority'] == 'critical':
+                critical_missing.append((keyword, stats))
+            elif stats['priority'] == 'high':
+                high_missing.append((keyword, stats))
     
-    # Show keywords with no matches
+    # Show keywords with no matches (prioritize by priority level)
     if missing_count > 0:
-        print("\n" + "="*70)
+        print("\n" + "="*90)
         print(f"⚠ KEYWORDS NOT FOUND IN ANY DOCUMENTS ({missing_count} keywords)")
-        print("="*70)
+        print("="*90)
         
-        for keyword, stats in sorted_keywords:
-            if stats['doc_count'] == 0:
+        if critical_missing:
+            print("\n🔴 CRITICAL PRIORITY (URGENT!):")
+            for keyword, stats in critical_missing:
                 category = stats['category']
-                print(f"  ❌ {keyword:<30} (category: {category})")
+                print(f"  ❌ {keyword:<40} (category: {category})")
+        
+        if high_missing:
+            print("\n🟡 HIGH PRIORITY:")
+            for keyword, stats in high_missing:
+                category = stats['category']
+                print(f"  ❌ {keyword:<40} (category: {category})")
+        
+        other_missing = [
+            (kw, st) for kw, st in sorted_keywords 
+            if st['doc_count'] == 0 and st['priority'] not in ['critical', 'high']
+        ]
+        if other_missing:
+            print("\n⚪ OTHER:")
+            for keyword, stats in other_missing[:10]:  # Show first 10
+                category = stats['category']
+                print(f"  ❌ {keyword:<40} (category: {category})")
+            if len(other_missing) > 10:
+                print(f"  ... and {len(other_missing) - 10} more")
     
     # Summary statistics
     print("\n" + "="*70)
@@ -168,29 +223,62 @@ def analyze_keyword_coverage(
         print(f"\nAverage docs per keyword: {avg_docs:.1f}")
         print(f"Average chunks per keyword: {avg_chunks:.1f}")
     
-    # Category breakdown
+    # Category breakdown with priority info
     if len(set(keyword_categories.values())) > 1:
-        print("\n" + "="*70)
+        print("\n" + "="*90)
         print("COVERAGE BY CATEGORY")
-        print("="*70)
+        print("="*90)
         
-        category_stats = defaultdict(lambda: {'total': 0, 'found': 0, 'missing': 0})
+        category_stats = defaultdict(lambda: {
+            'total': 0, 'found': 0, 'missing': 0,
+            'critical': 0, 'high': 0, 'medium': 0,
+            'priority': None
+        })
         
         for keyword, stats in keyword_stats.items():
             category = stats['category']
+            priority = stats['priority']
+            
             category_stats[category]['total'] += 1
+            category_stats[category][priority] += 1
+            
+            # Set category priority (highest priority wins)
+            if not category_stats[category]['priority']:
+                category_stats[category]['priority'] = priority
+            elif priority == 'critical':
+                category_stats[category]['priority'] = 'critical'
+            elif priority == 'high' and category_stats[category]['priority'] != 'critical':
+                category_stats[category]['priority'] = 'high'
+            
             if stats['doc_count'] > 0:
                 category_stats[category]['found'] += 1
             else:
                 category_stats[category]['missing'] += 1
         
-        for category in sorted(category_stats.keys()):
-            stats = category_stats[category]
+        # Sort by priority (critical first)
+        priority_order = {'critical': 0, 'high': 1, 'medium': 2}
+        sorted_categories = sorted(
+            category_stats.items(),
+            key=lambda x: (priority_order.get(x[1]['priority'], 3), x[0])
+        )
+        
+        for category, stats in sorted_categories:
             coverage_pct = stats['found'] / stats['total'] * 100
-            print(f"\n{category}:")
+            priority = stats['priority'] or 'medium'
+            
+            priority_marker = {
+                'critical': '🔴',
+                'high': '🟡',
+                'medium': '🟢'
+            }.get(priority, '⚪')
+            
+            print(f"\n{priority_marker} {category} (Priority: {priority}):")
             print(f"  Total keywords: {stats['total']}")
             print(f"  Found: {stats['found']} ({coverage_pct:.1f}%)")
             print(f"  Missing: {stats['missing']}")
+            
+            if stats['missing'] > 0 and priority in ['critical', 'high']:
+                print(f"  ⚠ WARNING: {stats['missing']} {priority} priority keywords missing!")
     
     # Top documents by keyword coverage
     print("\n" + "="*70)
@@ -224,59 +312,63 @@ def analyze_keyword_coverage(
     return keyword_stats
 
 
-def create_sample_keywords_yaml(filename: str = "keywords.yaml"):
+def create_sample_keywords_yaml(filename: str = "keywords_sample.yaml"):
     """
     Create a sample keywords.yaml file with payment/banking terms
+    Uses nested structure with priority levels
     """
     sample_keywords = {
-        'payment_types': [
-            'wire', 'ach', 'swift', 'fedwire', 'sepa', 'rtp', 'eft',
-            'check', 'card', 'credit', 'debit', 'cash'
-        ],
-        'payment_actions': [
-            'transfer', 'payment', 'transaction', 'remittance', 'settlement',
-            'disbursement', 'drawdown', 'advance', 'withdrawal', 'deposit'
-        ],
-        'validation_terms': [
-            'validate', 'validation', 'verify', 'verification', 'check',
-            'screening', 'review', 'approval', 'authorization', 'confirm'
-        ],
-        'compliance_terms': [
-            'ofac', 'aml', 'kyc', 'sanctions', 'compliance', 'regulation',
-            'audit', 'regulatory', 'cip', 'bsa', 'fatca', 'crs'
-        ],
-        'requirements_language': [
-            'shall', 'must', 'should', 'will', 'may', 'required',
-            'mandatory', 'optional', 'specification', 'requirement',
-            'criteria', 'constraint', 'functional', 'non-functional'
-        ],
-        'account_terms': [
-            'account', 'beneficiary', 'originator', 'customer', 'party',
-            'sender', 'receiver', 'payee', 'payer', 'holder'
-        ],
-        'status_terms': [
-            'pending', 'approved', 'rejected', 'failed', 'complete',
-            'cancelled', 'suspended', 'processing', 'queued', 'hold'
-        ],
-        'system_components': [
-            'database', 'api', 'service', 'interface', 'gateway',
-            'processor', 'engine', 'module', 'queue', 'batch'
-        ],
-        'tal_cobol_terms': [
-            'tal', 'cobol', 'cbl', 'procedure', 'program', 'subroutine',
-            'call', 'invoke', 'execute', 'tandem', 'guardian'
-        ],
-        'amount_terms': [
-            'amount', 'balance', 'limit', 'threshold', 'fee', 'charge',
-            'rate', 'currency', 'usd', 'eur', 'value'
-        ]
+        'payment_types': {
+            'priority': 'high',
+            'keywords': [
+                'wire', 'ach', 'swift', 'fedwire', 'sepa', 'rtp', 'eft',
+                'check', 'card', 'credit', 'debit', 'cash'
+            ]
+        },
+        'payment_actions': {
+            'priority': 'high',
+            'keywords': [
+                'transfer', 'payment', 'transaction', 'remittance', 'settlement',
+                'disbursement', 'drawdown', 'advance', 'withdrawal', 'deposit'
+            ]
+        },
+        'validation_terms': {
+            'priority': 'high',
+            'keywords': [
+                'validate', 'validation', 'verify', 'verification', 'check',
+                'screening', 'review', 'approval', 'authorization', 'confirm'
+            ]
+        },
+        'compliance_terms': {
+            'priority': 'critical',
+            'keywords': [
+                'ofac', 'aml', 'kyc', 'sanctions', 'compliance', 'regulation',
+                'audit', 'regulatory', 'cip', 'bsa', 'fatca', 'crs'
+            ]
+        },
+        'requirements_language': {
+            'priority': 'critical',
+            'keywords': [
+                'shall', 'must', 'should', 'will', 'may', 'required',
+                'mandatory', 'optional', 'specification', 'requirement',
+                'criteria', 'constraint', 'functional', 'non-functional'
+            ]
+        },
+        'account_terms': {
+            'priority': 'medium',
+            'keywords': [
+                'account', 'beneficiary', 'originator', 'customer', 'party',
+                'sender', 'receiver', 'payee', 'payer', 'holder'
+            ]
+        }
     }
     
     with open(filename, 'w') as f:
         yaml.dump(sample_keywords, f, default_flow_style=False, sort_keys=False)
     
     print(f"✓ Created sample keywords file: {filename}")
-    print(f"  Edit this file to add your domain-specific keywords!")
+    print(f"  This file uses the same format as your keywords.yaml")
+    print(f"  Structure: category -> priority + keywords list")
 
 
 def export_to_csv(keyword_stats: Dict, filename: str = "keyword_coverage.csv"):
@@ -291,17 +383,18 @@ def export_to_csv(keyword_stats: Dict, filename: str = "keyword_coverage.csv"):
         # Header
         writer.writerow([
             'Keyword',
-            'Category', 
+            'Category',
+            'Priority',
             'Document Count',
             'Chunk Count',
             'Documents'
         ])
         
-        # Sort by document count
+        # Sort by priority first, then document count
+        priority_order = {'critical': 0, 'high': 1, 'medium': 2}
         sorted_stats = sorted(
             keyword_stats.items(),
-            key=lambda x: x[1]['doc_count'],
-            reverse=True
+            key=lambda x: (priority_order.get(x[1].get('priority', 'medium'), 3), -x[1]['doc_count'])
         )
         
         # Write rows
@@ -309,6 +402,7 @@ def export_to_csv(keyword_stats: Dict, filename: str = "keyword_coverage.csv"):
             writer.writerow([
                 keyword,
                 stats['category'],
+                stats.get('priority', 'medium'),
                 stats['doc_count'],
                 stats['chunk_count'],
                 '; '.join(stats['documents'])
@@ -351,24 +445,52 @@ def find_keyword_gaps(
             gaps.append({
                 'keyword': keyword,
                 'category': data['category'],
+                'priority': data.get('priority', 'medium'),
                 'doc_count': data['doc_count'],
                 'documents': data['documents']
             })
     
-    # Sort by doc count (ascending)
-    gaps.sort(key=lambda x: x['doc_count'])
+    # Sort by priority first, then doc count (ascending)
+    priority_order = {'critical': 0, 'high': 1, 'medium': 2}
+    gaps.sort(key=lambda x: (priority_order.get(x['priority'], 3), x['doc_count']))
     
-    print("\n" + "="*70)
+    print("\n" + "="*90)
     print(f"KEYWORDS WITH LOW COVERAGE (<{threshold} docs)")
-    print("="*70)
+    print("="*90)
     
-    for gap in gaps:
-        print(f"\n❌ {gap['keyword']} (category: {gap['category']})")
-        print(f"   Found in {gap['doc_count']} document(s)")
-        if gap['documents']:
-            print(f"   Documents: {', '.join(gap['documents'])}")
-        else:
-            print(f"   ⚠ NOT FOUND IN ANY DOCUMENTS")
+    critical_gaps = [g for g in gaps if g['priority'] == 'critical']
+    high_gaps = [g for g in gaps if g['priority'] == 'high']
+    other_gaps = [g for g in gaps if g['priority'] not in ['critical', 'high']]
+    
+    if critical_gaps:
+        print(f"\n🔴 CRITICAL PRIORITY GAPS ({len(critical_gaps)} keywords) - URGENT!")
+        for gap in critical_gaps:
+            print(f"\n❌ {gap['keyword']} (category: {gap['category']})")
+            print(f"   Found in {gap['doc_count']} document(s)")
+            if gap['documents']:
+                print(f"   Documents: {', '.join(gap['documents'])}")
+            else:
+                print(f"   ⚠ NOT FOUND IN ANY DOCUMENTS")
+    
+    if high_gaps:
+        print(f"\n🟡 HIGH PRIORITY GAPS ({len(high_gaps)} keywords)")
+        for gap in high_gaps:
+            print(f"\n❌ {gap['keyword']} (category: {gap['category']})")
+            print(f"   Found in {gap['doc_count']} document(s)")
+            if gap['documents']:
+                print(f"   Documents: {', '.join(gap['documents'])}")
+            else:
+                print(f"   ⚠ NOT FOUND IN ANY DOCUMENTS")
+    
+    if other_gaps:
+        print(f"\n⚪ MEDIUM/OTHER PRIORITY ({len(other_gaps)} keywords)")
+        for gap in other_gaps[:10]:  # Show first 10
+            print(f"\n❌ {gap['keyword']} (category: {gap['category']})")
+            print(f"   Found in {gap['doc_count']} document(s)")
+            if gap['documents']:
+                print(f"   Documents: {', '.join(gap['documents'])}")
+        if len(other_gaps) > 10:
+            print(f"\n   ... and {len(other_gaps) - 10} more medium priority gaps")
     
     print(f"\n📊 Summary: {len(gaps)} keywords below threshold")
     
