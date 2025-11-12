@@ -1,7 +1,15 @@
 """
-Quick Context Extractor v2.3 - IMPROVED DEDUPLICATION
+Quick Context Extractor v2.4 - IMPROVED PDF IMAGE COMPRESSION
 Works with existing indexes
 Handles both text/code AND images!
+
+NEW IN v2.4:
+- Reduced PDF rendering resolution (200 -> 100) for smaller images
+- Added image resizing if width exceeds 800px
+- JPEG compression with quality=85 for better size management
+- Fallback to PNG if JPEG fails
+- Size warnings for images >3MB
+- Better memory management for large PDFs
 
 NEW IN v2.3:
 - Two-stage deduplication: exact chunk + similarity-based
@@ -23,7 +31,7 @@ FIXES FROM v2.1:
 Features:
 - Text/Code: Extract N lines before/after (configurable)
 - Images: Extract and embed full image as base64
-- PDFs: Extract images from matched pages
+- PDFs: Extract images from matched pages with compression
 - Smart result mixing: Get both code and PDFs in results
 """
 
@@ -233,7 +241,7 @@ class QuickContextExtractor:
         
         try:
             # Try to import and use the stemmer from universal indexer
-            from universal_indexer_v2 import TextStemmer
+            from doc_indexer import TextStemmer
             stemmer = TextStemmer(use_stemming=True)
             
             for term in terms:
@@ -291,12 +299,12 @@ class QuickContextExtractor:
         index_type: str
     ) -> List[Dict[str, Any]]:
         """Search one or both indexes"""
-        from universal_indexer_v2 import UniversalFileSearcher
+        from doc_indexer import UniversalFileSearcher
         try:
-            from hybrid_indexer_v2_fixed import HybridSearcher
+            from code_indexer import HybridSearcher
         except ImportError:
             try:
-                from hybrid_indexer_v2 import HybridSearcher
+                from code_indexer import HybridSearcher
             except ImportError:
                 HybridSearcher = None
         
@@ -518,24 +526,53 @@ class QuickContextExtractor:
             try:
                 print(f"  Rendering full page {page_num + 1} as single image...")
                 
-                # Render entire page at high resolution
-                img = page.to_image(resolution=200)
+                # Render entire page at lower resolution to reduce size
+                img = page.to_image(resolution=100)  # Reduced from 200
                 img_pil = img.original
                 
-                # Convert to base64
+                # Resize image if too large (optional additional compression)
+                max_width = 800
+                if img_pil.width > max_width:
+                    ratio = max_width / img_pil.width
+                    new_height = int(img_pil.height * ratio)
+                    img_pil = img_pil.resize((max_width, new_height), Image.Resampling.LANCZOS)
+                
+                # Convert to base64 with better compression
                 buffered = io.BytesIO()
-                img_pil.save(buffered, format="PNG", optimize=True)
-                img_base64 = base64.b64encode(buffered.getvalue()).decode()
+                
+                # Try JPEG first for better compression (if no transparency needed)
+                try:
+                    # Convert RGBA to RGB if necessary for JPEG
+                    if img_pil.mode in ('RGBA', 'LA'):
+                        background = Image.new('RGB', img_pil.size, (255, 255, 255))
+                        background.paste(img_pil, mask=img_pil.split()[-1] if img_pil.mode == 'RGBA' else None)
+                        img_pil = background
+                    
+                    img_pil.save(buffered, format="JPEG", quality=85, optimize=True)
+                    img_format = "JPEG"
+                except:
+                    # Fallback to PNG if JPEG fails
+                    img_pil.save(buffered, format="PNG", optimize=True)
+                    img_format = "PNG"
+                
+                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                
+                # Check size and warn if too large
+                size_mb = len(img_base64) * 3 / 4 / (1024 * 1024)  # Approximate size in MB
+                if size_mb > 3:  # Warn if larger than 3MB
+                    print(f"  ⚠ Warning: Image size is {size_mb:.1f}MB, may cause issues with LLM")
                 
                 images.append({
                     'index': 0,
                     'base64': img_base64,
-                    'width': page.width,
-                    'height': page.height,
-                    'full_page': True
+                    'format': img_format,
+                    'width': img_pil.width,
+                    'height': img_pil.height,
+                    'full_page': True,
+                    'size_mb': round(size_mb, 2)
                 })
                 
-                print(f"  ✓ Captured full page as single image ({page.width:.0f}x{page.height:.0f})")
+                print(f"  ✓ Captured full page as single {img_format} image ({img_pil.width}x{img_pil.height}, {size_mb:.1f}MB)")
                 
             except Exception as e:
                 print(f"  ⚠ Could not render page: {e}")
@@ -939,6 +976,80 @@ class QuickContextExtractor:
         return '\n'.join(parts)
 
 
+def create_html_content(query: str, context: str) -> str:
+    """Also save as HTML if there are images"""
+    if "data:image/png;base64," not in context:
+        return None
+    
+    print(f"\n📸 Images detected - creating HTML view...")
+    
+    html_content = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Context: """ + query + """</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 1400px; margin: 20px auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; border-bottom: 2px solid #95a5a6; padding-bottom: 8px; margin-top: 30px; }
+        h3 { color: #7f8c8d; margin-top: 20px; }
+        pre { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+        .image-container { margin: 20px 0; padding: 20px; background: #f8f9fa; border-radius: 8px; border: 2px solid #dee2e6; text-align: center; }
+        .image-container img { max-width: 100%; width: auto; height: auto; max-height: 1200px; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 4px 8px rgba(0,0,0,0.15); display: block; margin: 15px auto; }
+    </style>
+</head>
+<body>
+    <div class="container">
+"""
+    
+    lines = context.split('\n')
+    in_code_block = False
+    
+    for line in lines:
+        if line.startswith('```'):
+            if in_code_block:
+                html_content += "</pre>\n"
+                in_code_block = False
+            else:
+                html_content += "<pre>\n"
+                in_code_block = True
+            continue
+        
+        if '![Page Image](data:image/png;base64,' in line or '![Image](data:image/png;base64,' in line:
+            match = re.search(r'!\[(?:Page )?Image\]\(data:image/png;base64,([^)]+)\)', line)
+            if match:
+                base64_data = match.group(1)
+                html_content += f'<div class="image-container">\n'
+                html_content += f'<img src="data:image/png;base64,{base64_data}" alt="Full Page Image" />\n'
+                html_content += '</div>\n'
+            continue
+        
+        if line.startswith('# '):
+            html_content += f"<h1>{line[2:]}</h1>\n"
+        elif line.startswith('## '):
+            html_content += f"<h2>{line[3:]}</h2>\n"
+        elif line.startswith('### '):
+            html_content += f"<h3>{line[4:]}</h3>\n"
+        elif line.strip() == '='*70:
+            html_content += '<hr>\n'
+        elif line.strip() and not in_code_block:
+            html_content += f"{line}<br>\n"
+        elif in_code_block:
+            html_content += f"{line}\n"
+    
+    if in_code_block:
+        html_content += "</pre>\n"
+    
+    html_content += """
+    </div>
+</body>
+</html>
+"""
+    
+    return html_content
+
+
 # Quick usage function
 def quick_extract(
     query: str,
@@ -1007,8 +1118,8 @@ if __name__ == "__main__":
         query = "payment drawdown processing"
     
     print("="*70)
-    print("QUICK CONTEXT EXTRACTION v2.3")
-    print("With Improved Deduplication & Query Validation!")
+    print("QUICK CONTEXT EXTRACTION v2.4")
+    print("With Improved PDF Compression!")
     print("="*70)
     
     # Check if we should look for specific file types
@@ -1025,8 +1136,8 @@ if __name__ == "__main__":
         max_matches=5,
         embed_images=True,
         diversify_results=True,
-        validate_query_terms=True,  # ✅ NEW: Validate query terms
-        min_query_terms=1  # ✅ NEW: At least 1 query term must match
+        validate_query_terms=True,  # ✅ Validate query terms
+        min_query_terms=1  # ✅ At least 1 query term must match
     )
     
     print("\n" + "="*70)
@@ -1041,76 +1152,10 @@ if __name__ == "__main__":
         f.write(context)
     
     # Also save as HTML if there are images
-    if "data:image/png;base64," in context:
-        print(f"\n📸 Images detected - creating HTML view...")
-        
-        html_content = """<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Context: """ + query + """</title>
-    <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 1400px; margin: 20px auto; padding: 20px; background: #f5f5f5; }
-        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
-        h2 { color: #34495e; border-bottom: 2px solid #95a5a6; padding-bottom: 8px; margin-top: 30px; }
-        h3 { color: #7f8c8d; margin-top: 20px; }
-        pre { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
-        .image-container { margin: 20px 0; padding: 20px; background: #f8f9fa; border-radius: 8px; border: 2px solid #dee2e6; text-align: center; }
-        .image-container img { max-width: 100%; width: auto; height: auto; max-height: 1200px; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 4px 8px rgba(0,0,0,0.15); display: block; margin: 15px auto; }
-    </style>
-</head>
-<body>
-    <div class="container">
-"""
-        
-        lines = context.split('\n')
-        in_code_block = False
-        
-        for line in lines:
-            if line.startswith('```'):
-                if in_code_block:
-                    html_content += "</pre>\n"
-                    in_code_block = False
-                else:
-                    html_content += "<pre>\n"
-                    in_code_block = True
-                continue
-            
-            if '![Page Image](data:image/png;base64,' in line or '![Image](data:image/png;base64,' in line:
-                match = re.search(r'!\[(?:Page )?Image\]\(data:image/png;base64,([^)]+)\)', line)
-                if match:
-                    base64_data = match.group(1)
-                    html_content += f'<div class="image-container">\n'
-                    html_content += f'<img src="data:image/png;base64,{base64_data}" alt="Full Page Image" />\n'
-                    html_content += '</div>\n'
-                continue
-            
-            if line.startswith('# '):
-                html_content += f"<h1>{line[2:]}</h1>\n"
-            elif line.startswith('## '):
-                html_content += f"<h2>{line[3:]}</h2>\n"
-            elif line.startswith('### '):
-                html_content += f"<h3>{line[4:]}</h3>\n"
-            elif line.strip() == '='*70:
-                html_content += '<hr>\n'
-            elif line.strip() and not in_code_block:
-                html_content += f"{line}<br>\n"
-            elif in_code_block:
-                html_content += f"{line}\n"
-        
-        if in_code_block:
-            html_content += "</pre>\n"
-        
-        html_content += """
-    </div>
-</body>
-</html>
-"""
-        
+    html_content = create_html_content(query, context)
+    if html_content:
         with open("extracted_context.html", 'w', encoding='utf-8') as f:
             f.write(html_content)
-        
         print(f"\n✅ Saved HTML: extracted_context.html")
     
     print(f"\n✓ Saved to: extracted_context.txt")
