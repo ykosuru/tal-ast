@@ -1,62 +1,558 @@
 """
-Index Diagnostic Tools
-Verify what's actually in your index and identify issues
+Enhanced Index Diagnostic Tools with Keyword Coverage Analysis
+Analyze which documents contain specific domain keywords from keywords.yaml
 """
 
 from pathlib import Path
 import pickle
 from collections import Counter, defaultdict
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 import re
+import yaml
 
 
-def verify_index_coverage(
+def analyze_keyword_coverage(
+    keywords_file: str = "keywords.yaml",
     index_dir: str = "./universal_index",
-    doc_dir: str = "./your_docs"
-) -> Dict[str, any]:
+    min_docs: int = 1,
+    show_docs: bool = True,
+    export_csv: bool = False
+) -> Dict:
     """
-    Check which documents are actually indexed vs what's in the directory
+    Analyze how many documents contain each keyword from keywords.yaml
     
+    Args:
+        keywords_file: Path to keywords.yaml file
+        index_dir: Path to index directory
+        min_docs: Only show keywords found in at least this many docs
+        show_docs: Show which documents contain each keyword
+        export_csv: Export results to CSV file
+        
     Returns:
-        Dict with coverage stats and missing files
+        Dict with keyword coverage statistics
     """
+    print("\n" + "="*70)
+    print("KEYWORD COVERAGE ANALYSIS")
+    print("="*70)
+    
+    # Load keywords from YAML
+    try:
+        with open(keywords_file, 'r') as f:
+            keywords_data = yaml.safe_load(f)
+        print(f"\n✓ Loaded keywords from: {keywords_file}")
+    except FileNotFoundError:
+        print(f"\n❌ Keywords file not found: {keywords_file}")
+        print("\nCreating sample keywords.yaml...")
+        create_sample_keywords_yaml(keywords_file)
+        with open(keywords_file, 'r') as f:
+            keywords_data = yaml.safe_load(f)
+    
+    # Parse keywords structure
+    # Supports both flat list and categorized structure
+    if isinstance(keywords_data, dict):
+        # Categorized: {'payment': ['wire', 'ach'], 'compliance': ['ofac', 'aml']}
+        all_keywords = []
+        keyword_categories = {}
+        for category, terms in keywords_data.items():
+            if isinstance(terms, list):
+                all_keywords.extend(terms)
+                for term in terms:
+                    keyword_categories[term] = category
+            else:
+                all_keywords.append(category)
+                keyword_categories[category] = 'uncategorized'
+    else:
+        # Flat list: ['wire', 'ach', 'ofac', 'aml']
+        all_keywords = keywords_data
+        keyword_categories = {kw: 'uncategorized' for kw in all_keywords}
+    
+    print(f"  Total keywords: {len(all_keywords)}")
+    if keyword_categories:
+        categories = set(keyword_categories.values())
+        print(f"  Categories: {len(categories)}")
+    
+    # Load index
+    try:
+        with open(Path(index_dir) / "metadata.pkl", 'rb') as f:
+            metadata_list = pickle.load(f)
+        print(f"\n✓ Loaded index from: {index_dir}")
+        print(f"  Total chunks: {len(metadata_list)}")
+    except FileNotFoundError:
+        print(f"\n❌ Index not found at: {index_dir}")
+        return {}
+    
+    # Analyze coverage
+    print(f"\n🔍 Analyzing keyword coverage...\n")
+    
+    keyword_stats = {}
+    
+    for keyword in all_keywords:
+        # Find all documents containing this keyword
+        matching_files = set()
+        matching_chunks = []
+        
+        keyword_lower = keyword.lower()
+        keyword_pattern = re.compile(r'\b' + re.escape(keyword_lower) + r'\b', re.IGNORECASE)
+        
+        for m in metadata_list:
+            text = m.get('text', '')
+            if keyword_pattern.search(text.lower()):
+                matching_files.add(m['source_file'])
+                matching_chunks.append({
+                    'file': m['source_file'],
+                    'chunk_idx': m.get('chunk_index', 0),
+                    'text_preview': text[:150]
+                })
+        
+        keyword_stats[keyword] = {
+            'keyword': keyword,
+            'category': keyword_categories.get(keyword, 'uncategorized'),
+            'doc_count': len(matching_files),
+            'chunk_count': len(matching_chunks),
+            'documents': sorted(list(matching_files)),
+            'sample_chunks': matching_chunks[:3]  # Keep first 3 for samples
+        }
+    
+    # Sort by document count (descending)
+    sorted_keywords = sorted(
+        keyword_stats.items(),
+        key=lambda x: x[1]['doc_count'],
+        reverse=True
+    )
+    
+    # Display results
+    print("="*70)
+    print(f"{'KEYWORD':<30} {'DOCS':<8} {'CHUNKS':<10} {'CATEGORY':<20}")
+    print("="*70)
+    
+    found_count = 0
+    missing_count = 0
+    
+    for keyword, stats in sorted_keywords:
+        if stats['doc_count'] >= min_docs:
+            found_count += 1
+            category = stats['category'][:18]
+            print(f"{keyword:<30} {stats['doc_count']:<8} {stats['chunk_count']:<10} {category:<20}")
+            
+            if show_docs and stats['documents']:
+                for doc in stats['documents'][:5]:  # Show first 5 docs
+                    print(f"  └─ {doc}")
+                if len(stats['documents']) > 5:
+                    print(f"  └─ ... and {len(stats['documents']) - 5} more")
+                print()
+        else:
+            missing_count += 1
+    
+    # Show keywords with no matches
+    if missing_count > 0:
+        print("\n" + "="*70)
+        print(f"⚠ KEYWORDS NOT FOUND IN ANY DOCUMENTS ({missing_count} keywords)")
+        print("="*70)
+        
+        for keyword, stats in sorted_keywords:
+            if stats['doc_count'] == 0:
+                category = stats['category']
+                print(f"  ❌ {keyword:<30} (category: {category})")
+    
+    # Summary statistics
+    print("\n" + "="*70)
+    print("SUMMARY")
+    print("="*70)
+    print(f"Total keywords analyzed: {len(all_keywords)}")
+    print(f"Keywords found in ≥{min_docs} doc(s): {found_count}")
+    print(f"Keywords not found: {missing_count}")
+    
+    if found_count > 0:
+        avg_docs = sum(s['doc_count'] for s in keyword_stats.values()) / len(keyword_stats)
+        avg_chunks = sum(s['chunk_count'] for s in keyword_stats.values()) / len(keyword_stats)
+        print(f"\nAverage docs per keyword: {avg_docs:.1f}")
+        print(f"Average chunks per keyword: {avg_chunks:.1f}")
+    
+    # Category breakdown
+    if len(set(keyword_categories.values())) > 1:
+        print("\n" + "="*70)
+        print("COVERAGE BY CATEGORY")
+        print("="*70)
+        
+        category_stats = defaultdict(lambda: {'total': 0, 'found': 0, 'missing': 0})
+        
+        for keyword, stats in keyword_stats.items():
+            category = stats['category']
+            category_stats[category]['total'] += 1
+            if stats['doc_count'] > 0:
+                category_stats[category]['found'] += 1
+            else:
+                category_stats[category]['missing'] += 1
+        
+        for category in sorted(category_stats.keys()):
+            stats = category_stats[category]
+            coverage_pct = stats['found'] / stats['total'] * 100
+            print(f"\n{category}:")
+            print(f"  Total keywords: {stats['total']}")
+            print(f"  Found: {stats['found']} ({coverage_pct:.1f}%)")
+            print(f"  Missing: {stats['missing']}")
+    
+    # Top documents by keyword coverage
+    print("\n" + "="*70)
+    print("TOP DOCUMENTS BY KEYWORD COVERAGE")
+    print("="*70)
+    
+    doc_keyword_count = defaultdict(set)
+    for keyword, stats in keyword_stats.items():
+        if stats['doc_count'] > 0:
+            for doc in stats['documents']:
+                doc_keyword_count[doc].add(keyword)
+    
+    top_docs = sorted(
+        doc_keyword_count.items(),
+        key=lambda x: len(x[1]),
+        reverse=True
+    )[:10]
+    
+    for doc, keywords in top_docs:
+        print(f"\n{doc}")
+        print(f"  Keywords found: {len(keywords)}")
+        print(f"  {', '.join(sorted(list(keywords))[:10])}")
+        if len(keywords) > 10:
+            print(f"  ... and {len(keywords) - 10} more")
+    
+    # Export to CSV if requested
+    if export_csv:
+        export_to_csv(keyword_stats, "keyword_coverage.csv")
+        print(f"\n✓ Exported results to: keyword_coverage.csv")
+    
+    return keyword_stats
+
+
+def create_sample_keywords_yaml(filename: str = "keywords.yaml"):
+    """
+    Create a sample keywords.yaml file with payment/banking terms
+    """
+    sample_keywords = {
+        'payment_types': [
+            'wire', 'ach', 'swift', 'fedwire', 'sepa', 'rtp', 'eft',
+            'check', 'card', 'credit', 'debit', 'cash'
+        ],
+        'payment_actions': [
+            'transfer', 'payment', 'transaction', 'remittance', 'settlement',
+            'disbursement', 'drawdown', 'advance', 'withdrawal', 'deposit'
+        ],
+        'validation_terms': [
+            'validate', 'validation', 'verify', 'verification', 'check',
+            'screening', 'review', 'approval', 'authorization', 'confirm'
+        ],
+        'compliance_terms': [
+            'ofac', 'aml', 'kyc', 'sanctions', 'compliance', 'regulation',
+            'audit', 'regulatory', 'cip', 'bsa', 'fatca', 'crs'
+        ],
+        'requirements_language': [
+            'shall', 'must', 'should', 'will', 'may', 'required',
+            'mandatory', 'optional', 'specification', 'requirement',
+            'criteria', 'constraint', 'functional', 'non-functional'
+        ],
+        'account_terms': [
+            'account', 'beneficiary', 'originator', 'customer', 'party',
+            'sender', 'receiver', 'payee', 'payer', 'holder'
+        ],
+        'status_terms': [
+            'pending', 'approved', 'rejected', 'failed', 'complete',
+            'cancelled', 'suspended', 'processing', 'queued', 'hold'
+        ],
+        'system_components': [
+            'database', 'api', 'service', 'interface', 'gateway',
+            'processor', 'engine', 'module', 'queue', 'batch'
+        ],
+        'tal_cobol_terms': [
+            'tal', 'cobol', 'cbl', 'procedure', 'program', 'subroutine',
+            'call', 'invoke', 'execute', 'tandem', 'guardian'
+        ],
+        'amount_terms': [
+            'amount', 'balance', 'limit', 'threshold', 'fee', 'charge',
+            'rate', 'currency', 'usd', 'eur', 'value'
+        ]
+    }
+    
+    with open(filename, 'w') as f:
+        yaml.dump(sample_keywords, f, default_flow_style=False, sort_keys=False)
+    
+    print(f"✓ Created sample keywords file: {filename}")
+    print(f"  Edit this file to add your domain-specific keywords!")
+
+
+def export_to_csv(keyword_stats: Dict, filename: str = "keyword_coverage.csv"):
+    """
+    Export keyword coverage stats to CSV
+    """
+    import csv
+    
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        
+        # Header
+        writer.writerow([
+            'Keyword',
+            'Category', 
+            'Document Count',
+            'Chunk Count',
+            'Documents'
+        ])
+        
+        # Sort by document count
+        sorted_stats = sorted(
+            keyword_stats.items(),
+            key=lambda x: x[1]['doc_count'],
+            reverse=True
+        )
+        
+        # Write rows
+        for keyword, stats in sorted_stats:
+            writer.writerow([
+                keyword,
+                stats['category'],
+                stats['doc_count'],
+                stats['chunk_count'],
+                '; '.join(stats['documents'])
+            ])
+
+
+def find_keyword_gaps(
+    keywords_file: str = "keywords.yaml",
+    index_dir: str = "./universal_index",
+    threshold: int = 3
+) -> List[str]:
+    """
+    Find keywords that appear in very few documents (potential gaps)
+    
+    Args:
+        keywords_file: Path to keywords.yaml
+        index_dir: Path to index
+        threshold: Report keywords found in fewer than this many docs
+        
+    Returns:
+        List of keywords with low coverage
+    """
+    print("\n" + "="*70)
+    print(f"FINDING KEYWORD GAPS (threshold: <{threshold} documents)")
+    print("="*70)
+    
+    # Run coverage analysis (without showing all docs)
+    stats = analyze_keyword_coverage(
+        keywords_file=keywords_file,
+        index_dir=index_dir,
+        min_docs=0,  # Show all
+        show_docs=False,
+        export_csv=False
+    )
+    
+    # Find gaps
+    gaps = []
+    for keyword, data in stats.items():
+        if data['doc_count'] < threshold:
+            gaps.append({
+                'keyword': keyword,
+                'category': data['category'],
+                'doc_count': data['doc_count'],
+                'documents': data['documents']
+            })
+    
+    # Sort by doc count (ascending)
+    gaps.sort(key=lambda x: x['doc_count'])
+    
+    print("\n" + "="*70)
+    print(f"KEYWORDS WITH LOW COVERAGE (<{threshold} docs)")
+    print("="*70)
+    
+    for gap in gaps:
+        print(f"\n❌ {gap['keyword']} (category: {gap['category']})")
+        print(f"   Found in {gap['doc_count']} document(s)")
+        if gap['documents']:
+            print(f"   Documents: {', '.join(gap['documents'])}")
+        else:
+            print(f"   ⚠ NOT FOUND IN ANY DOCUMENTS")
+    
+    print(f"\n📊 Summary: {len(gaps)} keywords below threshold")
+    
+    return [g['keyword'] for g in gaps]
+
+
+def compare_keyword_coverage(
+    keywords_file: str = "keywords.yaml",
+    index1_dir: str = "./universal_index",
+    index2_dir: str = "./universal_index_v2"
+):
+    """
+    Compare keyword coverage between two indexes
+    Useful for seeing if re-indexing improved coverage
+    """
+    print("\n" + "="*70)
+    print("COMPARING KEYWORD COVERAGE ACROSS INDEXES")
+    print("="*70)
+    
+    # Analyze both indexes
+    print(f"\n📊 Index 1: {index1_dir}")
+    stats1 = analyze_keyword_coverage(
+        keywords_file=keywords_file,
+        index_dir=index1_dir,
+        show_docs=False,
+        export_csv=False
+    )
+    
+    print(f"\n\n📊 Index 2: {index2_dir}")
+    stats2 = analyze_keyword_coverage(
+        keywords_file=keywords_file,
+        index_dir=index2_dir,
+        show_docs=False,
+        export_csv=False
+    )
+    
+    # Compare
+    print("\n" + "="*70)
+    print("COMPARISON")
+    print("="*70)
+    
+    improved = []
+    degraded = []
+    unchanged = []
+    
+    for keyword in stats1.keys():
+        count1 = stats1[keyword]['doc_count']
+        count2 = stats2[keyword]['doc_count']
+        
+        if count2 > count1:
+            improved.append({
+                'keyword': keyword,
+                'old': count1,
+                'new': count2,
+                'delta': count2 - count1
+            })
+        elif count2 < count1:
+            degraded.append({
+                'keyword': keyword,
+                'old': count1,
+                'new': count2,
+                'delta': count2 - count1
+            })
+        else:
+            unchanged.append(keyword)
+    
+    # Sort by improvement/degradation
+    improved.sort(key=lambda x: x['delta'], reverse=True)
+    degraded.sort(key=lambda x: x['delta'])
+    
+    print(f"\n✅ Improved coverage: {len(improved)} keywords")
+    if improved:
+        print("\nTop improvements:")
+        for item in improved[:10]:
+            print(f"  {item['keyword']}: {item['old']} → {item['new']} (+{item['delta']} docs)")
+    
+    print(f"\n⚠ Degraded coverage: {len(degraded)} keywords")
+    if degraded:
+        print("\nTop degradations:")
+        for item in degraded[:10]:
+            print(f"  {item['keyword']}: {item['old']} → {item['new']} ({item['delta']} docs)")
+    
+    print(f"\n➡️ Unchanged: {len(unchanged)} keywords")
+    
+    # Overall summary
+    avg_docs_1 = sum(s['doc_count'] for s in stats1.values()) / len(stats1)
+    avg_docs_2 = sum(s['doc_count'] for s in stats2.values()) / len(stats2)
+    
+    print(f"\n📈 Overall average docs per keyword:")
+    print(f"  Index 1: {avg_docs_1:.1f}")
+    print(f"  Index 2: {avg_docs_2:.1f}")
+    print(f"  Change: {avg_docs_2 - avg_docs_1:+.1f} ({(avg_docs_2/avg_docs_1 - 1)*100:+.1f}%)")
+
+
+def search_keyword_contexts(
+    keyword: str,
+    index_dir: str = "./universal_index",
+    max_results: int = 5
+):
+    """
+    Show contexts where a specific keyword appears
+    Useful for understanding how a term is used
+    """
+    print("\n" + "="*70)
+    print(f"CONTEXTS FOR KEYWORD: '{keyword}'")
+    print("="*70)
+    
+    # Load index
+    try:
+        with open(Path(index_dir) / "metadata.pkl", 'rb') as f:
+            metadata_list = pickle.load(f)
+    except FileNotFoundError:
+        print(f"❌ Index not found at: {index_dir}")
+        return
+    
+    # Find matches
+    keyword_lower = keyword.lower()
+    keyword_pattern = re.compile(r'\b' + re.escape(keyword_lower) + r'\b', re.IGNORECASE)
+    
+    matches = []
+    for m in metadata_list:
+        text = m.get('text', '')
+        if keyword_pattern.search(text.lower()):
+            # Find the specific sentence with the keyword
+            sentences = text.split('.')
+            context_sentences = []
+            for sent in sentences:
+                if keyword_pattern.search(sent.lower()):
+                    context_sentences.append(sent.strip())
+            
+            matches.append({
+                'file': m['source_file'],
+                'chunk_idx': m.get('chunk_index', 0),
+                'full_text': text,
+                'context_sentences': context_sentences
+            })
+    
+    if not matches:
+        print(f"\n❌ Keyword '{keyword}' not found in any documents")
+        return
+    
+    print(f"\n✓ Found {len(matches)} occurrences across {len(set(m['file'] for m in matches))} documents")
+    print(f"\nShowing first {max_results} contexts:\n")
+    
+    for i, match in enumerate(matches[:max_results], 1):
+        print(f"{i}. {match['file']} (chunk {match['chunk_idx']})")
+        print(f"   Context:")
+        for sent in match['context_sentences'][:2]:  # Show first 2 sentences
+            # Highlight the keyword
+            highlighted = re.sub(
+                keyword_pattern,
+                lambda m: f">>>{m.group()}<<<",
+                sent
+            )
+            print(f"   • {highlighted}")
+        print()
+
+
+# Update the original functions from previous file
+def verify_index_coverage(index_dir: str = "./universal_index", doc_dir: str = "./your_docs") -> Dict[str, any]:
+    """Check which documents are actually indexed vs what's in the directory"""
     print("\n" + "="*70)
     print("INDEX COVERAGE VERIFICATION")
     print("="*70)
-    
-    # Get all documents that should be indexed
     all_docs = []
     for pattern in ['**/*.pdf', '**/*.txt', '**/*.md', '**/*.docx', '**/*.doc']:
         all_docs.extend(Path(doc_dir).glob(pattern))
-    
     print(f"\nDocuments in directory: {len(all_docs)}")
-    
-    # Load index metadata
     try:
         with open(Path(index_dir) / "metadata.pkl", 'rb') as f:
             indexed_metadata = pickle.load(f)
     except FileNotFoundError:
         print(f"❌ Index not found at: {index_dir}")
         return {'error': 'Index not found'}
-    
     indexed_files = set([m['source_file'] for m in indexed_metadata])
     print(f"Documents in index: {len(indexed_files)}")
-    
-    # Find missing
     missing = []
     for doc in all_docs:
         if doc.name not in indexed_files:
             missing.append(doc.name)
-    
-    # Find indexed but not in directory (orphaned)
     doc_names = set([d.name for d in all_docs])
     orphaned = [f for f in indexed_files if f not in doc_names]
-    
-    # Results
     coverage_pct = (len(indexed_files) - len(orphaned)) / len(all_docs) * 100 if all_docs else 0
-    
     print(f"\nCoverage: {coverage_pct:.1f}%")
-    
     if missing:
         print(f"\n⚠ WARNING: {len(missing)} documents NOT indexed:")
         for doc in missing[:10]:
@@ -65,79 +561,47 @@ def verify_index_coverage(
             print(f"  ... and {len(missing) - 10} more")
     else:
         print("✓ All documents are indexed!")
-    
     if orphaned:
         print(f"\n⚠ WARNING: {len(orphaned)} indexed files not in directory:")
         for doc in orphaned[:10]:
             print(f"  - {doc}")
-    
-    return {
-        'total_docs': len(all_docs),
-        'indexed_docs': len(indexed_files),
-        'missing': missing,
-        'orphaned': orphaned,
-        'coverage_pct': coverage_pct
-    }
+    return {'total_docs': len(all_docs), 'indexed_docs': len(indexed_files), 'missing': missing, 'orphaned': orphaned, 'coverage_pct': coverage_pct}
 
 
 def diagnose_index(index_dir: str = "./universal_index") -> Dict[str, any]:
-    """
-    Comprehensive analysis of index contents
-    
-    Returns:
-        Dict with index statistics
-    """
+    """Comprehensive analysis of index contents"""
     print("\n" + "="*70)
     print("INDEX DIAGNOSTIC ANALYSIS")
     print("="*70)
-    
     try:
-        # Load metadata
         with open(Path(index_dir) / "metadata.pkl", 'rb') as f:
             metadata_list = pickle.load(f)
     except FileNotFoundError:
         print(f"❌ Index not found at: {index_dir}")
         return {'error': 'Index not found'}
-    
     print(f"\n📊 Basic Statistics:")
     print(f"  Total chunks: {len(metadata_list)}")
-    
-    # Analyze file types
     file_types = Counter([m.get('file_type', 'unknown') for m in metadata_list])
     print(f"\n📁 File types:")
     for ft, count in file_types.most_common():
         print(f"  {ft}: {count} chunks")
-    
-    # Analyze unique files
     unique_files = set([m['source_file'] for m in metadata_list])
     print(f"\n📄 Unique files: {len(unique_files)}")
-    
-    # Chunks per file
     chunks_per_file = Counter([m['source_file'] for m in metadata_list])
     avg_chunks = sum(chunks_per_file.values()) / len(chunks_per_file)
     print(f"  Average chunks per file: {avg_chunks:.1f}")
     print(f"  Max chunks in one file: {chunks_per_file.most_common(1)[0][1]}")
-    
-    # Show files with most chunks
     print(f"\n📚 Files with most chunks:")
     for filename, count in chunks_per_file.most_common(5):
         print(f"  {filename}: {count} chunks")
-    
-    # Analyze chunk sizes
     chunk_lengths = [len(m.get('text', '')) for m in metadata_list]
     avg_length = sum(chunk_lengths) / len(chunk_lengths)
     print(f"\n📏 Chunk sizes:")
     print(f"  Average: {avg_length:.0f} characters")
     print(f"  Min: {min(chunk_lengths)}")
     print(f"  Max: {max(chunk_lengths)}")
-    
-    # Check for requirements-related files
     req_keywords = ['requirement', 'spec', 'specification', 'rfp', 'sow', 'functional']
-    req_files = set([
-        m['source_file'] for m in metadata_list 
-        if any(kw in m['source_file'].lower() for kw in req_keywords)
-    ])
-    
+    req_files = set([m['source_file'] for m in metadata_list if any(kw in m['source_file'].lower() for kw in req_keywords)])
     print(f"\n📋 Requirements documents:")
     print(f"  Files with requirements keywords in name: {len(req_files)}")
     if req_files:
@@ -146,258 +610,16 @@ def diagnose_index(index_dir: str = "./universal_index") -> Dict[str, any]:
             print(f"  - {f} ({chunk_count} chunks)")
         if len(req_files) > 5:
             print(f"  ... and {len(req_files) - 5} more")
-    
-    # Check for requirements language in content
     req_lang_keywords = ['shall', 'must', 'should', 'required', 'mandatory']
     chunks_with_req_lang = 0
     for m in metadata_list:
         text_lower = m.get('text', '').lower()
         if any(kw in text_lower for kw in req_lang_keywords):
             chunks_with_req_lang += 1
-    
     print(f"\n🔍 Requirements language:")
     print(f"  Chunks containing 'shall/must/should': {chunks_with_req_lang}")
     print(f"  Percentage: {chunks_with_req_lang/len(metadata_list)*100:.1f}%")
-    
-    # Load embeddings to check dimensions
-    try:
-        with open(Path(index_dir) / "embeddings.pkl", 'rb') as f:
-            embeddings = pickle.load(f)
-        print(f"\n🧮 Embeddings:")
-        print(f"  Shape: {embeddings.shape}")
-        print(f"  Dimension: {embeddings.shape[1]}")
-    except:
-        print(f"\n⚠ Could not load embeddings")
-    
-    # Sample some chunks
-    print(f"\n📝 Sample chunks (first 3):")
-    for i, m in enumerate(metadata_list[:3]):
-        print(f"\n  Chunk {i+1} from {m['source_file']}:")
-        text_preview = m.get('text', '')[:150]
-        print(f"  {text_preview}...")
-    
-    return {
-        'total_chunks': len(metadata_list),
-        'unique_files': len(unique_files),
-        'file_types': dict(file_types),
-        'avg_chunk_size': avg_length,
-        'requirements_files': len(req_files),
-        'chunks_with_req_lang': chunks_with_req_lang
-    }
-
-
-def test_document_indexed(
-    filename: str,
-    index_dir: str = "./universal_index"
-) -> bool:
-    """
-    Check if a specific document is indexed and show details
-    
-    Args:
-        filename: Name of file to check (e.g., "WireTransferSpec.pdf")
-        index_dir: Index directory
-        
-    Returns:
-        True if found, False otherwise
-    """
-    print("\n" + "="*70)
-    print(f"CHECKING: {filename}")
-    print("="*70)
-    
-    try:
-        with open(Path(index_dir) / "metadata.pkl", 'rb') as f:
-            metadata_list = pickle.load(f)
-    except FileNotFoundError:
-        print(f"❌ Index not found at: {index_dir}")
-        return False
-    
-    # Find chunks for this file
-    chunks = [m for m in metadata_list if filename in m['source_file']]
-    
-    if not chunks:
-        print(f"❌ {filename} is NOT in the index!")
-        
-        # Show similar filenames
-        all_files = set([m['source_file'] for m in metadata_list])
-        similar = [f for f in all_files if filename.lower()[:10] in f.lower()]
-        
-        if similar:
-            print(f"\nDid you mean one of these?")
-            for f in similar[:5]:
-                print(f"  - {f}")
-        
-        return False
-    
-    print(f"✅ {filename} is indexed")
-    print(f"\n📊 Statistics:")
-    print(f"  Total chunks: {len(chunks)}")
-    print(f"  File type: {chunks[0].get('file_type', 'unknown')}")
-    
-    # Analyze chunk sizes
-    chunk_sizes = [len(c.get('text', '')) for c in chunks]
-    print(f"  Average chunk size: {sum(chunk_sizes)/len(chunk_sizes):.0f} characters")
-    
-    # Check for requirements language
-    req_chunks = 0
-    for c in chunks:
-        text_lower = c.get('text', '').lower()
-        if any(kw in text_lower for kw in ['shall', 'must', 'should']):
-            req_chunks += 1
-    
-    print(f"  Chunks with requirements language: {req_chunks}/{len(chunks)}")
-    
-    # Show sample chunks
-    print(f"\n📝 Sample chunks:")
-    for i, c in enumerate(chunks[:3]):
-        print(f"\n  Chunk {i+1} (index {chunks.index(c)}):")
-        text = c.get('text', '')
-        print(f"  {text[:200]}...")
-    
-    if len(chunks) > 3:
-        print(f"\n  ... and {len(chunks) - 3} more chunks")
-    
-    return True
-
-
-def find_requirements_docs(index_dir: str = "./universal_index") -> List[str]:
-    """
-    Find all documents that appear to be requirements documents
-    
-    Returns:
-        List of requirement document filenames
-    """
-    print("\n" + "="*70)
-    print("FINDING REQUIREMENTS DOCUMENTS")
-    print("="*70)
-    
-    try:
-        with open(Path(index_dir) / "metadata.pkl", 'rb') as f:
-            metadata_list = pickle.load(f)
-    except FileNotFoundError:
-        print(f"❌ Index not found at: {index_dir}")
-        return []
-    
-    # Criteria for requirements documents
-    req_filename_keywords = ['requirement', 'spec', 'specification', 'rfp', 'sow', 'functional', 'design', 'technical']
-    req_content_keywords = ['shall', 'must', 'should', 'required', 'mandatory']
-    
-    # Score each file
-    file_scores = defaultdict(lambda: {'chunks': 0, 'req_chunks': 0, 'name_match': False})
-    
-    for m in metadata_list:
-        filename = m['source_file']
-        text_lower = m.get('text', '').lower()
-        
-        file_scores[filename]['chunks'] += 1
-        
-        # Check filename
-        if any(kw in filename.lower() for kw in req_filename_keywords):
-            file_scores[filename]['name_match'] = True
-        
-        # Check content
-        if any(kw in text_lower for kw in req_content_keywords):
-            file_scores[filename]['req_chunks'] += 1
-    
-    # Find likely requirements documents
-    req_docs = []
-    
-    for filename, stats in file_scores.items():
-        req_density = stats['req_chunks'] / stats['chunks'] if stats['chunks'] > 0 else 0
-        
-        # Criteria:
-        # 1. Name matches requirements keywords, OR
-        # 2. >30% of chunks contain requirements language
-        if stats['name_match'] or req_density > 0.3:
-            req_docs.append({
-                'filename': filename,
-                'chunks': stats['chunks'],
-                'req_chunks': stats['req_chunks'],
-                'req_density': req_density,
-                'name_match': stats['name_match']
-            })
-    
-    # Sort by likelihood
-    req_docs.sort(key=lambda x: (x['name_match'], x['req_density']), reverse=True)
-    
-    print(f"\nFound {len(req_docs)} potential requirements documents:\n")
-    
-    for doc in req_docs:
-        indicator = "📋" if doc['name_match'] else "📄"
-        print(f"{indicator} {doc['filename']}")
-        print(f"   Chunks: {doc['chunks']} | Req language: {doc['req_density']*100:.1f}%")
-    
-    return [d['filename'] for d in req_docs]
-
-
-def compare_indexes(
-    index1_dir: str = "./universal_index",
-    index2_dir: str = "./universal_index_v2"
-) -> Dict:
-    """
-    Compare two indexes (useful when re-indexing)
-    """
-    print("\n" + "="*70)
-    print("COMPARING INDEXES")
-    print("="*70)
-    
-    def load_index_info(index_dir):
-        try:
-            with open(Path(index_dir) / "metadata.pkl", 'rb') as f:
-                metadata = pickle.load(f)
-            return {
-                'chunks': len(metadata),
-                'files': set([m['source_file'] for m in metadata]),
-                'avg_chunk_size': sum(len(m.get('text', '')) for m in metadata) / len(metadata)
-            }
-        except:
-            return None
-    
-    info1 = load_index_info(index1_dir)
-    info2 = load_index_info(index2_dir)
-    
-    if not info1:
-        print(f"❌ Could not load index 1: {index1_dir}")
-        return {}
-    
-    if not info2:
-        print(f"❌ Could not load index 2: {index2_dir}")
-        return {}
-    
-    print(f"\n📊 Index 1: {index1_dir}")
-    print(f"  Chunks: {info1['chunks']}")
-    print(f"  Files: {len(info1['files'])}")
-    print(f"  Avg chunk size: {info1['avg_chunk_size']:.0f} chars")
-    
-    print(f"\n📊 Index 2: {index2_dir}")
-    print(f"  Chunks: {info2['chunks']}")
-    print(f"  Files: {len(info2['files'])}")
-    print(f"  Avg chunk size: {info2['avg_chunk_size']:.0f} chars")
-    
-    print(f"\n🔄 Comparison:")
-    print(f"  Chunks: {info2['chunks'] - info1['chunks']:+d} ({info2['chunks']/info1['chunks']*100:.1f}%)")
-    print(f"  Files: {len(info2['files']) - len(info1['files']):+d}")
-    print(f"  Avg chunk size: {info2['avg_chunk_size'] - info1['avg_chunk_size']:+.0f} chars")
-    
-    # Files only in one index
-    only_in_1 = info1['files'] - info2['files']
-    only_in_2 = info2['files'] - info1['files']
-    
-    if only_in_1:
-        print(f"\n⚠ {len(only_in_1)} files only in index 1:")
-        for f in list(only_in_1)[:5]:
-            print(f"  - {f}")
-    
-    if only_in_2:
-        print(f"\n✨ {len(only_in_2)} files only in index 2:")
-        for f in list(only_in_2)[:5]:
-            print(f"  - {f}")
-    
-    return {
-        'index1': info1,
-        'index2': info2,
-        'only_in_1': only_in_1,
-        'only_in_2': only_in_2
-    }
+    return {'total_chunks': len(metadata_list), 'unique_files': len(unique_files), 'file_types': dict(file_types), 'avg_chunk_size': avg_length, 'requirements_files': len(req_files), 'chunks_with_req_lang': chunks_with_req_lang}
 
 
 if __name__ == "__main__":
@@ -406,32 +628,51 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         command = sys.argv[1]
         
-        if command == 'verify':
+        if command == 'keywords':
+            # Analyze keyword coverage
+            keywords_file = sys.argv[2] if len(sys.argv) > 2 else "keywords.yaml"
+            analyze_keyword_coverage(keywords_file=keywords_file, show_docs=True, export_csv=True)
+        
+        elif command == 'gaps':
+            # Find keyword gaps
+            keywords_file = sys.argv[2] if len(sys.argv) > 2 else "keywords.yaml"
+            threshold = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+            find_keyword_gaps(keywords_file=keywords_file, threshold=threshold)
+        
+        elif command == 'compare-keywords':
+            # Compare keyword coverage between indexes
+            keywords_file = sys.argv[2] if len(sys.argv) > 2 else "keywords.yaml"
+            index1 = sys.argv[3] if len(sys.argv) > 3 else "./universal_index"
+            index2 = sys.argv[4] if len(sys.argv) > 4 else "./universal_index_v2"
+            compare_keyword_coverage(keywords_file, index1, index2)
+        
+        elif command == 'search':
+            # Search for specific keyword contexts
+            if len(sys.argv) > 2:
+                keyword = sys.argv[2]
+                search_keyword_contexts(keyword)
+            else:
+                print("Usage: python index_diagnostics_enhanced.py search <keyword>")
+        
+        elif command == 'verify':
             verify_index_coverage()
         
         elif command == 'diagnose':
             diagnose_index()
         
-        elif command == 'test':
-            if len(sys.argv) > 2:
-                test_document_indexed(sys.argv[2])
-            else:
-                print("Usage: python index_diagnostics.py test <filename>")
-        
-        elif command == 'find-requirements':
-            find_requirements_docs()
-        
-        elif command == 'compare':
-            if len(sys.argv) > 3:
-                compare_indexes(sys.argv[2], sys.argv[3])
-            else:
-                compare_indexes()
-        
         else:
-            print("Unknown command. Use: verify, diagnose, test, find-requirements, or compare")
+            print("Unknown command. Use: keywords, gaps, compare-keywords, search, verify, or diagnose")
     
     else:
-        # Run all diagnostics
-        verify_index_coverage()
-        diagnose_index()
-        find_requirements_docs()
+        # Show usage
+        print("\nUsage:")
+        print("  python index_diagnostics_enhanced.py keywords [keywords.yaml]")
+        print("  python index_diagnostics_enhanced.py gaps [keywords.yaml] [threshold]")
+        print("  python index_diagnostics_enhanced.py compare-keywords [keywords.yaml] [index1] [index2]")
+        print("  python index_diagnostics_enhanced.py search <keyword>")
+        print("  python index_diagnostics_enhanced.py verify")
+        print("  python index_diagnostics_enhanced.py diagnose")
+        print("\nExamples:")
+        print("  python index_diagnostics_enhanced.py keywords my_terms.yaml")
+        print("  python index_diagnostics_enhanced.py gaps keywords.yaml 5")
+        print("  python index_diagnostics_enhanced.py search 'wire transfer'")
