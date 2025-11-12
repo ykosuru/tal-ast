@@ -3,27 +3,20 @@ Quick Context Extractor v2.4 - IMPROVED PDF IMAGE COMPRESSION
 Works with existing indexes
 Handles both text/code AND images!
 
-NEW IN v2.4:
 - Reduced PDF rendering resolution (200 -> 100) for smaller images
 - Added image resizing if width exceeds 800px
 - JPEG compression with quality=85 for better size management
 - Fallback to PNG if JPEG fails
 - Size warnings for images >3MB
 - Better memory management for large PDFs
-
-NEW IN v2.3:
 - Two-stage deduplication: exact chunk + similarity-based
 - Prevents duplicate code results from same file
 - Configurable similarity threshold (default 0.85)
 - Shows deduplication stats in output
-
-NEW IN v2.2:
 - Query term validation: Only keep results that actually contain search terms
 - Prevents PDF results from dominating with irrelevant content
 - Validates against both original and stemmed query terms
 - Configurable strictness for matching
-
-FIXES FROM v2.1:
 - Result diversification (mix of PDFs and code)
 - Better source path resolution using metadata
 - Configurable file type filtering
