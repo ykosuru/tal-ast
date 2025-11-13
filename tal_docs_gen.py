@@ -218,12 +218,16 @@ class TALDocumentationGenerator:
             'avg_dependencies': sum(d for n, d in self.graph.out_degree()) / max(self.graph.number_of_nodes(), 1),
             'max_dependencies': max(d for n, d in self.graph.out_degree()) if self.graph.number_of_nodes() > 0 else 0,
             'most_called': max(self.graph.in_degree(), key=lambda x: x[1])[0] if self.graph.number_of_nodes() > 0 else None,
-            'complexity_distribution': defaultdict(int)
+            'complexity_distribution': {}  # Use regular dict instead of defaultdict for JSON serialization
         }
         
         # Calculate complexity distribution
+        complexity_counts = defaultdict(int)
         for comp in self.components:
-            stats['complexity_distribution'][comp.complexity] += 1
+            complexity_counts[comp.complexity] += 1
+        
+        # Convert to regular dict for JSON serialization
+        stats['complexity_distribution'] = dict(complexity_counts)
         
         # Identify strongly connected components (circular dependencies)
         strongly_connected = list(nx.strongly_connected_components(self.graph))
@@ -515,14 +519,15 @@ Use colors to distinguish different types of nodes."""
         logger.info("Generating architecture overview...")
         
         # Prepare context for LLM
+        component_types = defaultdict(int)
+        for comp in self.components:
+            component_types[comp.type] += 1
+        
         context = {
             'statistics': self.statistics,
             'top_components': [asdict(c) for c in self.components[:20]],
-            'component_types': defaultdict(int)
+            'component_types': dict(component_types)  # Convert to regular dict
         }
-        
-        for comp in self.components:
-            context['component_types'][comp.type] += 1
         
         # Group by business capability
         capabilities = defaultdict(list)
@@ -804,6 +809,33 @@ For each phase include:
         
         return self.call_llm(prompt, "You are a technology transformation consultant.", temperature=0.4, max_tokens=2500)
     
+    def _make_json_serializable(self, obj: Any) -> Any:
+        """
+        Recursively convert objects to JSON-serializable types
+        
+        Args:
+            obj: Object to convert
+            
+        Returns:
+            JSON-serializable version of the object
+        """
+        if isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        elif isinstance(obj, dict):
+            return {key: self._make_json_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._make_json_serializable(item) for item in obj]
+        elif isinstance(obj, defaultdict):
+            return {key: self._make_json_serializable(value) for key, value in obj.items()}
+        elif hasattr(obj, '__dict__'):
+            # Handle dataclass or custom objects
+            if hasattr(obj, '__dataclass_fields__'):
+                return asdict(obj)
+            return {key: self._make_json_serializable(value) for key, value in obj.__dict__.items()}
+        else:
+            # For any other type, convert to string representation
+            return str(obj)
+    
     def generate_documentation_report(self, output_file: str = "tal_architecture_report.json"):
         """Generate complete documentation report with diagrams"""
         logger.info("Generating comprehensive documentation report...")
@@ -841,11 +873,24 @@ For each phase include:
                 'diagram': flow_doc['diagram']
             })
         
-        # Save report
-        with open(output_file, 'w') as f:
-            json.dump(report, f, indent=2)
+        # Ensure all data is JSON serializable
+        report = self._make_json_serializable(report)
         
-        logger.info(f"Documentation report saved to {output_file}")
+        # Save report
+        try:
+            with open(output_file, 'w') as f:
+                json.dump(report, f, indent=2)
+            logger.info(f"Documentation report saved to {output_file}")
+        except TypeError as e:
+            logger.error(f"JSON serialization error: {e}")
+            # Try to identify the problematic field
+            for key, value in report.items():
+                try:
+                    json.dumps({key: value})
+                except TypeError as field_error:
+                    logger.error(f"Field '{key}' is not serializable: {field_error}")
+            raise
+        
         return report
     
     def render_graphviz_to_image(self, dot_code: str, output_path: str, format: str = 'png') -> bool:
