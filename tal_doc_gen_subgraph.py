@@ -412,7 +412,7 @@ class TALFunctionalityDocGenerator:
             user_prompt: User prompt with query
         
         Returns:
-            LLM response text (max 1000 words)
+            LLM response text (max 1500 words)
         """
         try:
             # PLACEHOLDER - Replace with actual async API call
@@ -427,7 +427,7 @@ class TALFunctionalityDocGenerator:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3,
-                max_tokens=1500  # ~1000 words
+                max_tokens=2000  # ~1500 words
             )
             
             return response.choices[0].message.content
@@ -441,22 +441,23 @@ class TALFunctionalityDocGenerator:
             return f"Error: {e}"
     
     def generate_functionality_overview(self) -> str:
-        """Generate overview of the specific functionality with code"""
+        """Generate architecture documentation with FULL procedure source code"""
         logger.info(f"Generating {self.functionality} functionality overview...")
         
-        # Get top relevant components with code
-        top_components = [c for c in self.components[:15] if c.relevance_score > 0.3]
+        # Get top relevant components with FULL code (not snippets)
+        top_components = [c for c in self.components[:15] if c.relevance_score > 0.3 and c.source_code]
         
-        code_samples = []
-        for comp in top_components[:5]:
-            if comp.source_code:
-                lines = comp.source_code.split('\n')[:40]
-                code_samples.append({
-                    'name': comp.name,
-                    'file_path': comp.file_path,
-                    'relevance': comp.relevance_score,
-                    'snippet': '\n'.join(lines)
-                })
+        # Build procedures context with FULL source code (like tal_to_java_translator)
+        procedures_context = []
+        for comp in top_components:
+            procedures_context.append({
+                'name': comp.name,
+                'file_path': comp.file_path,
+                'relevance': comp.relevance_score,
+                'complexity': comp.complexity,
+                'called_by': comp.call_count,
+                'code': comp.source_code  # FULL CODE, not snippet
+            })
         
         functionality_context = f"""
 This is a {self.functionality.upper()} system focused on {', '.join(self.functionality_keywords[:8])}.
@@ -467,135 +468,269 @@ Common industry terminology for {self.functionality}:
 - Follow industry best practices
 """
         
+        # TAL Language Primer for LLM
+        tal_primer = """
+=== TAL (Transaction Application Language) PRIMER ===
+
+TAL is HP's systems programming language for NonStop servers. Key constructs:
+
+**Procedure Declaration:**
+```tal
+PROC procedure_name(param1, param2);
+  ! Procedure body
+END;
+```
+
+**Data Types:**
+- INT, INT(32) - Integer types
+- STRING - String type  
+- REAL, FIXED - Floating point
+- Structures defined with STRUCT
+
+**Control Flow:**
+- IF...THEN...ELSE
+- WHILE...DO
+- FOR...TO...DO
+- CASE...OF
+
+**Procedure Calls:**
+```tal
+CALL procedure_name(args);
+result := procedure_name(args);
+```
+
+**Common Patterns:**
+- Error handling via return codes (0 = success, non-zero = error)
+- Database operations via SQL or file system calls
+- Interprocess communication
+- Transaction processing
+
+Focus on understanding business logic and data flow, not low-level TAL syntax details.
+"""
+        
         user_prompt = f"""
-Analyze this TAL {self.functionality.upper()} system implementation with actual source code.
+Analyze this TAL {self.functionality.upper()} system implementation with COMPLETE source code.
+
+{tal_primer}
 
 === FUNCTIONALITY CONTEXT ===
 {functionality_context}
 
 === SYSTEM SCOPE ===
-Total Procedures: {len(self.components)}
+Total Procedures Analyzed: {len(procedures_context)}
+Total Procedures in System: {len(self.components)}
 Procedures with Source Code: {self.statistics['procedures_with_source']}
 Average Relevance to {self.functionality}: {self.statistics.get('avg_relevance', 0):.1%}
 
-=== TOP {self.functionality.upper()} PROCEDURES ===
-{json.dumps([{'name': c.name, 'file_path': c.file_path, 'relevance': c.relevance_score, 'complexity': c.complexity} for c in top_components[:10]], indent=2)}
+=== COMPLETE PROCEDURE SOURCE CODE ===
 
-=== ACTUAL {self.functionality.upper()} CODE SAMPLES ===
-{json.dumps(code_samples, indent=2)}
-
-Provide comprehensive analysis in MARKDOWN format (limit: 1000 words) using proper financial/payment industry terminology:
-
-# {self.functionality.title()} System Analysis
-
-## 1. System Overview
-   - Purpose and scope of this {self.functionality} implementation
-   - Key business processes supported
-   - Integration with other systems
-   - Industry standards implemented (SWIFT, ISO 20022, etc.)
-
-## 2. Core Procedures
-   - Entry points and main workflows
-   - Critical business logic from code
-   - Data structures and models used
-   - Error handling and validation
-
-## 3. Implementation Patterns
-   - Architectural patterns observed in code
-   - Transaction processing approach
-   - State management
-   - Data flow patterns
-
-## 4. Compliance & Controls
-   - Regulatory compliance mechanisms
-   - Audit trails and logging
-   - Authorization and approval workflows
-
-## 5. Integration Points
-   - External system interfaces
-   - Message formats (SWIFT MT, MX, etc.)
-   - Database interactions
-
-## 6. Code Quality Assessment
-   - Strengths of current implementation
-   - Technical debt and risks
-   - Maintainability concerns
-
-## 7. Modernization Roadmap
-   - API design recommendations
-   - Microservice extraction opportunities
-   - Event-driven architecture potential
-   - Cloud migration considerations
-
-Use proper industry terminology. Reference actual code patterns and procedures. Keep concise - MAXIMUM 1000 WORDS.
 """
         
-        system_prompt = f"""You are a senior payment systems architect with deep expertise in {self.functionality} processing. You understand industry standards, regulatory requirements, and best practices for {self.functionality} systems. Analyze the actual TAL source code and provide specific, actionable insights using proper financial/payment terminology. Output in clean markdown format. Limit response to 1000 words maximum."""
+        # Add ALL procedures with FULL source code
+        for i, proc in enumerate(procedures_context, 1):
+            user_prompt += f"""
+## Procedure {i}: {proc['name']}
+
+**File:** `{proc['file_path']}`  
+**Relevance:** {proc['relevance']:.1%}  
+**Complexity:** {proc['complexity']}  
+**Called by:** {proc['called_by']} procedures
+
+**FULL SOURCE CODE:**
+```tal
+{proc['code']}
+```
+
+---
+
+"""
+        
+        user_prompt += f"""
+
+=== ANALYSIS REQUIREMENTS ===
+
+Based on the COMPLETE source code above, produce a comprehensive architecture and design document in MARKDOWN format.
+
+**LIMIT: 1500 WORDS**
+
+# {self.functionality.title()} System - Architecture & Design
+
+## 1. System Overview (200 words)
+   - Purpose and business scope
+   - Key capabilities provided
+   - Integration points with other systems
+   - Industry standards compliance (SWIFT, ISO 20022, etc.)
+
+## 2. Architecture Diagram
+   Create a Mermaid diagram showing:
+   - Entry point procedures
+   - Core processing procedures  
+   - Data flow between procedures
+   - External system interactions
+   
+   Use Mermaid syntax:
+   ```mermaid
+   graph TD
+       A[Entry Point] --> B[Validation]
+       B --> C[Processing]
+       C --> D[Persistence]
+   ```
+
+## 3. Component Analysis (400 words)
+   For each major procedure analyzed:
+   - Business purpose and responsibility
+   - Key algorithms and business logic
+   - Data transformations performed
+   - Error handling approach
+   - Dependencies on other procedures
+
+## 4. Data Flow (300 words)
+   - Input data sources and formats
+   - Data structures used (reference actual code)
+   - Transformation pipeline through procedures
+   - Output destinations
+   - State management approach
+
+## 5. Design Patterns & Practices (200 words)
+   - Architectural patterns observed in code
+   - Error handling and transaction strategy
+   - Code organization and modularity
+   - Reusability patterns
+
+## 6. Technical Debt & Risks (200 words)
+   - Code quality issues identified
+   - Potential failure points
+   - Maintainability concerns
+   - Performance bottlenecks
+   - Tight coupling issues
+
+## 7. Modernization Recommendations (200 words)
+   - RESTful API design suggestions
+   - Microservice extraction opportunities
+   - Event-driven architecture potential
+   - Cloud-native migration path
+   - Modern technology stack recommendations (Java/Spring Boot, etc.)
+
+**CRITICAL INSTRUCTIONS:**
+- Base ALL analysis on the ACTUAL source code provided above
+- Reference specific procedures, variables, and logic from the code
+- Use proper {self.functionality} industry terminology throughout
+- Include Mermaid diagrams where helpful
+- Focus on business logic and architecture, not TAL syntax
+- Keep total response to 1500 words maximum
+"""
+        
+        system_prompt = f"""You are a senior enterprise architect and payment systems expert specializing in legacy system modernization. You have deep expertise in {self.functionality} processing systems and understand both business requirements and technical implementation.
+
+Your task is to analyze the COMPLETE TAL source code provided and produce a comprehensive architecture and design document. Focus on:
+1. Business logic and data flow (not TAL syntax)
+2. System architecture and design patterns
+3. Integration points and dependencies
+4. Modernization opportunities
+
+Use proper {self.functionality} industry terminology throughout. Output in clean markdown with Mermaid diagrams where helpful. Limit to 1500 words."""
         
         return asyncio.run(self.llm_wrapper(system_prompt, user_prompt))
     
     def generate_component_documentation(self, component: ArchitectureComponent) -> str:
-        """Generate component documentation with functionality context"""
+        """Generate component architecture documentation with FULL source code"""
         
         callers = [n for n in self.graph.nodes() if component.name in list(self.graph.successors(n))]
         
         user_prompt = f"""
-Document this {self.functionality.upper()} component with actual source code:
+Document this {self.functionality.upper()} component with COMPLETE source code:
+
+=== TAL LANGUAGE CONTEXT ===
+TAL is HP's systems programming language. Focus on business logic, not syntax.
+Key patterns: PROC/END for procedures, CALL for invocation, return codes for errors.
 
 === FUNCTIONALITY CONTEXT ===
 This component is part of the {self.functionality.upper()} system.
 Relevance Score: {component.relevance_score:.1%}
 
 === COMPONENT DETAILS ===
-Name: {component.name}
-File: {component.file_path}
-Business Capability: {component.business_capability}
-Complexity: {component.complexity}
-Times Called: {component.call_count}
+**Name:** {component.name}
+**File:** `{component.file_path}`
+**Business Capability:** {component.business_capability}
+**Complexity:** {component.complexity}
+**Times Called:** {component.call_count} procedures call this
 
-=== ACTUAL SOURCE CODE ===
+=== COMPLETE SOURCE CODE ===
 ```tal
 {component.source_code if component.source_code else '[Source code not available]'}
 ```
 
-=== CALLERS ===
-{json.dumps(callers[:8], indent=2)}
+=== DEPENDENCIES ===
+**Called by:** {', '.join(callers[:8]) if callers else 'None'}
+{f'... and {len(callers) - 8} more' if len(callers) > 8 else ''}
 
-Provide detailed documentation in MARKDOWN format (limit: 1000 words) using {self.functionality} industry terminology:
+=== DOCUMENTATION REQUIREMENTS ===
+
+Produce focused architecture documentation in MARKDOWN format (limit: 1500 words):
 
 # {component.name} Component
 
-## Purpose in {self.functionality.title()} Processing
-   - Specific role in {self.functionality} workflow
+## 1. Purpose in {self.functionality.title()} Processing (200 words)
+   - Specific business responsibility
+   - Role in overall {self.functionality} workflow
    - Business rules implemented
-   - Industry standards followed
+   - Industry standards followed (SWIFT, ISO 20022, etc.)
 
-## Code Analysis
-   - Key algorithms and logic
-   - Data structures and models
-   - Validation and error handling
-   - Transaction processing
+## 2. Component Flow Diagram
+   Create Mermaid flowchart showing:
+   - Input parameters/data
+   - Key processing steps
+   - Decision points
+   - Output/return values
+   
+   Example:
+   ```mermaid
+   graph LR
+       A[Input] --> B{{Validate}}
+       B -->|Valid| C[Process]
+       B -->|Invalid| D[Error]
+       C --> E[Output]
+   ```
 
-## Integration Points
-   - Dependencies and why needed
-   - Data flow and transformations
-   - External interfaces
+## 3. Code Analysis (400 words)
+   - Key algorithms and business logic
+   - Data structures and variables used (reference actual code)
+   - Validation rules and error handling
+   - Transaction processing approach
+   - State management
 
-## Quality & Risks
+## 4. Integration Points (300 words)
+   - Procedures this calls (dependencies)
+   - Procedures that call this (consumers)
+   - Data transformations performed
+   - External system interactions
+   - Database operations
+
+## 5. Design Assessment (300 words)
    - Code quality indicators
+   - Adherence to patterns
    - Potential failure points
    - Performance considerations
+   - Maintainability score
 
-## Modernization Recommendations
+## 6. Modernization Strategy (300 words)
    - Refactoring opportunities
-   - API design for this component
+   - Suggested API design (REST/gRPC)
    - Microservice extraction approach
+   - Event-driven alternatives
+   - Modern language equivalent (Java/Python)
    - Industry best practices to adopt
 
-Use proper {self.functionality} terminology. Reference actual code patterns. Keep concise - MAXIMUM 1000 WORDS.
+**CRITICAL:**
+- Base analysis on ACTUAL source code provided
+- Use proper {self.functionality} industry terminology
+- Reference specific code lines, variables, logic
+- Include Mermaid diagram
+- Focus on architecture, not TAL syntax
+- Limit to 1500 words maximum
 """
         
-        system_prompt = f"""You are documenting a {self.functionality} system component. Use proper financial/payment industry terminology. Output in clean markdown format. Limit response to 1000 words maximum."""
+        system_prompt = f"""You are documenting a {self.functionality} system component. You are an expert in payment systems architecture and legacy modernization. Analyze the COMPLETE TAL source code and provide architectural documentation using proper {self.functionality} industry terminology. Output in clean markdown with diagrams. Limit to 1500 words."""
         
         return asyncio.run(self.llm_wrapper(system_prompt, user_prompt))
     
