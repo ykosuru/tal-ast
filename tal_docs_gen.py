@@ -68,7 +68,38 @@ class TALDocumentationGenerator:
         elif path.suffix == '.json':
             with open(graph_path, 'r') as f:
                 data = json.load(f)
-                self.graph = nx.node_link_graph(data)
+                
+                # NetworkX node_link_graph expects 'links' key for edges
+                # Handle common variations: 'edges', 'links', 'relationships'
+                edge_key = None
+                for key in ['links', 'edges', 'relationships']:
+                    if key in data:
+                        edge_key = key
+                        break
+                
+                if edge_key is None:
+                    raise ValueError("JSON must contain 'links', 'edges', or 'relationships' key for graph edges")
+                
+                # Ensure 'nodes' key exists
+                if 'nodes' not in data:
+                    raise ValueError("JSON must contain 'nodes' key")
+                
+                # Create a clean data structure for NetworkX
+                # This avoids issues with modifying the original dict
+                clean_data = {
+                    'directed': data.get('directed', True),
+                    'multigraph': data.get('multigraph', False),
+                    'graph': data.get('graph', {}),
+                    'nodes': data['nodes'],
+                    'links': data[edge_key]  # Always use 'links' for NetworkX
+                }
+                
+                # Handle null directed value
+                if clean_data['directed'] is None:
+                    clean_data['directed'] = True
+                    logger.warning("'directed' key was null, assuming directed graph")
+                
+                self.graph = nx.node_link_graph(clean_data)
         else:
             raise ValueError(f"Unsupported graph format: {path.suffix}")
         
@@ -274,18 +305,18 @@ Create a Graphviz digraph showing:
 IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
 Use this structure:
 ```dot
-digraph Architecture {
+digraph Architecture {{
     rankdir=TB;
     node [shape=box, style=filled];
     
-    subgraph cluster_payment {
+    subgraph cluster_payment {{
         label="Payment Layer";
         color=lightblue;
         // components here
-    }
+    }}
     
     // edges showing data flow
-}
+}}
 ```
 """
         
@@ -308,7 +339,7 @@ Create a Graphviz digraph showing:
 IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
 Use this structure:
 ```dot
-digraph ProcessFlow {
+digraph ProcessFlow {{
     rankdir=TB;
     node [shape=box, style=filled, fillcolor=lightblue];
     
@@ -320,7 +351,7 @@ digraph ProcessFlow {
     step1 -> decision1;
     decision1 -> step2 [label="Yes"];
     decision1 -> error [label="No"];
-}
+}}
 ```
 """
         
@@ -342,7 +373,7 @@ Create a Graphviz digraph showing:
 IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
 Use this structure:
 ```dot
-digraph ComponentDependencies {
+digraph ComponentDependencies {{
     rankdir=LR;
     node [shape=box, style=filled];
     
@@ -358,7 +389,7 @@ digraph ComponentDependencies {
     // Edges
     // caller1 -> "{context.get('name')}";
     // "{context.get('name')}" -> dep1;
-}
+}}
 ```
 """
         
@@ -380,11 +411,11 @@ Create a Graphviz digraph showing:
 IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
 Use this structure:
 ```dot
-digraph MicroservicesArchitecture {
+digraph MicroservicesArchitecture {{
     rankdir=TB;
     node [shape=box, style=filled];
     
-    subgraph cluster_service1 {
+    subgraph cluster_service1 {{
         label="Payment Service";
         color=lightblue;
         style=filled;
@@ -392,23 +423,23 @@ digraph MicroservicesArchitecture {
         
         payment_api [label="Payment API"];
         // other components
-    }
+    }}
     
-    subgraph cluster_service2 {
+    subgraph cluster_service2 {{
         label="Compliance Service";
         color=lightyellow;
         style=filled;
         fillcolor=lightyellow;
         
         compliance_api [label="Compliance API"];
-    }
+    }}
     
     // API calls
     payment_api -> compliance_api [label="REST"];
     
     // Events
     payment_api -> event_bus [style=dashed, label="Event"];
-}
+}}
 ```
 """
         
@@ -878,7 +909,7 @@ For each phase include:
                     if self.render_graphviz_to_image(overview_data['diagram'], diagram_path):
                         doc.add_picture(diagram_path, width=Inches(6))
                     else:
-                        # Include Mermaid code as code block
+                        # Include DOT code as code block
                         doc.add_paragraph('Graphviz DOT Diagram Code:', style='Intense Quote')
                         p = doc.add_paragraph(overview_data['diagram'])
                         p.style = 'Code'
@@ -981,8 +1012,8 @@ For each phase include:
             doc_note = """
 NOTE: Diagrams are included as images if Graphviz is installed.
 To render diagrams manually:
-1. Install Graphviz: npm install -g @mermaid-js/Graphviz
-2. Render .mmd files: dot -Tpng diagram.dot -o diagram.png
+1. Install Graphviz: apt-get install graphviz (Linux) or brew install graphviz (Mac)
+2. Render .dot files: dot -Tpng diagram.dot -o diagram.png
 Or view online: https://dreampuf.github.io/GraphvizOnline/
 """
             logger.info(doc_note)
