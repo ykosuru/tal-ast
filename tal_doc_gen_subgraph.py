@@ -13,6 +13,7 @@ from dataclasses import dataclass, asdict
 from collections import defaultdict
 import logging
 import re
+import asyncio
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -396,10 +397,42 @@ class TALFunctionalityDocGenerator:
         
         return stats
     
-    def call_llm(self, prompt: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 2000) -> str:
-        """Call LLM - replace with actual API"""
-        logger.warning("LLM call placeholder - implement actual API call")
-        return f"[LLM Response Placeholder]\nPrompt length: {len(prompt)} chars"
+    async def llm_wrapper(self, system_prompt: str, user_prompt: str) -> str:
+        """
+        Async LLM wrapper - replace with actual API call
+        
+        Args:
+            system_prompt: System prompt for context
+            user_prompt: User prompt with query
+        
+        Returns:
+            LLM response text (max 1000 words)
+        """
+        try:
+            # PLACEHOLDER - Replace with actual async API call
+            # Example with OpenAI:
+            """
+            import openai
+            
+            response = await openai.ChatCompletion.acreate(
+                model="gpt-4-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1500  # ~1000 words
+            )
+            
+            return response.choices[0].message.content
+            """
+            
+            logger.warning("LLM wrapper placeholder - implement actual async API call")
+            return f"[LLM Response Placeholder]\nPrompt length: {len(user_prompt)} chars"
+            
+        except Exception as e:
+            logger.error(f"Error calling LLM: {e}")
+            return f"Error: {e}"
     
     def generate_functionality_overview(self) -> str:
         """Generate overview of the specific functionality with code"""
@@ -428,7 +461,7 @@ Common industry terminology for {self.functionality}:
 - Follow industry best practices
 """
         
-        prompt = f"""
+        user_prompt = f"""
 Analyze this TAL {self.functionality.upper()} system implementation with actual source code.
 
 === FUNCTIONALITY CONTEXT ===
@@ -445,64 +478,62 @@ Average Relevance to {self.functionality}: {self.statistics.get('avg_relevance',
 === ACTUAL {self.functionality.upper()} CODE SAMPLES ===
 {json.dumps(code_samples, indent=2)}
 
-Provide comprehensive analysis using proper financial/payment industry terminology:
+Provide comprehensive analysis in MARKDOWN format (limit: 1000 words) using proper financial/payment industry terminology:
 
-1. **{self.functionality.title()} System Overview**
+# {self.functionality.title()} System Analysis
+
+## 1. System Overview
    - Purpose and scope of this {self.functionality} implementation
    - Key business processes supported
    - Integration with other systems
    - Industry standards implemented (SWIFT, ISO 20022, etc.)
 
-2. **Core {self.functionality.title()} Procedures**
+## 2. Core Procedures
    - Entry points and main workflows
    - Critical business logic from code
    - Data structures and models used
    - Error handling and validation
 
-3. **Implementation Patterns**
+## 3. Implementation Patterns
    - Architectural patterns observed in code
    - Transaction processing approach
    - State management
    - Data flow patterns
 
-4. **Compliance & Controls**
+## 4. Compliance & Controls
    - Regulatory compliance mechanisms
    - Audit trails and logging
    - Authorization and approval workflows
-   - Exception handling
 
-5. **Integration Points**
+## 5. Integration Points
    - External system interfaces
    - Message formats (SWIFT MT, MX, etc.)
    - Database interactions
-   - Event publishing/subscribing
 
-6. **Code Quality Assessment**
+## 6. Code Quality Assessment
    - Strengths of current implementation
    - Technical debt and risks
-   - Complexity hotspots
    - Maintainability concerns
 
-7. **Modernization Roadmap for {self.functionality.title()}**
+## 7. Modernization Roadmap
    - API design recommendations
    - Microservice extraction opportunities
    - Event-driven architecture potential
    - Cloud migration considerations
-   - Industry best practices to adopt
 
-Use proper industry terminology throughout. Reference actual code patterns and procedures.
+Use proper industry terminology. Reference actual code patterns and procedures. Keep concise - MAXIMUM 1000 WORDS.
 """
         
-        system_prompt = f"""You are a senior payment systems architect with deep expertise in {self.functionality} processing. You understand industry standards, regulatory requirements, and best practices for {self.functionality} systems. Analyze the actual TAL source code and provide specific, actionable insights using proper financial/payment terminology."""
+        system_prompt = f"""You are a senior payment systems architect with deep expertise in {self.functionality} processing. You understand industry standards, regulatory requirements, and best practices for {self.functionality} systems. Analyze the actual TAL source code and provide specific, actionable insights using proper financial/payment terminology. Output in clean markdown format. Limit response to 1000 words maximum."""
         
-        return self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=4000)
+        return asyncio.run(self.llm_wrapper(system_prompt, user_prompt))
     
     def generate_component_documentation(self, component: ArchitectureComponent) -> str:
         """Generate component documentation with functionality context"""
         
         callers = [n for n in self.graph.nodes() if component.name in list(self.graph.successors(n))]
         
-        prompt = f"""
+        user_prompt = f"""
 Document this {self.functionality.upper()} component with actual source code:
 
 === FUNCTIONALITY CONTEXT ===
@@ -524,74 +555,123 @@ Times Called: {component.call_count}
 === CALLERS ===
 {json.dumps(callers[:8], indent=2)}
 
-Provide detailed documentation using {self.functionality} industry terminology:
+Provide detailed documentation in MARKDOWN format (limit: 1000 words) using {self.functionality} industry terminology:
 
-1. **Purpose in {self.functionality.title()} Processing**
+# {component.name} Component
+
+## Purpose in {self.functionality.title()} Processing
    - Specific role in {self.functionality} workflow
    - Business rules implemented
    - Industry standards followed
 
-2. **Code Analysis**
+## Code Analysis
    - Key algorithms and logic
    - Data structures and models
    - Validation and error handling
    - Transaction processing
 
-3. **Integration Points**
+## Integration Points
    - Dependencies and why needed
    - Data flow and transformations
    - External interfaces
 
-4. **Quality & Risks**
+## Quality & Risks
    - Code quality indicators
    - Potential failure points
    - Performance considerations
 
-5. **Modernization Recommendations**
+## Modernization Recommendations
    - Refactoring opportunities
    - API design for this component
    - Microservice extraction approach
    - Industry best practices to adopt
 
-Use proper {self.functionality} terminology. Reference actual code patterns.
+Use proper {self.functionality} terminology. Reference actual code patterns. Keep concise - MAXIMUM 1000 WORDS.
 """
         
-        return self.call_llm(prompt, f"You are documenting a {self.functionality} system component.", temperature=0.5, max_tokens=2500)
+        system_prompt = f"""You are documenting a {self.functionality} system component. Use proper financial/payment industry terminology. Output in clean markdown format. Limit response to 1000 words maximum."""
+        
+        return asyncio.run(self.llm_wrapper(system_prompt, user_prompt))
     
     def generate_functionality_report(self, output_file: str):
-        """Generate complete functionality-focused documentation"""
+        """Generate complete functionality-focused documentation in Markdown"""
         logger.info(f"Generating {self.functionality} documentation report...")
         
-        report = {
-            'metadata': {
-                'functionality': self.functionality,
-                'domain_keywords': self.functionality_keywords,
-                'total_procedures': len(self.components),
-                'procedures_with_source': self.statistics['procedures_with_source'],
-                'source_coverage': f"{self.statistics['source_coverage']:.1%}",
-                'avg_relevance': f"{self.statistics.get('avg_relevance', 0):.1%}"
-            },
-            'functionality_overview': self.generate_functionality_overview(),
-            'components': []
-        }
+        # Generate overview
+        overview = self.generate_functionality_overview()
         
+        # Generate component documentation
+        component_docs = []
         logger.info(f"Documenting top {min(10, len(self.components))} components...")
         for comp in self.components[:10]:
             if comp.relevance_score > 0.2:  # Only document relevant ones
                 comp_doc = self.generate_component_documentation(comp)
-                report['components'].append({
-                    'component': asdict(comp),
+                component_docs.append({
+                    'name': comp.name,
+                    'file_path': comp.file_path,
+                    'relevance': comp.relevance_score,
+                    'complexity': comp.complexity,
+                    'call_count': comp.call_count,
                     'documentation': comp_doc
                 })
         
-        # Make JSON serializable
-        report = self._make_json_serializable(report)
+        # Build markdown report
+        md_report = f"""# {self.functionality.title()} System Documentation
+
+**Generated:** {Path.cwd()}  
+**Functionality:** {self.functionality}  
+**Domain Keywords:** {', '.join(self.functionality_keywords)}
+
+## Metadata
+
+- **Total Procedures:** {len(self.components)}
+- **Procedures with Source Code:** {self.statistics['procedures_with_source']}
+- **Source Coverage:** {self.statistics['source_coverage']:.1%}
+- **Average Relevance:** {self.statistics.get('avg_relevance', 0):.1%}
+- **Procedures Documented:** {len(component_docs)}
+
+---
+
+{overview}
+
+---
+
+# Component Documentation
+
+"""
         
+        # Add component documentation
+        for i, comp_doc in enumerate(component_docs, 1):
+            md_report += f"""
+---
+
+## Component {i}: {comp_doc['name']}
+
+**File:** `{comp_doc['file_path']}`  
+**Relevance:** {comp_doc['relevance']:.1%}  
+**Complexity:** {comp_doc['complexity']}  
+**Called By:** {comp_doc['call_count']} procedures
+
+{comp_doc['documentation']}
+
+"""
+        
+        # Save markdown report
         with open(output_file, 'w') as f:
-            json.dump(report, f, indent=2)
+            f.write(md_report)
         
-        logger.info(f"Documentation saved to {output_file}")
-        return report
+        logger.info(f"Markdown documentation saved to {output_file}")
+        
+        return {
+            'metadata': {
+                'functionality': self.functionality,
+                'total_procedures': len(self.components),
+                'procedures_documented': len(component_docs),
+                'source_coverage': f"{self.statistics['source_coverage']:.1%}",
+                'avg_relevance': f"{self.statistics.get('avg_relevance', 0):.1%}"
+            },
+            'output_file': output_file
+        }
     
     def _make_json_serializable(self, obj: Any) -> Any:
         """Convert to JSON-serializable types"""
@@ -647,7 +727,7 @@ Examples:
                        choices=['drawdown', 'nostro', 'wire_transfer', 'ach', 
                                'compliance', 'ledger', 'settlement', 'forex'],
                        help='Business functionality to document')
-    parser.add_argument('--output', help='Output JSON file')
+    parser.add_argument('--output', help='Output markdown file (default: <functionality>_documentation.md)')
     parser.add_argument('--min-relevance', type=float, default=0.0,
                        help='Minimum relevance score (0.0-1.0, default: 0.0)')
     
@@ -659,7 +739,7 @@ Examples:
     
     # Default output filename
     if not args.output:
-        args.output = f"{args.functionality}_documentation.json"
+        args.output = f"{args.functionality}_documentation.md"
     
     try:
         # Initialize generator
@@ -675,7 +755,7 @@ Examples:
         logger.info(f"{args.functionality.upper()} DOCUMENTATION COMPLETE!")
         logger.info("="*70)
         logger.info(f"Output: {args.output}")
-        logger.info(f"Procedures documented: {len(report['components'])}")
+        logger.info(f"Procedures documented: {report['metadata']['procedures_documented']}")
         logger.info(f"Source coverage: {report['metadata']['source_coverage']}")
         logger.info(f"Avg relevance: {report['metadata']['avg_relevance']}")
         logger.info("="*70)
