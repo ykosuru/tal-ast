@@ -668,7 +668,7 @@ Assess:
             
             candidates.append({
                 'capability': capability,
-                'components': comps[:10],
+                'components': [asdict(c) for c in comps[:10]],  # Convert to dicts for JSON serialization
                 'analysis': response
             })
             
