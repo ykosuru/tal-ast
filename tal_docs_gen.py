@@ -242,8 +242,208 @@ class TALDocumentationGenerator:
             logger.error(f"Error calling LLM: {e}")
             return f"Error: {e}"
     
-    def generate_architecture_overview(self) -> str:
-        """Generate high-level architecture overview using LLM"""
+    def generate_diagram_graphviz(self, diagram_type: str, context: Dict[str, Any]) -> str:
+        """
+        Generate Graphviz DOT diagram syntax using LLM
+        
+        Args:
+            diagram_type: Type of diagram (architecture, component, process_flow, microservices)
+            context: Context data for diagram generation
+        
+        Returns:
+            Graphviz DOT syntax
+        """
+        
+        if diagram_type == "architecture":
+            prompt = f"""
+Generate a Graphviz DOT diagram showing the high-level architecture of this TAL payment system.
+
+COMPONENT TYPES:
+{json.dumps(context.get('component_types', {}), indent=2)}
+
+TOP COMPONENTS BY BUSINESS CAPABILITY:
+{json.dumps(context.get('capabilities', {}), indent=2)}
+
+Create a Graphviz digraph showing:
+1. Main business capability layers (use subgraphs/clusters)
+2. Key components in each layer
+3. Major data flows between layers (directed edges)
+4. Use different shapes: box for services, cylinder for databases, oval for processes
+5. Color code by layer: blue tones for payment, yellow for compliance, green for ledger
+
+IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
+Use this structure:
+```dot
+digraph Architecture {
+    rankdir=TB;
+    node [shape=box, style=filled];
+    
+    subgraph cluster_payment {
+        label="Payment Layer";
+        color=lightblue;
+        // components here
+    }
+    
+    // edges showing data flow
+}
+```
+"""
+        
+        elif diagram_type == "process_flow":
+            prompt = f"""
+Generate a Graphviz DOT flowchart showing this process flow:
+
+FLOW: {context.get('flow_name')}
+STEPS: {json.dumps(context.get('steps', []), indent=2)}
+DECISION POINTS: {json.dumps(context.get('decision_points', []), indent=2)}
+
+Create a Graphviz digraph showing:
+1. Process start (oval/ellipse shape)
+2. Each step (box shape)
+3. Decision points (diamond shape)
+4. Alternative paths with labeled edges
+5. End points (oval/ellipse shape)
+6. Color code: green for start, red for errors, blue for normal flow
+
+IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
+Use this structure:
+```dot
+digraph ProcessFlow {
+    rankdir=TB;
+    node [shape=box, style=filled, fillcolor=lightblue];
+    
+    start [label="Start", shape=ellipse, fillcolor=lightgreen];
+    step1 [label="Step 1"];
+    decision1 [label="Decision?", shape=diamond, fillcolor=lightyellow];
+    
+    start -> step1;
+    step1 -> decision1;
+    decision1 -> step2 [label="Yes"];
+    decision1 -> error [label="No"];
+}
+```
+"""
+        
+        elif diagram_type == "component":
+            prompt = f"""
+Generate a Graphviz DOT component diagram for this component:
+
+COMPONENT: {context.get('name')}
+TYPE: {context.get('type')}
+DEPENDENCIES: {json.dumps(context.get('dependencies', []), indent=2)}
+CALLED BY: {json.dumps(context.get('callers', []), indent=2)}
+
+Create a Graphviz digraph showing:
+1. The main component (highlighted/different color)
+2. Components that call it (callers) - connect with arrows TO the main component
+3. Its dependencies (components it calls) - connect with arrows FROM the main component
+4. Use different colors: orange for main component, light blue for callers, light green for dependencies
+
+IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
+Use this structure:
+```dot
+digraph ComponentDependencies {
+    rankdir=LR;
+    node [shape=box, style=filled];
+    
+    // Main component
+    "{context.get('name')}" [fillcolor=orange];
+    
+    // Callers
+    // caller1 [fillcolor=lightblue];
+    
+    // Dependencies  
+    // dep1 [fillcolor=lightgreen];
+    
+    // Edges
+    // caller1 -> "{context.get('name')}";
+    // "{context.get('name')}" -> dep1;
+}
+```
+"""
+        
+        elif diagram_type == "microservices":
+            prompt = f"""
+Generate a Graphviz DOT diagram showing the proposed microservices architecture:
+
+IDENTIFIED SERVICES:
+{json.dumps(context.get('services', []), indent=2)}
+
+Create a Graphviz digraph showing:
+1. Each proposed microservice as a cluster/subgraph
+2. Key components within each service
+3. REST API calls between services (solid arrows)
+4. Event-driven communication (dashed arrows)
+5. Databases (cylinder shape)
+6. Color code each service cluster differently
+
+IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
+Use this structure:
+```dot
+digraph MicroservicesArchitecture {
+    rankdir=TB;
+    node [shape=box, style=filled];
+    
+    subgraph cluster_service1 {
+        label="Payment Service";
+        color=lightblue;
+        style=filled;
+        fillcolor=aliceblue;
+        
+        payment_api [label="Payment API"];
+        // other components
+    }
+    
+    subgraph cluster_service2 {
+        label="Compliance Service";
+        color=lightyellow;
+        style=filled;
+        fillcolor=lightyellow;
+        
+        compliance_api [label="Compliance API"];
+    }
+    
+    // API calls
+    payment_api -> compliance_api [label="REST"];
+    
+    // Events
+    payment_api -> event_bus [style=dashed, label="Event"];
+}
+```
+"""
+        
+        else:
+            return f'digraph {{ "Diagram type not supported: {diagram_type}" }}'
+        
+        system_prompt = """You are a technical architect generating Graphviz DOT diagrams. 
+Return ONLY valid Graphviz DOT syntax wrapped in ```dot code blocks. 
+Use clear, concise labels. Follow proper DOT syntax with semicolons and proper clustering.
+Use appropriate shapes: box, ellipse, diamond, cylinder, component.
+Use colors to distinguish different types of nodes."""
+        
+        response = self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=1500)
+        
+        # Extract DOT code from response
+        if "```dot" in response:
+            start = response.find("```dot") + len("```dot")
+            end = response.find("```", start)
+            if end > start:
+                return response[start:end].strip()
+        elif "```" in response:
+            # Try to find any code block
+            start = response.find("```") + 3
+            end = response.find("```", start)
+            if end > start:
+                code = response[start:end].strip()
+                # Check if it starts with digraph
+                if code.strip().startswith('digraph'):
+                    return code
+        
+        # Return as-is if no code blocks found
+        return response.strip()
+    
+    def generate_architecture_overview(self) -> Dict[str, Any]:
+        """Generate high-level architecture overview using LLM with diagrams"""
         logger.info("Generating architecture overview...")
         
         # Prepare context for LLM
@@ -255,6 +455,11 @@ class TALDocumentationGenerator:
         
         for comp in self.components:
             context['component_types'][comp.type] += 1
+        
+        # Group by business capability
+        capabilities = defaultdict(list)
+        for comp in self.components[:30]:
+            capabilities[comp.business_capability].append(comp.name)
         
         prompt = f"""
 Based on the following TAL codebase analysis, provide a comprehensive architecture overview:
@@ -283,10 +488,23 @@ Please provide:
         system_prompt = """You are a senior software architect analyzing a legacy TAL (Transaction Application Language) 
 payment processing system. Provide clear, technical, and actionable insights."""
         
-        return self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=2000)
+        overview_text = self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=2000)
+        
+        # Generate architecture diagram
+        logger.info("Generating architecture diagram...")
+        diagram_context = {
+            'component_types': dict(context['component_types']),
+            'capabilities': {k: v[:5] for k, v in capabilities.items()}  # Top 5 per capability
+        }
+        architecture_diagram = self.generate_diagram_graphviz("architecture", diagram_context)
+        
+        return {
+            'overview': overview_text,
+            'diagram': architecture_diagram
+        }
     
-    def generate_component_documentation(self, component: ArchitectureComponent) -> str:
-        """Generate detailed documentation for a component"""
+    def generate_component_documentation(self, component: ArchitectureComponent) -> Dict[str, Any]:
+        """Generate detailed documentation for a component with diagram"""
         
         prompt = f"""
 Analyze this TAL component and provide detailed documentation:
@@ -309,10 +527,29 @@ Provide:
         
         system_prompt = "You are documenting legacy TAL payment processing code. Be specific and technical."
         
-        return self.call_llm(prompt, system_prompt, temperature=0.5, max_tokens=800)
+        documentation = self.call_llm(prompt, system_prompt, temperature=0.5, max_tokens=800)
+        
+        # Generate component diagram if it has dependencies
+        diagram = None
+        if len(component.dependencies) > 0:
+            # Get callers (reverse lookup)
+            callers = [n for n in self.graph.nodes() if component.name in list(self.graph.successors(n))]
+            
+            diagram_context = {
+                'name': component.name,
+                'type': component.type,
+                'dependencies': component.dependencies[:8],
+                'callers': callers[:5]
+            }
+            diagram = self.generate_diagram_graphviz("component", diagram_context)
+        
+        return {
+            'documentation': documentation,
+            'diagram': diagram
+        }
     
-    def generate_process_flow_documentation(self, flow: ProcessFlow) -> str:
-        """Generate documentation for a process flow"""
+    def generate_process_flow_documentation(self, flow: ProcessFlow) -> Dict[str, Any]:
+        """Generate documentation for a process flow with diagram"""
         
         flow_steps = "\n".join([f"{i+1}. {step['node']} ({step['type']})" 
                                 for i, step in enumerate(flow.steps[:10])])
@@ -340,10 +577,23 @@ Provide:
         
         system_prompt = "You are a business analyst documenting payment processing workflows."
         
-        return self.call_llm(prompt, system_prompt, temperature=0.5, max_tokens=1000)
+        documentation = self.call_llm(prompt, system_prompt, temperature=0.5, max_tokens=1000)
+        
+        # Generate process flow diagram
+        diagram_context = {
+            'flow_name': flow.name,
+            'steps': [{'name': s['node'], 'type': s['type']} for s in flow.steps[:12]],
+            'decision_points': flow.decision_points[:5]
+        }
+        diagram = self.generate_diagram_graphviz("process_flow", diagram_context)
+        
+        return {
+            'documentation': documentation,
+            'diagram': diagram
+        }
     
-    def identify_microservices_candidates(self) -> List[Dict[str, Any]]:
-        """Use LLM to identify potential microservice boundaries"""
+    def identify_microservices_candidates(self) -> Dict[str, Any]:
+        """Use LLM to identify potential microservice boundaries with diagram"""
         logger.info("Identifying microservice candidates...")
         
         # Group components by business capability
@@ -352,6 +602,8 @@ Provide:
             capabilities[comp.business_capability].append(comp)
         
         candidates = []
+        service_summary = []
+        
         for capability, comps in capabilities.items():
             if len(comps) < 3:  # Skip small groups
                 continue
@@ -388,8 +640,25 @@ Assess:
                 'components': comps[:10],
                 'analysis': response
             })
+            
+            # Collect for diagram
+            service_summary.append({
+                'name': capability.replace('_', ' ').title(),
+                'component_count': len(comps),
+                'key_components': [c.name for c in comps[:3]]
+            })
         
-        return candidates
+        # Generate microservices architecture diagram
+        logger.info("Generating microservices architecture diagram...")
+        diagram_context = {
+            'services': service_summary[:8]  # Limit to top 8 for readability
+        }
+        diagram = self.generate_diagram_graphviz("microservices", diagram_context)
+        
+        return {
+            'candidates': candidates,
+            'diagram': diagram
+        }
     
     def generate_data_flow_analysis(self) -> str:
         """Analyze data flows through the system"""
@@ -468,7 +737,7 @@ For each phase include:
         return self.call_llm(prompt, "You are a technology transformation consultant.", temperature=0.4, max_tokens=2500)
     
     def generate_documentation_report(self, output_file: str = "tal_architecture_report.json"):
-        """Generate complete documentation report"""
+        """Generate complete documentation report with diagrams"""
         logger.info("Generating comprehensive documentation report...")
         
         report = {
@@ -487,17 +756,21 @@ For each phase include:
         # Document top 10 critical components
         logger.info("Documenting critical components...")
         for comp in self.components[:10]:
+            comp_doc = self.generate_component_documentation(comp)
             report['components'].append({
                 'component': asdict(comp),
-                'documentation': self.generate_component_documentation(comp)
+                'documentation': comp_doc['documentation'],
+                'diagram': comp_doc['diagram']
             })
         
         # Document top 5 process flows
         logger.info("Documenting process flows...")
         for flow in self.process_flows[:5]:
+            flow_doc = self.generate_process_flow_documentation(flow)
             report['process_flows'].append({
                 'flow': asdict(flow),
-                'documentation': self.generate_process_flow_documentation(flow)
+                'documentation': flow_doc['documentation'],
+                'diagram': flow_doc['diagram']
             })
         
         # Save report
@@ -507,8 +780,73 @@ For each phase include:
         logger.info(f"Documentation report saved to {output_file}")
         return report
     
+    def render_graphviz_to_image(self, dot_code: str, output_path: str, format: str = 'png') -> bool:
+        """
+        Render Graphviz DOT diagram to image
+        
+        Tries multiple methods:
+        1. graphviz command (dot command)
+        2. Python graphviz library
+        3. Save as .dot file for manual rendering
+        
+        Args:
+            dot_code: Graphviz DOT syntax
+            output_path: Output file path
+            format: Output format (png, svg, pdf)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            import subprocess
+            import tempfile
+            
+            # Create temporary dot file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False) as f:
+                f.write(dot_code)
+                dot_file = f.name
+            
+            try:
+                # Try using graphviz command line (dot)
+                result = subprocess.run(
+                    ['dot', f'-T{format}', dot_file, '-o', output_path],
+                    capture_output=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0 and Path(output_path).exists():
+                    logger.info(f"Rendered Graphviz diagram to {output_path}")
+                    return True
+                    
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                logger.warning("Graphviz (dot command) not available, trying Python library...")
+                
+                # Try using Python graphviz library
+                try:
+                    import graphviz
+                    source = graphviz.Source(dot_code)
+                    source.render(output_path.replace(f'.{format}', ''), format=format, cleanup=True)
+                    logger.info(f"Rendered Graphviz diagram using Python library to {output_path}")
+                    return True
+                except ImportError:
+                    logger.warning("Python graphviz library not installed")
+                except Exception as e:
+                    logger.warning(f"Failed to render with Python library: {e}")
+            
+            # If both methods failed, save the .dot file for reference
+            dot_output = output_path.replace(f'.{format}', '.dot')
+            with open(dot_output, 'w') as f:
+                f.write(dot_code)
+            logger.info(f"Saved Graphviz source to {dot_output} (install graphviz to render)")
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Failed to render Graphviz diagram: {e}")
+            return False
+    
     def create_word_document(self, report: Dict[str, Any], output_file: str = "tal_architecture_guide.docx"):
-        """Create a Word document from the report"""
+        """Create a Word document from the report with embedded diagrams"""
         logger.info("Creating Word document...")
         
         try:
@@ -529,16 +867,33 @@ For each phase include:
             
             # 1. Architecture Overview
             doc.add_heading('1. Architecture Overview', 1)
-            doc.add_paragraph(report['architecture_overview'])
+            overview_data = report.get('architecture_overview', {})
+            if isinstance(overview_data, dict):
+                doc.add_paragraph(overview_data.get('overview', 'N/A'))
+                
+                # Add architecture diagram
+                if overview_data.get('diagram'):
+                    doc.add_heading('1.1 Architecture Diagram', 2)
+                    diagram_path = 'architecture_diagram.png'
+                    if self.render_graphviz_to_image(overview_data['diagram'], diagram_path):
+                        doc.add_picture(diagram_path, width=Inches(6))
+                    else:
+                        # Include Mermaid code as code block
+                        doc.add_paragraph('Graphviz DOT Diagram Code:', style='Intense Quote')
+                        p = doc.add_paragraph(overview_data['diagram'])
+                        p.style = 'Code'
+            else:
+                doc.add_paragraph(str(overview_data))
             
             # Statistics
-            doc.add_heading('1.1 System Statistics', 2)
+            doc.add_heading('1.2 System Statistics', 2)
             stats = report['metadata']['graph_stats']
             table = doc.add_table(rows=len(stats), cols=2)
             table.style = 'Light Grid Accent 1'
             for i, (key, value) in enumerate(stats.items()):
-                table.rows[i].cells[0].text = str(key).replace('_', ' ').title()
-                table.rows[i].cells[1].text = str(value)
+                if key != 'complexity_distribution':
+                    table.rows[i].cells[0].text = str(key).replace('_', ' ').title()
+                    table.rows[i].cells[1].text = str(value)
             
             doc.add_page_break()
             
@@ -548,7 +903,17 @@ For each phase include:
                 comp = comp_data['component']
                 doc.add_heading(f"2.{i+1} {comp['name']}", 2)
                 doc.add_paragraph(f"Type: {comp['type']} | Complexity: {comp['complexity']} | Called: {comp['call_count']} times")
-                doc.add_paragraph(comp_data['documentation'])
+                doc.add_paragraph(comp_data.get('documentation', 'N/A'))
+                
+                # Add component diagram
+                if comp_data.get('diagram'):
+                    diagram_path = f"component_{i}_diagram.png"
+                    if self.render_graphviz_to_image(comp_data['diagram'], diagram_path):
+                        doc.add_picture(diagram_path, width=Inches(5))
+                    else:
+                        doc.add_paragraph('Component Diagram (Graphviz):', style='Intense Quote')
+                        p = doc.add_paragraph(comp_data['diagram'][:200] + '...')
+                        p.style = 'Code'
             
             doc.add_page_break()
             
@@ -557,32 +922,70 @@ For each phase include:
             for i, flow_data in enumerate(report['process_flows'][:5]):
                 flow = flow_data['flow']
                 doc.add_heading(f"3.{i+1} {flow['name']}", 2)
-                doc.add_paragraph(flow_data['documentation'])
+                doc.add_paragraph(flow_data.get('documentation', 'N/A'))
+                
+                # Add process flow diagram
+                if flow_data.get('diagram'):
+                    diagram_path = f"flow_{i}_diagram.png"
+                    if self.render_graphviz_to_image(flow_data['diagram'], diagram_path):
+                        doc.add_picture(diagram_path, width=Inches(6))
+                    else:
+                        doc.add_paragraph('Process Flow Diagram (Graphviz):', style='Intense Quote')
+                        p = doc.add_paragraph(flow_data['diagram'][:200] + '...')
+                        p.style = 'Code'
             
             doc.add_page_break()
             
             # 4. Data Flow Analysis
             doc.add_heading('4. Data Flow Analysis', 1)
-            doc.add_paragraph(report['data_flow_analysis'])
+            doc.add_paragraph(report.get('data_flow_analysis', 'N/A'))
             
             doc.add_page_break()
             
             # 5. Microservices Candidates
             doc.add_heading('5. Microservices Candidates', 1)
-            for candidate in report['microservices_candidates'][:5]:
-                doc.add_heading(f"5.{candidate['capability']}", 2)
-                doc.add_paragraph(f"Components: {len(candidate['components'])}")
-                doc.add_paragraph(candidate['analysis'])
+            microservices_data = report.get('microservices_candidates', {})
+            
+            # Add microservices diagram
+            if isinstance(microservices_data, dict) and microservices_data.get('diagram'):
+                doc.add_heading('5.1 Proposed Microservices Architecture', 2)
+                diagram_path = 'microservices_diagram.png'
+                if self.render_graphviz_to_image(microservices_data['diagram'], diagram_path):
+                    doc.add_picture(diagram_path, width=Inches(6.5))
+                else:
+                    doc.add_paragraph('Microservices Architecture (Graphviz):', style='Intense Quote')
+                    p = doc.add_paragraph(microservices_data['diagram'][:300] + '...')
+                    p.style = 'Code'
+                
+                doc.add_heading('5.2 Service Details', 2)
+                candidates = microservices_data.get('candidates', [])
+            else:
+                candidates = microservices_data if isinstance(microservices_data, list) else []
+            
+            for candidate in candidates[:5]:
+                doc.add_heading(f"5.2.{candidate.get('capability', 'Unknown')}", 3)
+                doc.add_paragraph(f"Components: {len(candidate.get('components', []))}")
+                doc.add_paragraph(candidate.get('analysis', 'N/A'))
             
             doc.add_page_break()
             
             # 6. Modernization Roadmap
             doc.add_heading('6. Modernization Roadmap', 1)
-            doc.add_paragraph(report['modernization_roadmap'])
+            doc.add_paragraph(report.get('modernization_roadmap', 'N/A'))
             
             # Save document
             doc.save(output_file)
             logger.info(f"Word document saved to {output_file}")
+            
+            # Note about diagram rendering
+            doc_note = """
+NOTE: Diagrams are included as images if Graphviz is installed.
+To render diagrams manually:
+1. Install Graphviz: npm install -g @mermaid-js/Graphviz
+2. Render .mmd files: dot -Tpng diagram.dot -o diagram.png
+Or view online: https://dreampuf.github.io/GraphvizOnline/
+"""
+            logger.info(doc_note)
             
         except ImportError:
             logger.warning("python-docx not installed. Skipping Word document generation.")
