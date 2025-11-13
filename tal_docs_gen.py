@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-TAL DDG (Documentation Generation) Tool
-Walks through TAL knowledge graph and generates comprehensive architecture documentation
-using LLM analysis.
+TAL DDG with Source Code Analysis
+Includes actual TAL procedure code in LLM prompts for deep analysis
 """
 
 import json
@@ -13,7 +12,6 @@ from dataclasses import dataclass, asdict
 from collections import defaultdict
 import logging
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -22,12 +20,13 @@ logger = logging.getLogger(__name__)
 class ArchitectureComponent:
     """Represents a component in the architecture"""
     name: str
-    type: str  # procedure, module, service, etc.
+    type: str
     description: str
     dependencies: List[str]
     call_count: int
-    complexity: str  # low, medium, high
+    complexity: str
     business_capability: str
+    source_code: Optional[str] = None  # NEW: actual code
 
 
 @dataclass
@@ -41,16 +40,20 @@ class ProcessFlow:
 
 
 class TALDocumentationGenerator:
-    """Main class for generating architecture documentation from TAL knowledge graph"""
+    """Generate documentation from TAL knowledge graph with source code analysis"""
     
-    def __init__(self, graph_path: Optional[str] = None):
+    def __init__(self, graph_path: Optional[str] = None, source_dir: Optional[str] = None):
         """
         Initialize the documentation generator
         
         Args:
-            graph_path: Path to the knowledge graph file (GraphML or JSON)
+            graph_path: Path to knowledge graph (GraphML or JSON)
+            source_dir: Path to directory containing TAL source files
         """
         self.graph = None
+        self.graph_data = None
+        self.source_dir = Path(source_dir) if source_dir else None
+        self.source_cache = {}  # Cache loaded source files
         self.components = []
         self.process_flows = []
         self.statistics = {}
@@ -65,12 +68,12 @@ class TALDocumentationGenerator:
         path = Path(graph_path)
         if path.suffix == '.graphml':
             self.graph = nx.read_graphml(graph_path)
+            self.graph_data = nx.node_link_data(self.graph)
         elif path.suffix == '.json':
             with open(graph_path, 'r') as f:
                 data = json.load(f)
+                self.graph_data = data
                 
-                # NetworkX node_link_graph expects 'links' key for edges
-                # Handle common variations: 'edges', 'links', 'relationships'
                 edge_key = None
                 for key in ['links', 'edges', 'relationships']:
                     if key in data:
@@ -78,23 +81,19 @@ class TALDocumentationGenerator:
                         break
                 
                 if edge_key is None:
-                    raise ValueError("JSON must contain 'links', 'edges', or 'relationships' key for graph edges")
+                    raise ValueError("JSON must contain 'links', 'edges', or 'relationships' key")
                 
-                # Ensure 'nodes' key exists
                 if 'nodes' not in data:
                     raise ValueError("JSON must contain 'nodes' key")
                 
-                # Create a clean data structure for NetworkX
-                # This avoids issues with modifying the original dict
                 clean_data = {
                     'directed': data.get('directed', True),
                     'multigraph': data.get('multigraph', False),
                     'graph': data.get('graph', {}),
                     'nodes': data['nodes'],
-                    'links': data[edge_key]  # Always use 'links' for NetworkX
+                    'links': data[edge_key]
                 }
                 
-                # Handle null directed value
                 if clean_data['directed'] is None:
                     clean_data['directed'] = True
                     logger.warning("'directed' key was null, assuming directed graph")
@@ -104,42 +103,110 @@ class TALDocumentationGenerator:
             raise ValueError(f"Unsupported graph format: {path.suffix}")
         
         logger.info(f"Loaded graph with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges")
+        
+        if self.source_dir:
+            logger.info(f"Source directory: {self.source_dir}")
+            self._load_source_files()
+    
+    def _load_source_files(self):
+        """Load TAL source files from source directory"""
+        if not self.source_dir or not self.source_dir.exists():
+            logger.warning(f"Source directory not found: {self.source_dir}")
+            return
+        
+        logger.info("Loading TAL source files...")
+        
+        # Find all .tal files
+        tal_files = list(self.source_dir.rglob("*.tal")) + list(self.source_dir.rglob("*.TAL"))
+        logger.info(f"Found {len(tal_files)} TAL source files")
+        
+        # Load each file
+        for tal_file in tal_files:
+            try:
+                with open(tal_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    # Store by filename (without extension)
+                    name = tal_file.stem.upper()
+                    self.source_cache[name] = content
+                    
+            except Exception as e:
+                logger.warning(f"Could not read {tal_file}: {e}")
+        
+        logger.info(f"Loaded {len(self.source_cache)} source files into cache")
+    
+    def _get_source_code(self, procedure_name: str, max_lines: int = 200) -> Optional[str]:
+        """
+        Get source code for a procedure
+        
+        Args:
+            procedure_name: Name of the procedure
+            max_lines: Maximum lines to return (for token efficiency)
+        
+        Returns:
+            Source code or None if not found
+        """
+        # Try exact match
+        if procedure_name in self.source_cache:
+            code = self.source_cache[procedure_name]
+            lines = code.split('\n')
+            if len(lines) > max_lines:
+                truncated = '\n'.join(lines[:max_lines])
+                return f"{truncated}\n\n... [truncated - {len(lines)} total lines]"
+            return code
+        
+        # Try case-insensitive match
+        for name, code in self.source_cache.items():
+            if name.upper() == procedure_name.upper():
+                lines = code.split('\n')
+                if len(lines) > max_lines:
+                    truncated = '\n'.join(lines[:max_lines])
+                    return f"{truncated}\n\n... [truncated - {len(lines)} total lines]"
+                return code
+        
+        return None
+    
+    def _extract_graph_context(self, nodes_limit: int = 50, edges_limit: int = 100) -> Dict[str, Any]:
+        """Extract graph structure as rich context for LLM"""
+        edge_key = 'edges' if 'edges' in self.graph_data else 'links'
+        
+        context = {
+            'total_nodes': len(self.graph_data.get('nodes', [])),
+            'total_edges': len(self.graph_data.get(edge_key, [])),
+            'nodes': self.graph_data.get('nodes', [])[:nodes_limit],
+            'edges': self.graph_data.get(edge_key, [])[:edges_limit],
+            'graph_metadata': self.graph_data.get('graph', {})
+        }
+        
+        return context
     
     def analyze_graph(self):
         """Analyze the knowledge graph and extract architectural information"""
         logger.info("Analyzing knowledge graph...")
         
-        # Extract components
         self.components = self._extract_components()
-        
-        # Identify process flows
         self.process_flows = self._identify_process_flows()
-        
-        # Calculate statistics
         self.statistics = self._calculate_statistics()
         
         logger.info(f"Found {len(self.components)} components and {len(self.process_flows)} process flows")
+        
+        # Count how many have source code
+        with_code = sum(1 for c in self.components if c.source_code)
+        logger.info(f"Found source code for {with_code}/{len(self.components)} components")
     
     def _extract_components(self) -> List[ArchitectureComponent]:
         """Extract architectural components from the graph"""
         components = []
         
         for node, data in self.graph.nodes(data=True):
-            # Get node attributes
             node_type = data.get('type', 'unknown')
             
-            # Skip system intrinsics or utility nodes
             if node_type in ['intrinsic', 'system', 'utility']:
                 continue
             
-            # Get dependencies (outgoing edges)
             dependencies = list(self.graph.successors(node))
-            
-            # Calculate in-degree (how many times this is called)
             call_count = self.graph.in_degree(node)
-            
-            # Determine complexity based on out-degree and call patterns
             out_degree = self.graph.out_degree(node)
+            
             if out_degree > 10 or call_count > 20:
                 complexity = "high"
             elif out_degree > 5 or call_count > 10:
@@ -147,18 +214,21 @@ class TALDocumentationGenerator:
             else:
                 complexity = "low"
             
+            # Load source code
+            source_code = self._get_source_code(node)
+            
             component = ArchitectureComponent(
                 name=node,
                 type=node_type,
                 description=data.get('description', ''),
-                dependencies=dependencies[:10],  # Limit for readability
+                dependencies=dependencies[:10],
                 call_count=call_count,
                 complexity=complexity,
-                business_capability=data.get('business_capability', 'unknown')
+                business_capability=data.get('business_capability', 'unknown'),
+                source_code=source_code
             )
             components.append(component)
         
-        # Sort by call count (most called first)
         components.sort(key=lambda x: x.call_count, reverse=True)
         return components
     
@@ -166,19 +236,17 @@ class TALDocumentationGenerator:
         """Identify key process flows through the system"""
         flows = []
         
-        # Find entry points (nodes with high out-degree and low in-degree)
         entry_points = [
             node for node, in_deg in self.graph.in_degree()
             if in_deg <= 2 and self.graph.out_degree(node) >= 3
         ]
         
-        for entry_point in entry_points[:10]:  # Limit to top 10 entry points
-            # Perform BFS to trace the flow
+        for entry_point in entry_points[:10]:
             steps = []
             visited = set()
             queue = [(entry_point, 0)]
             
-            while queue and len(steps) < 20:  # Limit flow depth
+            while queue and len(steps) < 20:
                 current, depth = queue.pop(0)
                 if current in visited:
                     continue
@@ -193,12 +261,11 @@ class TALDocumentationGenerator:
                     'description': node_data.get('description', '')
                 })
                 
-                # Add successors to queue
                 for successor in self.graph.successors(current):
                     if successor not in visited:
                         queue.append((successor, depth + 1))
             
-            if len(steps) >= 3:  # Only include meaningful flows
+            if len(steps) >= 3:
                 flow = ProcessFlow(
                     name=f"Flow from {entry_point}",
                     entry_point=entry_point,
@@ -218,20 +285,21 @@ class TALDocumentationGenerator:
             'avg_dependencies': sum(d for n, d in self.graph.out_degree()) / max(self.graph.number_of_nodes(), 1),
             'max_dependencies': max(d for n, d in self.graph.out_degree()) if self.graph.number_of_nodes() > 0 else 0,
             'most_called': max(self.graph.in_degree(), key=lambda x: x[1])[0] if self.graph.number_of_nodes() > 0 else None,
-            'complexity_distribution': {}  # Use regular dict instead of defaultdict for JSON serialization
+            'complexity_distribution': {}
         }
         
-        # Calculate complexity distribution
         complexity_counts = defaultdict(int)
         for comp in self.components:
             complexity_counts[comp.complexity] += 1
         
-        # Convert to regular dict for JSON serialization
         stats['complexity_distribution'] = dict(complexity_counts)
         
-        # Identify strongly connected components (circular dependencies)
         strongly_connected = list(nx.strongly_connected_components(self.graph))
         stats['circular_dependency_groups'] = len([c for c in strongly_connected if len(c) > 1])
+        
+        # Add source code statistics
+        stats['procedures_with_source'] = sum(1 for c in self.components if c.source_code)
+        stats['source_coverage'] = stats['procedures_with_source'] / max(len(self.components), 1)
         
         return stats
     
@@ -246,14 +314,11 @@ class TALDocumentationGenerator:
             max_tokens: Maximum tokens in response
         
         Returns:
-            LLM response text (always returns a string, never None)
+            LLM response text
         """
-        # This will be replaced with actual OpenAI API call at work
-        # For now, return a placeholder
-        
         try:
-            # PLACEHOLDER - Replace with actual API call
-            # Example implementation for OpenAI:
+            # PLACEHOLDER - Replace with actual API call at work
+            # Example implementation:
             """
             import openai
             
@@ -267,558 +332,572 @@ class TALDocumentationGenerator:
                 max_tokens=max_tokens
             )
             
-            content = response.choices[0].message.content
-            # Safety check: ensure we always return a string
-            if content is None:
-                return "Error: LLM returned None"
-            return content
-            """
-            
-            # Example implementation for Anthropic Claude:
-            """
-            import anthropic
-            
-            client = anthropic.Anthropic(api_key="your-api-key")
-            
-            message = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system_prompt,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            # Extract text from response
-            content = message.content[0].text if message.content else None
-            # Safety check: ensure we always return a string
-            if content is None:
-                return "Error: LLM returned None"
-            return content
+            return response.choices[0].message.content
             """
             
             logger.warning("LLM call placeholder - implement actual API call")
-            return f"[LLM Response Placeholder]\nPrompt: {prompt[:100]}..."
+            return f"[LLM Response Placeholder]\nPrompt length: {len(prompt)} chars\nFirst 200 chars: {prompt[:200]}..."
             
         except Exception as e:
             logger.error(f"Error calling LLM: {e}")
-            return f"Error: {str(e)}"
+            return f"Error: {e}"
     
-    def generate_diagram_graphviz(self, diagram_type: str, context: Dict[str, Any]) -> str:
-        """
-        Generate Graphviz DOT diagram syntax using LLM
+    def generate_architecture_overview(self) -> str:
+        """Generate high-level architecture overview using LLM with full graph context"""
+        logger.info("Generating architecture overview with graph context...")
         
-        Args:
-            diagram_type: Type of diagram (architecture, component, process_flow, microservices)
-            context: Context data for diagram generation
+        graph_context = self._extract_graph_context(nodes_limit=30, edges_limit=50)
         
-        Returns:
-            Graphviz DOT syntax
-        """
-        
-        if diagram_type == "architecture":
-            prompt = f"""
-Generate a Graphviz DOT diagram showing the high-level architecture of this TAL payment system.
-
-COMPONENT TYPES:
-{json.dumps(context.get('component_types', {}), indent=2)}
-
-TOP COMPONENTS BY BUSINESS CAPABILITY:
-{json.dumps(context.get('capabilities', {}), indent=2)}
-
-Create a Graphviz digraph showing:
-1. Main business capability layers (use subgraphs/clusters)
-2. Key components in each layer
-3. Major data flows between layers (directed edges)
-4. Use different shapes: box for services, cylinder for databases, oval for processes
-5. Color code by layer: blue tones for payment, yellow for compliance, green for ledger
-
-IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
-Use this structure:
-```dot
-digraph Architecture {{
-    rankdir=TB;
-    node [shape=box, style=filled];
-    
-    subgraph cluster_payment {{
-        label="Payment Layer";
-        color=lightblue;
-        // components here
-    }}
-    
-    // edges showing data flow
-}}
-```
-"""
-        
-        elif diagram_type == "process_flow":
-            prompt = f"""
-Generate a Graphviz DOT flowchart showing this process flow:
-
-FLOW: {context.get('flow_name')}
-STEPS: {json.dumps(context.get('steps', []), indent=2)}
-DECISION POINTS: {json.dumps(context.get('decision_points', []), indent=2)}
-
-Create a Graphviz digraph showing:
-1. Process start (oval/ellipse shape)
-2. Each step (box shape)
-3. Decision points (diamond shape)
-4. Alternative paths with labeled edges
-5. End points (oval/ellipse shape)
-6. Color code: green for start, red for errors, blue for normal flow
-
-IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
-Use this structure:
-```dot
-digraph ProcessFlow {{
-    rankdir=TB;
-    node [shape=box, style=filled, fillcolor=lightblue];
-    
-    start [label="Start", shape=ellipse, fillcolor=lightgreen];
-    step1 [label="Step 1"];
-    decision1 [label="Decision?", shape=diamond, fillcolor=lightyellow];
-    
-    start -> step1;
-    step1 -> decision1;
-    decision1 -> step2 [label="Yes"];
-    decision1 -> error [label="No"];
-}}
-```
-"""
-        
-        elif diagram_type == "component":
-            prompt = f"""
-Generate a Graphviz DOT component diagram for this component:
-
-COMPONENT: {context.get('name')}
-TYPE: {context.get('type')}
-DEPENDENCIES: {json.dumps(context.get('dependencies', []), indent=2)}
-CALLED BY: {json.dumps(context.get('callers', []), indent=2)}
-
-Create a Graphviz digraph showing:
-1. The main component (highlighted/different color)
-2. Components that call it (callers) - connect with arrows TO the main component
-3. Its dependencies (components it calls) - connect with arrows FROM the main component
-4. Use different colors: orange for main component, light blue for callers, light green for dependencies
-
-IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
-Use this structure:
-```dot
-digraph ComponentDependencies {{
-    rankdir=LR;
-    node [shape=box, style=filled];
-    
-    // Main component
-    "{context.get('name')}" [fillcolor=orange];
-    
-    // Callers
-    // caller1 [fillcolor=lightblue];
-    
-    // Dependencies  
-    // dep1 [fillcolor=lightgreen];
-    
-    // Edges
-    // caller1 -> "{context.get('name')}";
-    // "{context.get('name')}" -> dep1;
-}}
-```
-"""
-        
-        elif diagram_type == "microservices":
-            prompt = f"""
-Generate a Graphviz DOT diagram showing the proposed microservices architecture:
-
-IDENTIFIED SERVICES:
-{json.dumps(context.get('services', []), indent=2)}
-
-Create a Graphviz digraph showing:
-1. Each proposed microservice as a cluster/subgraph
-2. Key components within each service
-3. REST API calls between services (solid arrows)
-4. Event-driven communication (dashed arrows)
-5. Databases (cylinder shape)
-6. Color code each service cluster differently
-
-IMPORTANT: Return ONLY valid Graphviz DOT code wrapped in ```dot and ```.
-Use this structure:
-```dot
-digraph MicroservicesArchitecture {{
-    rankdir=TB;
-    node [shape=box, style=filled];
-    
-    subgraph cluster_service1 {{
-        label="Payment Service";
-        color=lightblue;
-        style=filled;
-        fillcolor=aliceblue;
-        
-        payment_api [label="Payment API"];
-        // other components
-    }}
-    
-    subgraph cluster_service2 {{
-        label="Compliance Service";
-        color=lightyellow;
-        style=filled;
-        fillcolor=lightyellow;
-        
-        compliance_api [label="Compliance API"];
-    }}
-    
-    // API calls
-    payment_api -> compliance_api [label="REST"];
-    
-    // Events
-    payment_api -> event_bus [style=dashed, label="Event"];
-}}
-```
-"""
-        
-        else:
-            return f'digraph {{ "Diagram type not supported: {diagram_type}" }}'
-        
-        system_prompt = """You are a technical architect generating Graphviz DOT diagrams. 
-Return ONLY valid Graphviz DOT syntax wrapped in ```dot code blocks. 
-Use clear, concise labels. Follow proper DOT syntax with semicolons and proper clustering.
-Use appropriate shapes: box, ellipse, diamond, cylinder, component.
-Use colors to distinguish different types of nodes."""
-        
-        response = self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=1500)
-        
-        # Safety check: ensure response is a string
-        if response is None:
-            logger.warning("LLM returned None, returning empty diagram")
-            return f'digraph {{ "No diagram generated - LLM returned None" }}'
-        
-        if not isinstance(response, str):
-            logger.warning(f"LLM returned non-string type: {type(response)}")
-            response = str(response)
-        
-        # Extract DOT code from response
-        if "```dot" in response:
-            start = response.find("```dot") + len("```dot")
-            end = response.find("```", start)
-            if end > start:
-                return response[start:end].strip()
-        elif "```" in response:
-            # Try to find any code block
-            start = response.find("```") + 3
-            end = response.find("```", start)
-            if end > start:
-                code = response[start:end].strip()
-                # Check if it starts with digraph
-                if code.strip().startswith('digraph'):
-                    return code
-        
-        # Return as-is if no code blocks found
-        return response.strip()
-    
-    def generate_architecture_overview(self) -> Dict[str, Any]:
-        """Generate high-level architecture overview using LLM with diagrams"""
-        logger.info("Generating architecture overview...")
-        
-        # Prepare context for LLM
         component_types = defaultdict(int)
         for comp in self.components:
             component_types[comp.type] += 1
         
-        context = {
-            'statistics': self.statistics,
-            'top_components': [asdict(c) for c in self.components[:20]],
-            'component_types': dict(component_types)  # Convert to regular dict
-        }
-        
-        # Group by business capability
         capabilities = defaultdict(list)
         for comp in self.components[:30]:
             capabilities[comp.business_capability].append(comp.name)
         
+        # Include sample source code snippets
+        code_samples = []
+        for comp in self.components[:3]:
+            if comp.source_code:
+                # Get first 30 lines as sample
+                lines = comp.source_code.split('\n')[:30]
+                code_samples.append({
+                    'name': comp.name,
+                    'snippet': '\n'.join(lines)
+                })
+        
         prompt = f"""
-Based on the following TAL codebase analysis, provide a comprehensive architecture overview:
+Analyze this TAL payment processing system and provide a comprehensive architecture overview.
 
-STATISTICS:
+=== GRAPH STRUCTURE ===
+Total Nodes: {graph_context['total_nodes']}
+Total Edges: {graph_context['total_edges']}
+
+Sample Nodes (with attributes):
+{json.dumps(graph_context['nodes'][:15], indent=2)}
+
+Sample Edges (call relationships):
+{json.dumps(graph_context['edges'][:20], indent=2)}
+
+=== STATISTICS ===
 - Total Procedures: {self.statistics['total_procedures']}
 - Total Call Relationships: {self.statistics['total_calls']}
-- Average Dependencies per Procedure: {self.statistics['avg_dependencies']:.2f}
+- Average Dependencies: {self.statistics['avg_dependencies']:.2f}
 - Maximum Dependencies: {self.statistics['max_dependencies']}
-- Circular Dependency Groups: {self.statistics.get('circular_dependency_groups', 0)}
+- Most Called: {self.statistics.get('most_called', 'N/A')}
+- Circular Dependencies: {self.statistics.get('circular_dependency_groups', 0)}
+- Source Code Coverage: {self.statistics.get('source_coverage', 0):.1%}
 
-COMPONENT TYPES:
-{json.dumps(dict(context['component_types']), indent=2)}
+=== COMPONENT TYPES ===
+{json.dumps(dict(component_types), indent=2)}
 
-TOP 20 MOST CRITICAL COMPONENTS:
-{json.dumps(context['top_components'][:10], indent=2)}
+=== TOP CRITICAL COMPONENTS ===
+{json.dumps([asdict(c) for c in self.components[:10]], indent=2, default=str)}
 
-Please provide:
-1. Overall architecture description (2-3 paragraphs)
-2. Key architectural patterns observed
-3. Main subsystems and their purposes
-4. Integration points and dependencies
-5. Architectural strengths and weaknesses
+=== BUSINESS CAPABILITIES ===
+{json.dumps({k: v[:5] for k, v in capabilities.items()}, indent=2)}
+
+=== SAMPLE TAL CODE (for context) ===
+{json.dumps(code_samples, indent=2)}
+
+Based on this TAL codebase structure and actual source code, provide:
+
+1. **Architecture Overview** (3-4 paragraphs)
+   - System purpose and design
+   - Architectural patterns observed in code
+   - Component organization
+
+2. **Key Subsystems**
+   - Identify subsystems from capabilities
+   - Purpose and implementation approach
+   - Key procedures
+
+3. **Integration Points**
+   - How subsystems communicate
+   - Data flow patterns seen in code
+   - Critical integration procedures
+
+4. **Code Quality & Complexity**
+   - Code structure observations
+   - Complexity hotspots
+   - Technical debt indicators
+
+5. **Architectural Assessment**
+   - Strengths
+   - Weaknesses
+   - Modernization opportunities
+
+Format as clear markdown with headers.
 """
         
-        system_prompt = """You are a senior software architect analyzing a legacy TAL (Transaction Application Language) 
-payment processing system. Provide clear, technical, and actionable insights."""
+        system_prompt = """You are a senior software architect with 20+ years analyzing legacy TAL (Transaction Application Language) payment systems. You have access to both the call graph AND actual source code. Provide specific, code-informed insights referencing actual procedures and patterns you observe."""
         
-        overview_text = self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=2000)
-        
-        # Generate architecture diagram
-        logger.info("Generating architecture diagram...")
-        diagram_context = {
-            'component_types': dict(context['component_types']),
-            'capabilities': {k: v[:5] for k, v in capabilities.items()}  # Top 5 per capability
-        }
-        architecture_diagram = self.generate_diagram_graphviz("architecture", diagram_context)
-        
-        return {
-            'overview': overview_text,
-            'diagram': architecture_diagram
-        }
+        return self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=3500)
     
-    def generate_component_documentation(self, component: ArchitectureComponent) -> Dict[str, Any]:
-        """Generate detailed documentation for a component with diagram"""
+    def generate_component_documentation(self, component: ArchitectureComponent) -> str:
+        """Generate detailed documentation for a component using actual source code"""
+        
+        callers = [n for n in self.graph.nodes() if component.name in list(self.graph.successors(n))]
+        
+        dependency_details = []
+        for dep in component.dependencies[:8]:
+            if dep in self.graph.nodes:
+                dep_data = self.graph.nodes[dep]
+                dependency_details.append({
+                    'name': dep,
+                    'type': dep_data.get('type', 'unknown'),
+                    'capability': dep_data.get('business_capability', 'unknown'),
+                    'description': dep_data.get('description', '')
+                })
+        
+        # Include dependency source code for deeper analysis
+        dependency_code = []
+        for dep in component.dependencies[:3]:
+            dep_code = self._get_source_code(dep, max_lines=50)
+            if dep_code:
+                dependency_code.append({
+                    'name': dep,
+                    'code': dep_code
+                })
         
         prompt = f"""
-Analyze this TAL component and provide detailed documentation:
+Analyze this TAL component in detail with access to actual source code:
 
-COMPONENT: {component.name}
-TYPE: {component.type}
-COMPLEXITY: {component.complexity}
-TIMES CALLED: {component.call_count}
-DEPENDENCIES: {len(component.dependencies)}
-BUSINESS CAPABILITY: {component.business_capability}
+=== COMPONENT DETAILS ===
+Name: {component.name}
+Type: {component.type}
+Business Capability: {component.business_capability}
+Complexity: {component.complexity}
+Times Called: {component.call_count}
+Dependencies: {len(component.dependencies)}
 
-KEY DEPENDENCIES: {', '.join(component.dependencies[:5])}
+=== ACTUAL SOURCE CODE ===
+```tal
+{component.source_code if component.source_code else '[Source code not available]'}
+```
 
-Provide:
-1. Purpose and functionality (2-3 sentences)
-2. Role in the overall architecture
-3. Key dependencies and why they're needed
-4. Potential modernization recommendations
+=== CALLERS (who calls this) ===
+{json.dumps(callers[:10], indent=2)}
+
+=== DEPENDENCIES (what this calls) ===
+{json.dumps(dependency_details, indent=2)}
+
+=== SAMPLE DEPENDENCY CODE (for context) ===
+{json.dumps(dependency_code, indent=2)}
+
+=== NODE ATTRIBUTES ===
+{json.dumps(dict(self.graph.nodes[component.name]), indent=2)}
+
+Provide comprehensive, code-informed documentation:
+
+1. **Purpose and Functionality**
+   - What does the code actually do?
+   - Key algorithms and logic
+   - Business rules implemented
+
+2. **Code Structure Analysis**
+   - Variables and data structures used
+   - Control flow patterns
+   - Error handling approach
+
+3. **Role in Architecture**
+   - Position in call hierarchy
+   - Integration patterns
+   - Criticality (called {component.call_count} times)
+
+4. **Dependencies Analysis**
+   - Why each dependency is called (based on code)
+   - Data passed to dependencies
+   - Integration patterns
+
+5. **Callers Analysis**
+   - Who relies on this
+   - How it's used
+   - Impact if modified/fails
+
+6. **Code Quality Assessment**
+   - Complexity indicators
+   - Maintainability concerns
+   - Technical debt
+
+7. **Modernization Recommendations**
+   - Refactoring opportunities
+   - API design suggestions
+   - Migration strategy
+   - Microservice extraction approach
+
+Be specific, reference actual code patterns, variable names, and logic.
 """
         
-        system_prompt = "You are documenting legacy TAL payment processing code. Be specific and technical."
+        system_prompt = "You are documenting legacy TAL payment processing code for modernization. Analyze actual source code to provide specific, actionable insights."
         
-        documentation = self.call_llm(prompt, system_prompt, temperature=0.5, max_tokens=800)
-        
-        # Generate component diagram if it has dependencies
-        diagram = None
-        if len(component.dependencies) > 0:
-            # Get callers (reverse lookup)
-            callers = [n for n in self.graph.nodes() if component.name in list(self.graph.successors(n))]
-            
-            diagram_context = {
-                'name': component.name,
-                'type': component.type,
-                'dependencies': component.dependencies[:8],
-                'callers': callers[:5]
-            }
-            diagram = self.generate_diagram_graphviz("component", diagram_context)
-        
-        return {
-            'documentation': documentation,
-            'diagram': diagram
-        }
+        return self.call_llm(prompt, system_prompt, temperature=0.5, max_tokens=2000)
     
-    def generate_process_flow_documentation(self, flow: ProcessFlow) -> Dict[str, Any]:
-        """Generate documentation for a process flow with diagram"""
+    def generate_process_flow_documentation(self, flow: ProcessFlow) -> str:
+        """Generate documentation for a process flow with actual code"""
         
-        flow_steps = "\n".join([f"{i+1}. {step['node']} ({step['type']})" 
-                                for i, step in enumerate(flow.steps[:10])])
+        detailed_steps = []
+        for step in flow.steps[:12]:
+            node_name = step['node']
+            if node_name in self.graph.nodes:
+                node_data = dict(self.graph.nodes[node_name])
+                # Get code snippet for this step
+                code = self._get_source_code(node_name, max_lines=30)
+                detailed_steps.append({
+                    'node': node_name,
+                    'type': step['type'],
+                    'depth': step['depth'],
+                    'attributes': node_data,
+                    'out_degree': self.graph.out_degree(node_name),
+                    'in_degree': self.graph.in_degree(node_name),
+                    'code_snippet': code[:500] if code else None  # First 500 chars
+                })
         
         prompt = f"""
-Document this process flow from the TAL payment system:
+Document this process flow with access to actual TAL source code:
 
-FLOW NAME: {flow.name}
-ENTRY POINT: {flow.entry_point}
-NUMBER OF STEPS: {len(flow.steps)}
-DECISION POINTS: {len(flow.decision_points)}
+=== FLOW OVERVIEW ===
+Name: {flow.name}
+Entry Point: {flow.entry_point}
+Total Steps: {len(flow.steps)}
+Decision Points: {len(flow.decision_points)}
 
-FLOW SEQUENCE:
-{flow_steps}
+=== DETAILED FLOW WITH CODE ===
+{json.dumps(detailed_steps, indent=2)}
 
-DECISION POINTS: {', '.join(flow.decision_points[:5])}
+=== DECISION POINTS ===
+{json.dumps(flow.decision_points[:5], indent=2)}
 
-Provide:
-1. Business process description (what does this flow accomplish?)
-2. Step-by-step explanation of the main path
-3. Key decision points and their impact
-4. Data transformations in this flow
-5. Error handling considerations
+=== DATA FLOW PATH ===
+{' -> '.join(flow.data_flow[:15])}
+
+Provide comprehensive, code-informed process documentation:
+
+1. **Business Process Description**
+   - What business operation based on code?
+   - When triggered?
+   - Expected outcomes
+
+2. **Step-by-Step Flow**
+   - Describe each step with code insights
+   - Data transformations (based on actual code)
+   - State changes
+
+3. **Decision Points Analysis**
+   - Branching conditions (from code)
+   - Alternative paths
+   - Error handling logic
+
+4. **Data Flow**
+   - Input data (variables, structures)
+   - Transformations at each step
+   - Output data produced
+
+5. **Integration Points**
+   - External system calls
+   - Database operations
+   - Message passing
+
+6. **Error Handling**
+   - Error detection in code
+   - Rollback mechanisms
+   - Recovery procedures
+
+7. **Performance & Optimization**
+   - Potential bottlenecks from code
+   - Optimization opportunities
+   - Scalability concerns
+
+Reference actual code patterns, variables, and logic flow.
 """
         
-        system_prompt = "You are a business analyst documenting payment processing workflows."
-        
-        documentation = self.call_llm(prompt, system_prompt, temperature=0.5, max_tokens=1000)
-        
-        # Generate process flow diagram
-        diagram_context = {
-            'flow_name': flow.name,
-            'steps': [{'name': s['node'], 'type': s['type']} for s in flow.steps[:12]],
-            'decision_points': flow.decision_points[:5]
-        }
-        diagram = self.generate_diagram_graphviz("process_flow", diagram_context)
-        
-        return {
-            'documentation': documentation,
-            'diagram': diagram
-        }
+        return self.call_llm(prompt, "You are a business analyst with deep TAL expertise documenting payment workflows.", temperature=0.5, max_tokens=2500)
     
     def identify_microservices_candidates(self) -> Dict[str, Any]:
-        """Use LLM to identify potential microservice boundaries with diagram"""
-        logger.info("Identifying microservice candidates...")
+        """Identify microservice candidates using graph and code analysis"""
+        logger.info("Identifying microservice candidates with code analysis...")
         
-        # Group components by business capability
         capabilities = defaultdict(list)
         for comp in self.components:
             capabilities[comp.business_capability].append(comp)
         
         candidates = []
-        service_summary = []
         
         for capability, comps in capabilities.items():
-            if len(comps) < 3:  # Skip small groups
+            if len(comps) < 3:
                 continue
+            
+            # Calculate metrics
+            internal_calls = 0
+            external_calls = 0
+            external_deps = defaultdict(int)
+            
+            comp_names = {c.name for c in comps}
+            for comp in comps:
+                for dep in self.graph.successors(comp.name):
+                    if dep in comp_names:
+                        internal_calls += 1
+                    else:
+                        external_calls += 1
+                        if dep in self.graph.nodes:
+                            dep_cap = self.graph.nodes[dep].get('business_capability', 'unknown')
+                            external_deps[dep_cap] += 1
+            
+            cohesion_ratio = internal_calls / max(internal_calls + external_calls, 1)
+            
+            # Get code samples
+            code_samples = []
+            for comp in comps[:3]:
+                if comp.source_code:
+                    lines = comp.source_code.split('\n')[:40]
+                    code_samples.append({
+                        'name': comp.name,
+                        'snippet': '\n'.join(lines)
+                    })
             
             context = {
                 'capability': capability,
                 'component_count': len(comps),
                 'total_calls': sum(c.call_count for c in comps),
-                'components': [c.name for c in comps[:10]]
+                'components': [asdict(c) for c in comps[:10]],
+                'internal_calls': internal_calls,
+                'external_calls': external_calls,
+                'cohesion_ratio': round(cohesion_ratio, 2),
+                'external_dependencies': dict(external_deps),
+                'code_available': sum(1 for c in comps if c.source_code)
             }
             
             prompt = f"""
-Evaluate this group of TAL components as a potential microservice:
+Evaluate this group as a microservice candidate with actual code analysis:
 
-BUSINESS CAPABILITY: {capability}
-NUMBER OF COMPONENTS: {len(comps)}
-TOTAL INCOMING CALLS: {context['total_calls']}
+=== SERVICE METRICS ===
+Capability: {capability}
+Components: {len(comps)}
+Incoming Calls: {context['total_calls']}
+Cohesion: {cohesion_ratio:.1%}
+Internal: {internal_calls} | External: {external_calls}
+Code Available: {context['code_available']}/{len(comps)}
 
-KEY COMPONENTS:
-{json.dumps(context['components'], indent=2)}
+=== COMPONENTS ===
+{json.dumps(context['components'], indent=2, default=str)}
 
-Assess:
-1. Is this a good microservice candidate? (Yes/No)
-2. Cohesion level (High/Medium/Low)
-3. Suggested service name
-4. API boundaries needed
-5. Data ownership scope
+=== EXTERNAL DEPENDENCIES ===
+{json.dumps(context['external_dependencies'], indent=2)}
+
+=== SAMPLE TAL CODE ===
+{json.dumps(code_samples, indent=2)}
+
+Assess based on code and structure:
+
+1. **Recommendation** (Yes/No/Maybe)
+   - Clear decision with code-based reasoning
+
+2. **Cohesion Analysis**
+   - Code patterns showing cohesion
+   - Shared data structures
+   - Related business logic
+
+3. **Coupling Analysis**
+   - Dependencies from code
+   - Data sharing patterns
+   - Transaction boundaries
+
+4. **Service Design**
+   - Service name
+   - API operations (from code)
+   - Data ownership
+   - Events to publish
+
+5. **Migration Strategy**
+   - Extraction difficulty
+   - Code refactoring needed
+   - Phased approach
+
+6. **Benefits & Risks**
+   - Specific benefits
+   - Code-based challenges
+   - Mitigation
+
+Reference actual code patterns and structures.
 """
             
-            response = self.call_llm(prompt, "You are a microservices architect.", temperature=0.3)
+            response = self.call_llm(prompt, "You are a microservices architect analyzing legacy code for extraction.", temperature=0.3, max_tokens=2000)
             
             candidates.append({
                 'capability': capability,
-                'components': [asdict(c) for c in comps[:10]],  # Convert to dicts for JSON serialization
+                'components': [asdict(c) for c in comps[:10]],
+                'metrics': context,
                 'analysis': response
             })
-            
-            # Collect for diagram
-            service_summary.append({
-                'name': capability.replace('_', ' ').title(),
-                'component_count': len(comps),
-                'key_components': [c.name for c in comps[:3]]
-            })
         
-        # Generate microservices architecture diagram
-        logger.info("Generating microservices architecture diagram...")
-        diagram_context = {
-            'services': service_summary[:8]  # Limit to top 8 for readability
-        }
-        diagram = self.generate_diagram_graphviz("microservices", diagram_context)
-        
-        return {
-            'candidates': candidates,
-            'diagram': diagram
-        }
+        return {'candidates': candidates}
     
     def generate_data_flow_analysis(self) -> str:
-        """Analyze data flows through the system"""
-        logger.info("Analyzing data flows...")
+        """Analyze data flows using graph and code"""
+        logger.info("Analyzing data flows with code context...")
         
-        # Find longest paths (representing major data flows)
-        try:
-            # For directed graphs, we look at paths from entry points
-            entry_points = [n for n in self.graph.nodes() if self.graph.in_degree(n) <= 1]
-            
-            sample_paths = []
-            for entry in entry_points[:5]:
-                # Get paths from this entry point
-                paths = nx.single_source_shortest_path(self.graph, entry, cutoff=8)
-                if paths:
-                    longest = max(paths.values(), key=len)
-                    if len(longest) > 3:
-                        sample_paths.append(longest)
-        except:
-            sample_paths = []
+        entry_points = [n for n in self.graph.nodes() if self.graph.in_degree(n) <= 1]
+        
+        sample_paths = []
+        for entry in entry_points[:5]:
+            paths = nx.single_source_shortest_path(self.graph, entry, cutoff=8)
+            if paths:
+                longest = max(paths.values(), key=len)
+                if len(longest) > 3:
+                    path_details = []
+                    for node in longest:
+                        path_details.append({
+                            'node': node,
+                            'type': self.graph.nodes[node].get('type', 'unknown'),
+                            'capability': self.graph.nodes[node].get('business_capability', 'unknown')
+                        })
+                    sample_paths.append(path_details)
+        
+        # Data hubs
+        hubs = []
+        for node, data in self.graph.nodes(data=True):
+            in_deg = self.graph.in_degree(node)
+            out_deg = self.graph.out_degree(node)
+            if in_deg >= 3 and out_deg >= 3:
+                code = self._get_source_code(node, max_lines=40)
+                hubs.append({
+                    'node': node,
+                    'type': data.get('type', 'unknown'),
+                    'capability': data.get('business_capability', 'unknown'),
+                    'in_degree': in_deg,
+                    'out_degree': out_deg,
+                    'has_code': code is not None,
+                    'code_snippet': code[:300] if code else None
+                })
         
         prompt = f"""
-Analyze data flows in this TAL payment processing system:
+Analyze data flows with actual code insights:
 
-STATISTICS:
-- Total Procedures: {self.statistics['total_procedures']}
-- Total Data Flow Paths: {self.statistics['total_calls']}
+=== SYSTEM OVERVIEW ===
+Total Procedures: {self.statistics['total_procedures']}
+Total Paths: {self.statistics['total_calls']}
+Avg Dependencies: {self.statistics['avg_dependencies']:.2f}
 
-SAMPLE DATA FLOW PATHS:
-{json.dumps([' -> '.join(path) for path in sample_paths[:5]], indent=2)}
+=== SAMPLE DATA FLOW PATHS ===
+{json.dumps(sample_paths, indent=2)}
 
-TOP DATA TRANSFORMATION POINTS:
-{json.dumps([c.name for c in self.components[:10]], indent=2)}
+=== DATA TRANSFORMATION HUBS ===
+{json.dumps(sorted(hubs, key=lambda x: x['in_degree'] + x['out_degree'], reverse=True)[:8], indent=2)}
 
-Provide:
-1. Main data flow patterns
-2. Data transformation stages
-3. Critical data processing nodes
-4. Data consistency mechanisms needed
-5. Recommended data architecture for modernization
+=== TOP DATA CONSUMERS ===
+{json.dumps([{'name': c.name, 'call_count': c.call_count, 'has_code': c.source_code is not None} for c in self.components[:10]], indent=2)}
+
+Provide code-informed data flow analysis:
+
+1. **Data Flow Patterns**
+   - Patterns from code
+   - Hub-spoke, pipeline, etc.
+   - Specific procedures
+
+2. **Data Transformations**
+   - Transformation stages
+   - Data structures used
+   - Validation points
+
+3. **Critical Hubs**
+   - Why they're hubs (from code)
+   - Data operations
+   - Failure impact
+
+4. **Data Consistency**
+   - Consistency mechanisms in code
+   - Transaction boundaries
+   - Compensation patterns
+
+5. **Data Issues**
+   - Coupling from code
+   - Shared state
+   - Quality concerns
+
+6. **Modernization**
+   - Event-driven opportunities
+   - Data ownership clarity
+   - API design
+   - Database decomposition
+   - CQRS patterns
+
+Reference actual code patterns and data structures.
 """
         
-        return self.call_llm(prompt, "You are a data architect analyzing payment systems.", temperature=0.4)
+        return self.call_llm(prompt, "You are a data architect analyzing payment system code.", temperature=0.4, max_tokens=2800)
     
     def generate_modernization_roadmap(self) -> str:
-        """Generate modernization recommendations"""
-        logger.info("Generating modernization roadmap...")
+        """Generate modernization roadmap with code insights"""
+        logger.info("Generating modernization roadmap with code analysis...")
+        
+        quick_wins = [c for c in self.components if c.complexity == 'low' and len(c.dependencies) <= 3][:10]
+        risky = [c for c in self.components if c.complexity == 'high' and len(c.dependencies) > 8][:10]
         
         prompt = f"""
-Create a modernization roadmap for this TAL legacy system:
+Create code-informed modernization roadmap:
 
-CURRENT STATE:
-- Total Procedures: {self.statistics['total_procedures']}
-- Average Dependencies: {self.statistics['avg_dependencies']:.2f}
-- Circular Dependencies: {self.statistics.get('circular_dependency_groups', 0)}
-- High Complexity Components: {self.statistics['complexity_distribution'].get('high', 0)}
-- Medium Complexity: {self.statistics['complexity_distribution'].get('medium', 0)}
-- Low Complexity: {self.statistics['complexity_distribution'].get('low', 0)}
+=== CURRENT STATE ===
+Total Procedures: {self.statistics['total_procedures']}
+Avg Dependencies: {self.statistics['avg_dependencies']:.2f}
+Circular Dependencies: {self.statistics.get('circular_dependency_groups', 0)}
+Complexity: High={self.statistics['complexity_distribution'].get('high', 0)}, Medium={self.statistics['complexity_distribution'].get('medium', 0)}, Low={self.statistics['complexity_distribution'].get('low', 0)}
+Source Coverage: {self.statistics.get('source_coverage', 0):.1%}
 
-ARCHITECTURE PATTERNS:
-- Component Types Identified: {len(set(c.type for c in self.components))}
-- Process Flows Mapped: {len(self.process_flows)}
+=== QUICK WINS (low complexity, low coupling) ===
+{json.dumps([{'name': c.name, 'has_code': c.source_code is not None} for c in quick_wins], indent=2)}
 
-Provide a phased modernization roadmap:
-1. **Phase 1** (Quick Wins - 0-6 months)
-2. **Phase 2** (Core Modernization - 6-18 months)
-3. **Phase 3** (Complete Migration - 18-36 months)
+=== HIGH RISK (high complexity, high coupling) ===
+{json.dumps([{'name': c.name, 'dependencies': len(c.dependencies), 'has_code': c.source_code is not None} for c in risky], indent=2)}
 
-For each phase include:
-- Key activities
-- Technologies to adopt
-- Risks and mitigation
-- Success metrics
+=== PATTERNS ===
+Component Types: {len(set(c.type for c in self.components))}
+Capabilities: {len(set(c.business_capability for c in self.components))}
+Process Flows: {len(self.process_flows)}
+
+Provide detailed, code-informed roadmap:
+
+## Phase 1: Foundation (0-6 months)
+
+### Activities
+- Specific procedures to modernize
+- Code refactoring priorities
+- Technology decisions
+
+### Success Metrics
+### Risks & Mitigation
+
+## Phase 2: Core (6-18 months)
+
+### Activities
+- Major refactoring
+- Service extraction
+- Data changes
+- Specific components
+
+### Technology Stack
+### Success Metrics
+### Risks & Mitigation
+
+## Phase 3: Migration (18-36 months)
+
+### Activities
+### Success Metrics
+### Risks & Mitigation
+
+## Investment Analysis
+
+### Effort
+### Benefits
+### ROI Timeline
+
+Be specific, reference actual procedures and code patterns.
 """
         
-        return self.call_llm(prompt, "You are a technology transformation consultant.", temperature=0.4, max_tokens=2500)
+        return self.call_llm(prompt, "You are a technology transformation consultant with TAL expertise.", temperature=0.4, max_tokens=4000)
     
     def _make_json_serializable(self, obj: Any) -> Any:
-        """
-        Recursively convert objects to JSON-serializable types
-        
-        Args:
-            obj: Object to convert
-            
-        Returns:
-            JSON-serializable version of the object
-        """
+        """Recursively convert objects to JSON-serializable types"""
         if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
         elif isinstance(obj, dict):
@@ -827,23 +906,21 @@ For each phase include:
             return [self._make_json_serializable(item) for item in obj]
         elif isinstance(obj, defaultdict):
             return {key: self._make_json_serializable(value) for key, value in obj.items()}
-        elif hasattr(obj, '__dict__'):
-            # Handle dataclass or custom objects
-            if hasattr(obj, '__dataclass_fields__'):
-                return asdict(obj)
-            return {key: self._make_json_serializable(value) for key, value in obj.__dict__.items()}
+        elif hasattr(obj, '__dataclass_fields__'):
+            return asdict(obj)
         else:
-            # For any other type, convert to string representation
             return str(obj)
     
     def generate_documentation_report(self, output_file: str = "tal_architecture_report.json"):
-        """Generate complete documentation report with diagrams"""
-        logger.info("Generating comprehensive documentation report...")
+        """Generate complete documentation report with source code analysis"""
+        logger.info("Generating comprehensive documentation with source code analysis...")
         
         report = {
             'metadata': {
                 'generated_at': str(Path.cwd()),
-                'graph_stats': self.statistics
+                'graph_stats': self.statistics,
+                'source_directory': str(self.source_dir) if self.source_dir else None,
+                'source_files_loaded': len(self.source_cache)
             },
             'architecture_overview': self.generate_architecture_overview(),
             'components': [],
@@ -853,37 +930,30 @@ For each phase include:
             'modernization_roadmap': self.generate_modernization_roadmap()
         }
         
-        # Document top 10 critical components
-        logger.info("Documenting critical components...")
+        logger.info("Documenting critical components with source code...")
         for comp in self.components[:10]:
             comp_doc = self.generate_component_documentation(comp)
             report['components'].append({
                 'component': asdict(comp),
-                'documentation': comp_doc['documentation'],
-                'diagram': comp_doc['diagram']
+                'documentation': comp_doc
             })
         
-        # Document top 5 process flows
-        logger.info("Documenting process flows...")
+        logger.info("Documenting process flows with source code...")
         for flow in self.process_flows[:5]:
             flow_doc = self.generate_process_flow_documentation(flow)
             report['process_flows'].append({
                 'flow': asdict(flow),
-                'documentation': flow_doc['documentation'],
-                'diagram': flow_doc['diagram']
+                'documentation': flow_doc
             })
         
-        # Ensure all data is JSON serializable
         report = self._make_json_serializable(report)
         
-        # Save report
         try:
             with open(output_file, 'w') as f:
                 json.dump(report, f, indent=2)
             logger.info(f"Documentation report saved to {output_file}")
         except TypeError as e:
             logger.error(f"JSON serialization error: {e}")
-            # Try to identify the problematic field
             for key, value in report.items():
                 try:
                     json.dumps({key: value})
@@ -892,245 +962,39 @@ For each phase include:
             raise
         
         return report
-    
-    def render_graphviz_to_image(self, dot_code: str, output_path: str, format: str = 'png') -> bool:
-        """
-        Render Graphviz DOT diagram to image
-        
-        Tries multiple methods:
-        1. graphviz command (dot command)
-        2. Python graphviz library
-        3. Save as .dot file for manual rendering
-        
-        Args:
-            dot_code: Graphviz DOT syntax
-            output_path: Output file path
-            format: Output format (png, svg, pdf)
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            import subprocess
-            import tempfile
-            
-            # Create temporary dot file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False) as f:
-                f.write(dot_code)
-                dot_file = f.name
-            
-            try:
-                # Try using graphviz command line (dot)
-                result = subprocess.run(
-                    ['dot', f'-T{format}', dot_file, '-o', output_path],
-                    capture_output=True,
-                    timeout=30
-                )
-                
-                if result.returncode == 0 and Path(output_path).exists():
-                    logger.info(f"Rendered Graphviz diagram to {output_path}")
-                    return True
-                    
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                logger.warning("Graphviz (dot command) not available, trying Python library...")
-                
-                # Try using Python graphviz library
-                try:
-                    import graphviz
-                    source = graphviz.Source(dot_code)
-                    source.render(output_path.replace(f'.{format}', ''), format=format, cleanup=True)
-                    logger.info(f"Rendered Graphviz diagram using Python library to {output_path}")
-                    return True
-                except ImportError:
-                    logger.warning("Python graphviz library not installed")
-                except Exception as e:
-                    logger.warning(f"Failed to render with Python library: {e}")
-            
-            # If both methods failed, save the .dot file for reference
-            dot_output = output_path.replace(f'.{format}', '.dot')
-            with open(dot_output, 'w') as f:
-                f.write(dot_code)
-            logger.info(f"Saved Graphviz source to {dot_output} (install graphviz to render)")
-            
-            return False
-            
-        except Exception as e:
-            logger.warning(f"Failed to render Graphviz diagram: {e}")
-            return False
-    
-    def create_word_document(self, report: Dict[str, Any], output_file: str = "tal_architecture_guide.docx"):
-        """Create a Word document from the report with embedded diagrams"""
-        logger.info("Creating Word document...")
-        
-        try:
-            from docx import Document
-            from docx.shared import Pt, RGBColor, Inches
-            from docx.enum.text import WD_ALIGN_PARAGRAPH
-            
-            doc = Document()
-            
-            # Title
-            title = doc.add_heading('TAL Architecture & Modernization Guide', 0)
-            title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
-            # Table of Contents placeholder
-            doc.add_heading('Table of Contents', 1)
-            doc.add_paragraph('[Auto-generated in Word]')
-            doc.add_page_break()
-            
-            # 1. Architecture Overview
-            doc.add_heading('1. Architecture Overview', 1)
-            overview_data = report.get('architecture_overview', {})
-            if isinstance(overview_data, dict):
-                doc.add_paragraph(overview_data.get('overview', 'N/A'))
-                
-                # Add architecture diagram
-                if overview_data.get('diagram'):
-                    doc.add_heading('1.1 Architecture Diagram', 2)
-                    diagram_path = 'architecture_diagram.png'
-                    if self.render_graphviz_to_image(overview_data['diagram'], diagram_path):
-                        doc.add_picture(diagram_path, width=Inches(6))
-                    else:
-                        # Include DOT code as code block
-                        doc.add_paragraph('Graphviz DOT Diagram Code:', style='Intense Quote')
-                        p = doc.add_paragraph(overview_data['diagram'])
-                        p.style = 'Code'
-            else:
-                doc.add_paragraph(str(overview_data))
-            
-            # Statistics
-            doc.add_heading('1.2 System Statistics', 2)
-            stats = report['metadata']['graph_stats']
-            table = doc.add_table(rows=len(stats), cols=2)
-            table.style = 'Light Grid Accent 1'
-            for i, (key, value) in enumerate(stats.items()):
-                if key != 'complexity_distribution':
-                    table.rows[i].cells[0].text = str(key).replace('_', ' ').title()
-                    table.rows[i].cells[1].text = str(value)
-            
-            doc.add_page_break()
-            
-            # 2. Components
-            doc.add_heading('2. Key Components', 1)
-            for i, comp_data in enumerate(report['components'][:10]):
-                comp = comp_data['component']
-                doc.add_heading(f"2.{i+1} {comp['name']}", 2)
-                doc.add_paragraph(f"Type: {comp['type']} | Complexity: {comp['complexity']} | Called: {comp['call_count']} times")
-                doc.add_paragraph(comp_data.get('documentation', 'N/A'))
-                
-                # Add component diagram
-                if comp_data.get('diagram'):
-                    diagram_path = f"component_{i}_diagram.png"
-                    if self.render_graphviz_to_image(comp_data['diagram'], diagram_path):
-                        doc.add_picture(diagram_path, width=Inches(5))
-                    else:
-                        doc.add_paragraph('Component Diagram (Graphviz):', style='Intense Quote')
-                        p = doc.add_paragraph(comp_data['diagram'][:200] + '...')
-                        p.style = 'Code'
-            
-            doc.add_page_break()
-            
-            # 3. Process Flows
-            doc.add_heading('3. Process Flows', 1)
-            for i, flow_data in enumerate(report['process_flows'][:5]):
-                flow = flow_data['flow']
-                doc.add_heading(f"3.{i+1} {flow['name']}", 2)
-                doc.add_paragraph(flow_data.get('documentation', 'N/A'))
-                
-                # Add process flow diagram
-                if flow_data.get('diagram'):
-                    diagram_path = f"flow_{i}_diagram.png"
-                    if self.render_graphviz_to_image(flow_data['diagram'], diagram_path):
-                        doc.add_picture(diagram_path, width=Inches(6))
-                    else:
-                        doc.add_paragraph('Process Flow Diagram (Graphviz):', style='Intense Quote')
-                        p = doc.add_paragraph(flow_data['diagram'][:200] + '...')
-                        p.style = 'Code'
-            
-            doc.add_page_break()
-            
-            # 4. Data Flow Analysis
-            doc.add_heading('4. Data Flow Analysis', 1)
-            doc.add_paragraph(report.get('data_flow_analysis', 'N/A'))
-            
-            doc.add_page_break()
-            
-            # 5. Microservices Candidates
-            doc.add_heading('5. Microservices Candidates', 1)
-            microservices_data = report.get('microservices_candidates', {})
-            
-            # Add microservices diagram
-            if isinstance(microservices_data, dict) and microservices_data.get('diagram'):
-                doc.add_heading('5.1 Proposed Microservices Architecture', 2)
-                diagram_path = 'microservices_diagram.png'
-                if self.render_graphviz_to_image(microservices_data['diagram'], diagram_path):
-                    doc.add_picture(diagram_path, width=Inches(6.5))
-                else:
-                    doc.add_paragraph('Microservices Architecture (Graphviz):', style='Intense Quote')
-                    p = doc.add_paragraph(microservices_data['diagram'][:300] + '...')
-                    p.style = 'Code'
-                
-                doc.add_heading('5.2 Service Details', 2)
-                candidates = microservices_data.get('candidates', [])
-            else:
-                candidates = microservices_data if isinstance(microservices_data, list) else []
-            
-            for candidate in candidates[:5]:
-                doc.add_heading(f"5.2.{candidate.get('capability', 'Unknown')}", 3)
-                doc.add_paragraph(f"Components: {len(candidate.get('components', []))}")
-                doc.add_paragraph(candidate.get('analysis', 'N/A'))
-            
-            doc.add_page_break()
-            
-            # 6. Modernization Roadmap
-            doc.add_heading('6. Modernization Roadmap', 1)
-            doc.add_paragraph(report.get('modernization_roadmap', 'N/A'))
-            
-            # Save document
-            doc.save(output_file)
-            logger.info(f"Word document saved to {output_file}")
-            
-            # Note about diagram rendering
-            doc_note = """
-NOTE: Diagrams are included as images if Graphviz is installed.
-To render diagrams manually:
-1. Install Graphviz: apt-get install graphviz (Linux) or brew install graphviz (Mac)
-2. Render .dot files: dot -Tpng diagram.dot -o diagram.png
-Or view online: https://dreampuf.github.io/GraphvizOnline/
-"""
-            logger.info(doc_note)
-            
-        except ImportError:
-            logger.warning("python-docx not installed. Skipping Word document generation.")
-            logger.info("Install with: pip install python-docx")
 
 
 def main():
     """Main execution function"""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Generate TAL architecture documentation from knowledge graph')
-    parser.add_argument('graph_file', help='Path to knowledge graph file (GraphML or JSON)')
-    parser.add_argument('--output-json', default='tal_architecture_report.json', help='Output JSON report file')
-    parser.add_argument('--output-docx', default='tal_architecture_guide.docx', help='Output Word document file')
-    parser.add_argument('--skip-docx', action='store_true', help='Skip Word document generation')
+    parser = argparse.ArgumentParser(
+        description='Generate TAL documentation with source code analysis'
+    )
+    parser.add_argument('graph_file', help='Path to knowledge graph (GraphML/JSON)')
+    parser.add_argument('--source-dir', help='Directory containing TAL source files', default=None)
+    parser.add_argument('--output', default='tal_architecture_report.json', help='Output JSON file')
     
     args = parser.parse_args()
     
-    # Initialize generator
-    generator = TALDocumentationGenerator(args.graph_file)
+    # Initialize generator with source directory
+    generator = TALDocumentationGenerator(args.graph_file, args.source_dir)
     
     # Analyze graph
     generator.analyze_graph()
     
-    # Generate documentation report
-    report = generator.generate_documentation_report(args.output_json)
+    # Generate documentation
+    report = generator.generate_documentation_report(args.output)
     
-    # Create Word document
-    if not args.skip_docx:
-        generator.create_word_document(report, args.output_docx)
-    
+    logger.info("="*70)
     logger.info("Documentation generation complete!")
+    logger.info("="*70)
+    logger.info(f"Report: {args.output}")
+    logger.info(f"Nodes: {len(generator.graph.nodes())}")
+    logger.info(f"Edges: {len(generator.graph.edges())}")
+    logger.info(f"Source files: {len(generator.source_cache)}")
+    logger.info(f"Components with code: {sum(1 for c in generator.components if c.source_code)}")
+    logger.info(f"Source coverage: {generator.statistics.get('source_coverage', 0):.1%}")
 
 
 if __name__ == '__main__':
