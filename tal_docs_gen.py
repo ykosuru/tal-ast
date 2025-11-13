@@ -242,14 +242,14 @@ class TALDocumentationGenerator:
             max_tokens: Maximum tokens in response
         
         Returns:
-            LLM response text
+            LLM response text (always returns a string, never None)
         """
         # This will be replaced with actual OpenAI API call at work
         # For now, return a placeholder
         
         try:
             # PLACEHOLDER - Replace with actual API call
-            # Example implementation:
+            # Example implementation for OpenAI:
             """
             import openai
             
@@ -263,7 +263,35 @@ class TALDocumentationGenerator:
                 max_tokens=max_tokens
             )
             
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            # Safety check: ensure we always return a string
+            if content is None:
+                return "Error: LLM returned None"
+            return content
+            """
+            
+            # Example implementation for Anthropic Claude:
+            """
+            import anthropic
+            
+            client = anthropic.Anthropic(api_key="your-api-key")
+            
+            message = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system_prompt,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            # Extract text from response
+            content = message.content[0].text if message.content else None
+            # Safety check: ensure we always return a string
+            if content is None:
+                return "Error: LLM returned None"
+            return content
             """
             
             logger.warning("LLM call placeholder - implement actual API call")
@@ -271,7 +299,7 @@ class TALDocumentationGenerator:
             
         except Exception as e:
             logger.error(f"Error calling LLM: {e}")
-            return f"Error: {e}"
+            return f"Error: {str(e)}"
     
     def generate_diagram_graphviz(self, diagram_type: str, context: Dict[str, Any]) -> str:
         """
@@ -453,6 +481,15 @@ Use appropriate shapes: box, ellipse, diamond, cylinder, component.
 Use colors to distinguish different types of nodes."""
         
         response = self.call_llm(prompt, system_prompt, temperature=0.3, max_tokens=1500)
+        
+        # Safety check: ensure response is a string
+        if response is None:
+            logger.warning("LLM returned None, returning empty diagram")
+            return f'digraph {{ "No diagram generated - LLM returned None" }}'
+        
+        if not isinstance(response, str):
+            logger.warning(f"LLM returned non-string type: {type(response)}")
+            response = str(response)
         
         # Extract DOT code from response
         if "```dot" in response:
