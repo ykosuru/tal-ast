@@ -103,9 +103,14 @@ class TALFunctionalityDocGenerator:
         self.functionality_keywords = []
         
         if functionality:
-            self.functionality_keywords = DOMAIN_KEYWORDS.get(functionality.lower(), [])
-            logger.info(f"Target functionality: {functionality}")
-            logger.info(f"Domain keywords: {', '.join(self.functionality_keywords[:10])}")
+            # Safe conversion to lowercase with fallback
+            func_key = functionality.lower() if functionality else ''
+            self.functionality_keywords = DOMAIN_KEYWORDS.get(func_key, [])
+            if self.functionality_keywords:
+                logger.info(f"Target functionality: {functionality}")
+                logger.info(f"Domain keywords: {', '.join(self.functionality_keywords[:10])}")
+            else:
+                logger.warning(f"No domain keywords found for functionality: {functionality}")
         
         if graph_path:
             self.base_path = Path(graph_path).parent
@@ -200,21 +205,22 @@ class TALFunctionalityDocGenerator:
         score = 0.0
         text_to_search = []
         
-        # Check procedure name
-        name = node_data.get('name', '').lower()
-        text_to_search.append(name)
+        # Check procedure name (with None check)
+        name = node_data.get('name')
+        if name:
+            text_to_search.append(name.lower())
         
-        # Check description
-        desc = node_data.get('description', '').lower()
+        # Check description (with None check)
+        desc = node_data.get('description')
         if desc:
-            text_to_search.append(desc)
+            text_to_search.append(desc.lower())
         
-        # Check file path
-        file_path = node_data.get('file_path', '').lower()
+        # Check file path (with None check)
+        file_path = node_data.get('file_path')
         if file_path:
-            text_to_search.append(file_path)
+            text_to_search.append(file_path.lower())
         
-        # Check source code
+        # Check source code (with None check)
         if source_code:
             text_to_search.append(source_code.lower())
         
