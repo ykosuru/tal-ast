@@ -960,3 +960,1279 @@ Remember:
         print(f"✓ Comprehensive translation prompt saved to: {output_file}")
         print(f"  Prompt size: {len(prompt):,} characters")
         print(f"  Estimated tokens: ~{len(prompt) // 4:,}")
+
+@staticmethod
+    def generate_documentation_prompt(
+        context: Dict[str, Any],
+        include_architecture: bool = True,
+        include_design: bool = True,
+        system_name: str = "TAL Payment System",
+        system_context: Optional[str] = None
+    ) -> str:
+        """
+        Generate a comprehensive documentation prompt for architecture and design docs.
+        Documents EXISTING TAL implementation using payment domain terminology.
+        Output format: Structurizr DSL (C4 Model)
+        
+        Args:
+            context: Translation context from TranslationContextBuilder
+            include_architecture: Generate architecture-level documentation
+            include_design: Generate design-level documentation
+            system_name: Name of the system being documented
+            system_context: Additional context about the system
+        """
+        
+        prompt = f"""# TAL Payment System Documentation Task
+
+## 🎯 DOCUMENTATION OBJECTIVE
+
+You are analyzing and documenting an **EXISTING TAL payment processing system** based on the source code provided.
+
+**Your Role**: Payment systems architect and technical writer who understands both legacy TAL systems and modern payment processing.
+
+**System Being Documented**: {system_name}
+**Functionality**: {context['functionality']}
+
+**Analysis Scope**:
+- {context['summary']['total_procedures']} TAL procedures to analyze
+- {context['summary']['total_structures']} data structures to document
+- {context['summary']['primary_procedures']} primary payment capabilities
+- ~{context['summary']['code_extraction']['total_chars']:,} characters of TAL source code
+
+"""
+
+        if system_context:
+            prompt += f"""**Additional Context**:
+{system_context}
+
+"""
+
+        prompt += """---
+
+## 📐 DOCUMENTATION REQUIREMENTS
+
+**CRITICAL**: You are documenting what the TAL code CURRENTLY DOES, not designing a new system.
+
+Produce **TWO COMPREHENSIVE DOCUMENTS**:
+
+### Document 1: High-Level Architecture Documentation
+**Format**: Business-focused architecture document with Structurizr DSL diagrams
+**Audience**: Business stakeholders, architects, payment operations leaders
+**Purpose**: Understand payment capabilities, business flows, and system integration
+**Focus**: 
+- What payment operations are supported (wire transfers, ACH, clearing, settlement, etc.)
+- How payment messages flow through the system
+- Which payment standards are implemented (ISO 20022, SWIFT, FedWire, etc.)
+- Integration with payment networks and core banking systems
+- Risk, compliance, and regulatory controls (AML, OFAC, KYC)
+
+### Document 2: Low-Level Design Documentation
+**Format**: Technical design document with detailed Structurizr DSL component models
+**Audience**: Developers, QA engineers, system maintainers
+**Purpose**: Understand technical implementation details and business logic
+**Focus**:
+- How TAL procedures implement each payment operation
+- Data structures and their relationships
+- Algorithms for payment validation, calculation, and processing
+- Error handling and exception flows
+- Business rules and decision logic
+- Technical integration patterns
+
+### Output Format: Structurizr DSL + Markdown
+
+- **Primary format**: Structurizr DSL for architectural diagrams
+- **Supporting format**: Markdown for textual explanations
+- Both documents must be complete, professional, and production-ready
+
+---
+
+## 💳 PAYMENT DOMAIN KNOWLEDGE REQUIREMENTS
+
+Use your understanding of payment systems to properly identify and document:
+
+### Payment Message Standards
+- **ISO 20022**: pacs.008 (payment initiation), pacs.002 (status), camt.054 (debit/credit notification)
+- **SWIFT MT**: MT103 (single customer credit), MT202 (financial institution transfer)
+- **FedWire**: Fedwire Funds Service message formats
+- **ACH**: NACHA file formats, batching, settlement
+- **SEPA**: SEPA Credit Transfer (SCT), SEPA Instant Credit Transfer (SCT Inst)
+
+### Payment Operations
+- **Origination**: Payment initiation, validation, authorization
+- **Clearing**: Interbank clearing, netting, bilateral/multilateral settlement
+- **Settlement**: Real-time gross settlement (RTGS), deferred net settlement (DNS)
+- **Reconciliation**: Account reconciliation, exception handling
+- **Returns**: Payment returns, rejections, recalls
+- **Repair**: Payment repair, amendment, correction
+
+### Compliance & Risk
+- **AML/CFT**: Anti-money laundering, sanctions screening, transaction monitoring
+- **KYC**: Customer identification, beneficial ownership, PEP screening
+- **OFAC**: Sanctions list screening (SDN, consolidated lists)
+- **Fraud Detection**: Real-time fraud scoring, velocity checks, pattern analysis
+- **Regulatory Reporting**: CTR, SAR, FBAR, regulatory filings
+
+### Payment Types
+- **Wire Transfers**: Domestic, international, same-day, next-day
+- **ACH Payments**: ACH credit, ACH debit, same-day ACH
+- **Real-Time Payments**: FedNow, RTP, instant payments
+- **Card Payments**: Card-on-file, authorization, capture, settlement
+- **Direct Debits**: Recurring payments, mandates, pre-authorization
+
+### Technical Concepts
+- **Message Queuing**: MQ, message routing, guaranteed delivery
+- **Database**: Transaction management, consistency, locking
+- **Batch Processing**: EOD processing, cutoff times, batch settlement
+- **API Integration**: REST, SOAP, synchronous/asynchronous patterns
+- **Error Handling**: Retry logic, dead letter queues, exception management
+
+---
+
+## 🏗️ DOCUMENT 1: HIGH-LEVEL ARCHITECTURE
+
+### Required Contents:
+
+#### 1. Executive Summary (Markdown)
+```markdown
+# {system_name} - Architecture Documentation
+
+## System Overview
+[2-3 paragraph description of what this payment system does, 
+using proper payment terminology]
+
+## Business Capabilities
+[List of payment capabilities supported - be specific with payment types]
+
+## Critical Success Factors
+[What makes this system critical to payment operations]
+```
+
+#### 2. Business Capability Model (Markdown)
+Map TAL procedures to payment business capabilities:
+
+```markdown
+## Payment Business Capabilities
+
+### Payment Origination
+**Capabilities**:
+- Wire transfer initiation (domestic & international)
+- ACH payment origination
+- Payment validation & enrichment
+- Duplicate detection
+
+**TAL Procedures**:
+- [PROCEDURE_NAME]: [What it does in payment terms]
+- [PROCEDURE_NAME]: [What it does in payment terms]
+
+### Payment Validation & Compliance
+**Capabilities**:
+- OFAC sanctions screening
+- AML transaction monitoring
+- Payment limit enforcement
+- Regulatory hold processing
+
+**TAL Procedures**:
+- [List relevant procedures]
+
+### Payment Processing & Settlement
+[Continue for each business area...]
+```
+
+#### 3. Payment Message Flows (Markdown + Structurizr)
+Document the payment flows:
+
+```markdown
+## Payment Message Flows
+
+### Wire Transfer Flow
+[Describe the flow from initiation to settlement]
+
+**Message Standards**: ISO 20022 pacs.008, pacs.002
+**Processing Steps**:
+1. Payment received from originating channel
+2. Validation: format, limits, account verification
+3. Compliance screening: OFAC, AML rules
+4. Enrichment: BIC routing, intermediary bank resolution
+5. Submission to payment network (SWIFT/FedWire)
+6. Status tracking and notification
+
+**TAL Implementation**:
+- Entry point: [PROCEDURE_NAME]
+- Validation: [PROCEDURE_NAME]
+- Compliance: [PROCEDURE_NAME]
+- Network submission: [PROCEDURE_NAME]
+```
+
+Then provide Structurizr dynamic view showing the flow.
+
+#### 4. System Context Diagram (Structurizr DSL)
+Show the system's place in the payment ecosystem:
+
+```structurizr
+workspace {{
+    name "{system_name} Architecture"
+    description "High-level architecture of existing TAL payment system"
+    
+    model {{
+        # Payment Users
+        person wireInitiator "Wire Transfer Operator" "Initiates wire transfers"
+        person achOperator "ACH Operator" "Manages ACH payments"
+        person complianceOfficer "Compliance Officer" "Monitors compliance"
+        person opsManager "Operations Manager" "System oversight"
+        
+        # External Payment Systems
+        softwareSystem swiftNetwork "SWIFT Network" "International payment messaging" "External"
+        softwareSystem fedwire "FedWire" "US domestic wire transfers" "External"
+        softwareSystem achNetwork "ACH Network" "Automated Clearing House" "External"
+        softwareSystem coreBanking "Core Banking System" "Account management and ledger" "External"
+        softwareSystem ofacService "OFAC Screening Service" "Sanctions list screening" "External"
+        
+        # This TAL Payment System
+        softwareSystem talPaymentSystem "{system_name}" "Existing TAL payment processing system" {{
+            
+            # Document containers based on actual TAL implementation
+            # Analyze the code to determine functional groupings
+            
+            container paymentOrigination "Payment Origination" "Handles payment initiation and validation" "TAL Processes" {{
+                tags "PaymentProcessing" "Critical"
+            }}
+            
+            container complianceEngine "Compliance Engine" "Sanctions and AML screening" "TAL Processes" {{
+                tags "Compliance" "Critical"
+            }}
+            
+            container paymentProcessor "Payment Processor" "Core payment processing and routing" "TAL Processes" {{
+                tags "PaymentProcessing" "Critical"
+            }}
+            
+            container networkInterface "Network Interface" "SWIFT/FedWire/ACH integration" "TAL Processes" {{
+                tags "Integration" "Critical"
+            }}
+            
+            container paymentDatabase "Payment Database" "Transaction data, audit logs" "NonStop SQL" {{
+                tags "Database" "Critical"
+            }}
+            
+            container messageQueue "Message Queue" "Async processing queue" "TMF/Pathway" {{
+                tags "Middleware"
+            }}
+        }}
+        
+        # Relationships - based on actual TAL code flows
+        wireInitiator -> talPaymentSystem.paymentOrigination "Initiates wire transfer" "Terminal/UI"
+        
+        talPaymentSystem.paymentOrigination -> talPaymentSystem.complianceEngine "Screen payment" "Procedure call"
+        talPaymentSystem.complianceEngine -> ofacService "Check sanctions lists" "External call"
+        
+        talPaymentSystem.paymentOrigination -> talPaymentSystem.paymentProcessor "Submit for processing"
+        talPaymentSystem.paymentProcessor -> talPaymentSystem.paymentDatabase "Store transaction"
+        talPaymentSystem.paymentProcessor -> talPaymentSystem.networkInterface "Route to network"
+        
+        talPaymentSystem.networkInterface -> swiftNetwork "Send MT103/pacs.008"
+        talPaymentSystem.networkInterface -> fedwire "Send FedWire message"
+        
+        talPaymentSystem.paymentProcessor -> coreBanking "Debit/credit accounts" "IPC"
+    }}
+    
+    views {{
+        systemContext talPaymentSystem "PaymentSystemContext" {{
+            include *
+            autoLayout lr
+            title "Payment System Context - Integration with Payment Networks"
+        }}
+        
+        container talPaymentSystem "PaymentContainers" {{
+            include *
+            autoLayout tb
+            title "Payment Processing Components (TAL Implementation)"
+        }}
+        
+        styles {{
+            element "PaymentProcessing" {{ background #1168bd; color #ffffff }}
+            element "Compliance" {{ background #ff6b6b; color #ffffff }}
+            element "Integration" {{ background #6b9bd1; color #ffffff }}
+            element "External" {{ background #cccccc }}
+            element "Critical" {{ border solid; thickness 3 }}
+        }}
+        
+        theme default
+    }}
+}}
+```
+
+#### 5. Integration Architecture (Markdown)
+Document all external integrations:
+
+```markdown
+## External System Integrations
+
+### SWIFT Network Integration
+**Purpose**: International wire transfers
+**Protocol**: SWIFT Alliance Access, SWIFTNet
+**Message Types**: MT103, MT202, MT910, MT940
+**Implementation**: [Describe TAL procedures handling SWIFT]
+**Key TAL Procedures**:
+- [PROCEDURE]: Formats MT103 messages
+- [PROCEDURE]: Parses MT910 confirmations
+
+### Core Banking Integration
+**Purpose**: Account debit/credit, balance verification
+**Protocol**: [IPC/Pathway/TMF]
+**Operations**: Balance inquiry, account update, hold management
+**Implementation**: [Describe TAL procedures]
+
+[Continue for each integration...]
+```
+
+#### 6. Data Architecture (Markdown)
+Document key data structures in payment terms:
+
+```markdown
+## Payment Data Model
+
+### Payment Transaction
+**TAL Structure**: [STRUCT_NAME]
+**Purpose**: Core payment transaction record
+**Lifecycle**: Created → Validated → Screened → Processed → Settled
+**Key Attributes**:
+- Transaction ID: Unique identifier
+- Payment Type: Wire/ACH/RTP
+- Amount & Currency: With precision handling
+- Originator: Debtor party information
+- Beneficiary: Creditor party information
+- Status: Current processing status
+- Network Reference: SWIFT UETR / FedWire IMAD
+
+[Continue for each major data structure...]
+```
+
+---
+
+## 🔧 DOCUMENT 2: LOW-LEVEL DESIGN
+
+### Required Contents:
+
+#### 1. Technical Overview (Markdown)
+```markdown
+# {system_name} - Design Documentation
+
+## Technical Architecture
+[Describe the TAL implementation architecture - how procedures are organized,
+how they interact, data flow patterns]
+
+## Technology Stack
+- **Language**: TAL (Transaction Application Language)
+- **Platform**: HP NonStop (Tandem)
+- **Database**: [SQL/MX, Enscribe]
+- **Messaging**: [TMF, Pathway, OSS]
+- **File System**: [Guardian, OSS]
+
+## Design Principles
+[What principles are evident in the code? Modularity, error handling, etc.]
+```
+
+#### 2. Component Design (Structurizr DSL)
+
+Why Structurizr DSL?
+✅ Machine-readable architecture diagrams
+✅ Version controllable documentation
+✅ Automatic rendering of multiple views
+✅ Clear separation of concerns (Context → Container → Component → Code)
+✅ Supports deployment and dynamic views
+
+---
+
+## 📚 STRUCTURIZR DSL QUICK REFERENCE
+
+### Basic Structure:
+```structurizr
+workspace {
+    name "System Name"
+    description "System description"
+    
+    model {
+        # Define people, systems, containers, components
+        
+        person user "User" "Description"
+        
+        softwareSystem system "System" "Description" {
+            container api "API" "Description" "Technology"
+            container database "Database" "Description" "Technology"
+        }
+        
+        # Define relationships
+        user -> system "Uses"
+        api -> database "Reads/Writes" "Protocol"
+    }
+    
+    views {
+        systemContext system "SystemContext" {
+            include *
+        }
+        
+        container system "Containers" {
+            include *
+        }
+        
+        component api "Components" {
+            include *
+        }
+        
+        theme default
+    }
+}
+```
+
+### Key Elements:
+
+**People & External Systems**:
+```structurizr
+person user "User Name" "Role description"
+softwareSystem externalSystem "Name" "What it does" "External"
+```
+
+**Software System & Containers**:
+```structurizr
+softwareSystem mySystem "System Name" "Purpose" {
+    container webApp "Web Application" "Description" "Technology" {
+        component controller "Controller" "Handles HTTP" "Spring MVC"
+        component service "Service" "Business logic" "Java"
+        component repository "Repository" "Data access" "Spring Data"
+    }
+    
+    container database "Database" "Stores data" "PostgreSQL"
+    container messageQueue "Message Queue" "Async processing" "RabbitMQ"
+}
+```
+
+**Relationships**:
+```structurizr
+# Format: source -> destination "Description" "Technology/Protocol"
+user -> webApp "Submits payments" "HTTPS"
+controller -> service "Calls"
+service -> repository "Uses"
+repository -> database "Reads/Writes" "JDBC"
+service -> messageQueue "Publishes events" "AMQP"
+```
+
+**Tags for Styling**:
+```structurizr
+container api "API" "Description" "Spring Boot" {
+    tags "Backend" "Critical"
+}
+```
+
+**Deployment View**:
+```structurizr
+deploymentEnvironment "Production" {
+    deploymentNode "AWS" {
+        deploymentNode "EC2" {
+            containerInstance webApp
+        }
+        deploymentNode "RDS" {
+            containerInstance database
+        }
+    }
+}
+```
+
+---
+
+## 🏗️ LEVEL 1: ARCHITECTURE DOCUMENTATION
+
+### Requirements for Architecture Documentation:
+
+1. **System Context** (C4 Level 1):
+   - Show the system in its environment
+   - Identify ALL external actors (users, systems, services)
+   - Show high-level interactions
+   - Clarify system boundaries
+
+2. **Container View** (C4 Level 2):
+   - Break down system into major containers (applications, databases, file systems)
+   - Show technology choices
+   - Identify integration protocols
+   - Map data storage
+
+3. **Key Architecture Decisions**:
+   - Why TAL to Java?
+   - Technology stack rationale
+   - Integration patterns
+   - Data persistence strategy
+
+4. **Business Capability Mapping**:
+   - Map TAL procedures to business capabilities
+   - Show which containers/components support which capabilities
+   - Identify critical vs supporting capabilities
+
+### Architecture Documentation Template:
+
+```structurizr
+workspace {{
+    name "{system_name}"
+    description "Architecture documentation for {context['functionality']}"
+    
+    !docs docs/architecture
+    !adrs adrs
+    
+    model {{
+        # EXTERNAL ACTORS
+        # ===============
+        # Document WHO uses this system
+        
+        person endUser "End User" "Description of user role"
+        person backOfficeUser "Back Office User" "Operations staff"
+        person administrator "System Administrator" "Manages the system"
+        
+        # EXTERNAL SYSTEMS
+        # ================
+        # Document WHAT systems this integrates with
+        
+        softwareSystem legacyTalSystem "Legacy TAL System" "Original system being replaced" "Legacy" {{
+            tags "Legacy" "Deprecated"
+        }}
+        
+        softwareSystem coreBanking "Core Banking System" "Handles accounts" "External"
+        softwareSystem complianceSystem "Compliance System" "OFAC/AML checks" "External"
+        softwareSystem reportingSystem "Reporting System" "Business intelligence" "External"
+        
+        # THIS SYSTEM
+        # ===========
+        softwareSystem modernPaymentSystem "{system_name}" "Modernized payment processing" {{
+            
+            # CONTAINERS (Major architectural components)
+            # ===========================================
+            
+            container paymentApi "Payment API" "REST API for payment operations" "Spring Boot" {{
+                tags "Backend" "Critical"
+            }}
+            
+            container paymentProcessor "Payment Processor" "Async payment processing" "Spring Batch" {{
+                tags "Backend" "Critical" "Batch"
+            }}
+            
+            container validationEngine "Validation Engine" "Business rule validation" "Drools" {{
+                tags "Backend" "Rules"
+            }}
+            
+            container webPortal "Web Portal" "User interface" "React" {{
+                tags "Frontend"
+            }}
+            
+            container database "Payment Database" "Stores payment data" "PostgreSQL" {{
+                tags "Database" "Critical"
+            }}
+            
+            container cache "Cache" "Performance optimization" "Redis" {{
+                tags "Cache"
+            }}
+            
+            container messageQueue "Message Queue" "Async communication" "RabbitMQ" {{
+                tags "Middleware"
+            }}
+            
+            container auditLog "Audit Log" "Compliance audit trail" "Elasticsearch" {{
+                tags "Database" "Compliance"
+            }}
+        }}
+        
+        # RELATIONSHIPS (Integration points)
+        # ==================================
+        
+        # User interactions
+        endUser -> webPortal "Submits payments, views status" "HTTPS"
+        backOfficeUser -> paymentApi "Manages payments, runs reports" "HTTPS"
+        administrator -> paymentApi "System configuration" "HTTPS"
+        
+        # System interactions
+        webPortal -> paymentApi "API calls" "REST/HTTPS"
+        paymentApi -> database "Reads/Writes payment data" "JDBC"
+        paymentApi -> cache "Caches frequently accessed data" "Redis Protocol"
+        paymentApi -> messageQueue "Publishes payment events" "AMQP"
+        paymentApi -> validationEngine "Validates business rules" "Java"
+        
+        messageQueue -> paymentProcessor "Consumes payment events" "AMQP"
+        paymentProcessor -> database "Updates payment status" "JDBC"
+        paymentProcessor -> auditLog "Writes audit records" "HTTP"
+        
+        # External integrations
+        paymentApi -> coreBanking "Account verification, balance checks" "REST/HTTPS"
+        validationEngine -> complianceSystem "OFAC/AML screening" "SOAP/HTTPS"
+        paymentProcessor -> reportingSystem "Sends payment metrics" "JMS"
+        
+        # Legacy migration path
+        legacyTalSystem -> database "Data migration" "JDBC" {{
+            tags "Migration"
+        }}
+    }}
+    
+    views {{
+        # SYSTEM CONTEXT VIEW
+        # ===================
+        systemContext modernPaymentSystem "SystemContext" {{
+            include *
+            autoLayout lr
+            title "[System Context] {system_name}"
+            description "Shows the system in its environment with external actors and systems"
+        }}
+        
+        # CONTAINER VIEW
+        # ==============
+        container modernPaymentSystem "Containers" {{
+            include *
+            autoLayout lr
+            title "[Container View] {system_name}"
+            description "Shows the major technical building blocks"
+        }}
+        
+        # FILTERED VIEWS
+        # ==============
+        container modernPaymentSystem "CriticalPath" {{
+            include modernPaymentSystem.paymentApi
+            include modernPaymentSystem.database
+            include modernPaymentSystem.validationEngine
+            include coreBanking
+            include complianceSystem
+            include endUser
+            autoLayout lr
+            title "[Critical Payment Path]"
+            description "Shows the critical components for payment processing"
+        }}
+        
+        # DYNAMIC VIEW (Payment Flow)
+        # ===========================
+        dynamic modernPaymentSystem "PaymentSubmission" "Payment submission flow" {{
+            endUser -> modernPaymentSystem.webPortal "1. Submits payment"
+            modernPaymentSystem.webPortal -> modernPaymentSystem.paymentApi "2. POST /api/payments"
+            modernPaymentSystem.paymentApi -> modernPaymentSystem.validationEngine "3. Validate business rules"
+            modernPaymentSystem.validationEngine -> complianceSystem "4. Check OFAC/AML"
+            modernPaymentSystem.paymentApi -> modernPaymentSystem.database "5. Save payment"
+            modernPaymentSystem.paymentApi -> modernPaymentSystem.messageQueue "6. Publish payment.created event"
+            modernPaymentSystem.messageQueue -> modernPaymentSystem.paymentProcessor "7. Process payment"
+            modernPaymentSystem.paymentProcessor -> coreBanking "8. Execute transfer"
+            autoLayout lr
+        }}
+        
+        # DEPLOYMENT VIEW
+        # ===============
+        deployment modernPaymentSystem "Production" "Production" {{
+            deploymentNode "AWS Cloud" {{
+                deploymentNode "ECS Cluster" {{
+                    deploymentNode "API Container" {{
+                        containerInstance modernPaymentSystem.paymentApi
+                    }}
+                    deploymentNode "Processor Container" {{
+                        containerInstance modernPaymentSystem.paymentProcessor
+                    }}
+                }}
+                
+                deploymentNode "RDS" {{
+                    containerInstance modernPaymentSystem.database
+                }}
+                
+                deploymentNode "ElastiCache" {{
+                    containerInstance modernPaymentSystem.cache
+                }}
+                
+                deploymentNode "Amazon MQ" {{
+                    containerInstance modernPaymentSystem.messageQueue
+                }}
+            }}
+        }}
+        
+        # STYLING
+        # =======
+        styles {{
+            element "External" {{
+                background #cccccc
+                color #000000
+            }}
+            element "Legacy" {{
+                background #ff6666
+                color #ffffff
+            }}
+            element "Critical" {{
+                background #ff0000
+                color #ffffff
+            }}
+            element "Database" {{
+                shape Cylinder
+            }}
+            element "Batch" {{
+                background #3366ff
+            }}
+            relationship "Migration" {{
+                style dashed
+                color #ff6666
+            }}
+        }}
+        
+        theme default
+    }}
+}}
+```
+
+---
+
+## 🔧 LEVEL 2: DESIGN DOCUMENTATION
+
+### Requirements for Design Documentation:
+
+1. **Component View** (C4 Level 3):
+   - Break down containers into components
+   - Show internal architecture patterns (MVC, layered, hexagonal)
+   - Map TAL procedures to Java components
+   - Document data flow through components
+
+2. **Business Logic Mapping**:
+   - Map each TAL procedure to Java component(s)
+   - Show how business capabilities are implemented
+   - Document service boundaries
+
+3. **Data Model**:
+   - Show key entities
+   - Document relationships
+   - Map TAL structures to Java classes
+
+4. **Integration Details**:
+   - API contracts
+   - Message formats
+   - Error handling patterns
+
+### Design Documentation Template:
+
+```structurizr
+workspace {{
+    name "{system_name} - Design"
+    description "Detailed design documentation for developers"
+    
+    model {{
+        softwareSystem modernPaymentSystem "{system_name}" {{
+            
+            container paymentApi "Payment API" "REST API" "Spring Boot" {{
+                
+                # PRESENTATION LAYER
+                # ==================
+                component paymentController "Payment Controller" "Handles HTTP requests" "Spring MVC RestController" {{
+                    technology "Spring MVC"
+                    tags "Controller" "RestAPI"
+                }}
+                
+                component validationController "Validation Controller" "Handles validation requests" "Spring MVC RestController"
+                
+                # APPLICATION/SERVICE LAYER
+                # =========================
+                component paymentService "Payment Service" "Core payment business logic" "Spring Service" {{
+                    tags "Service" "BusinessLogic" "Critical"
+                    # Maps to TAL procedures: PROCESS_PAYMENT, VALIDATE_PAYMENT
+                }}
+                
+                component validationService "Validation Service" "Business rule validation" "Spring Service" {{
+                    # Maps to TAL procedures: VALIDATE_AMOUNT, CHECK_LIMITS, VERIFY_ACCOUNT
+                }}
+                
+                component complianceService "Compliance Service" "OFAC/AML checks" "Spring Service" {{
+                    tags "Service" "Compliance"
+                    # Maps to TAL procedures: CHECK_OFAC, RUN_AML_RULES
+                }}
+                
+                component accountService "Account Service" "Account operations" "Spring Service" {{
+                    # Maps to TAL procedures: GET_ACCOUNT_BALANCE, VERIFY_ACCOUNT
+                }}
+                
+                # DOMAIN LAYER
+                # ============
+                component paymentDomain "Payment Domain" "Payment entities and business rules" "Java Domain Model" {{
+                    tags "Domain" "Entity"
+                }}
+                
+                component validationRules "Validation Rules" "Business validation rules" "Domain Logic"
+                
+                # INFRASTRUCTURE LAYER
+                # ====================
+                component paymentRepository "Payment Repository" "Payment data access" "Spring Data JPA" {{
+                    tags "Repository" "DataAccess"
+                }}
+                
+                component accountRepository "Account Repository" "Account data access" "Spring Data JPA"
+                
+                component cacheManager "Cache Manager" "Caching abstraction" "Spring Cache"
+                
+                component messagingGateway "Messaging Gateway" "Message publishing" "Spring AMQP"
+                
+                # EXTERNAL INTEGRATION
+                # ====================
+                component coreBankingClient "Core Banking Client" "Integration with core banking" "REST Client" {{
+                    tags "Integration" "External"
+                }}
+                
+                component complianceClient "Compliance Client" "Integration with compliance system" "SOAP Client" {{
+                    tags "Integration" "External" "Compliance"
+                }}
+                
+                # CROSS-CUTTING
+                # ==============
+                component auditLogger "Audit Logger" "Audit trail logging" "Custom Component" {{
+                    tags "CrossCutting" "Compliance"
+                }}
+                
+                component errorHandler "Error Handler" "Global exception handling" "Spring ControllerAdvice"
+                
+                # COMPONENT RELATIONSHIPS
+                # =======================
+                
+                # Request flow
+                paymentController -> paymentService "Calls"
+                validationController -> validationService "Calls"
+                
+                # Service interactions
+                paymentService -> validationService "Validates payment"
+                paymentService -> complianceService "Compliance checks"
+                paymentService -> accountService "Account operations"
+                paymentService -> paymentDomain "Uses domain objects"
+                
+                validationService -> validationRules "Applies rules"
+                validationService -> accountService "Verifies account"
+                
+                complianceService -> complianceClient "External OFAC check"
+                accountService -> coreBankingClient "Get account details"
+                
+                # Data access
+                paymentService -> paymentRepository "Persists payments"
+                accountService -> accountRepository "Account queries"
+                paymentRepository -> cacheManager "Uses cache"
+                
+                # Event publishing
+                paymentService -> messagingGateway "Publishes events"
+                
+                # Cross-cutting
+                paymentService -> auditLogger "Logs operations"
+                complianceService -> auditLogger "Logs compliance checks"
+                paymentController -> errorHandler "Exception handling"
+            }}
+            
+            container database "Payment Database" "PostgreSQL" {{
+                
+                component paymentTable "Payment Table" "Stores payment records" "Table"
+                component accountTable "Account Table" "Cached account data" "Table"
+                component auditTable "Audit Table" "Audit trail" "Table"
+                component validationTable "Validation Rules" "Business rules" "Table"
+            }}
+            
+            container paymentProcessor "Payment Processor" "Spring Batch" {{
+                
+                component paymentListener "Payment Listener" "Consumes payment events" "Spring AMQP Listener"
+                component batchProcessor "Batch Processor" "Processes payments in batch" "Spring Batch"
+                component settlementJob "Settlement Job" "End-of-day settlement" "Scheduled Job"
+                component reconciliationJob "Reconciliation Job" "Payment reconciliation" "Scheduled Job"
+                
+                paymentListener -> batchProcessor "Triggers"
+                batchProcessor -> paymentRepository "Updates status"
+                settlementJob -> batchProcessor "Runs daily"
+            }}
+        }}
+        
+        # Repository relationships to database
+        paymentApi.paymentRepository -> database.paymentTable "CRUD operations" "SQL"
+        paymentApi.accountRepository -> database.accountTable "Read operations" "SQL"
+        paymentApi.auditLogger -> database.auditTable "Insert audit records" "SQL"
+        paymentApi.validationService -> database.validationTable "Reads rules" "SQL"
+    }}
+    
+    views {{
+        # COMPONENT VIEW - Payment API
+        # ============================
+        component paymentApi "PaymentAPI_Components" {{
+            include *
+            autoLayout tb
+            title "[Component] Payment API Internal Structure"
+            description "Shows the internal components and their relationships"
+        }}
+        
+        # FILTERED COMPONENT VIEWS
+        # ========================
+        component paymentApi "ServiceLayer" {{
+            include ->paymentApi.paymentService->
+            include ->paymentApi.validationService->
+            include ->paymentApi.complianceService->
+            include ->paymentApi.accountService->
+            autoLayout lr
+            title "[Service Layer] Business Logic Components"
+        }}
+        
+        component paymentApi "DataAccessLayer" {{
+            include ->paymentApi.paymentRepository->
+            include ->paymentApi.accountRepository->
+            include ->paymentApi.cacheManager->
+            include ->database.*
+            autoLayout lr
+            title "[Data Access] Repository and Database Components"
+        }}
+        
+        # DYNAMIC VIEWS (Sequence flows)
+        # ==============================
+        dynamic paymentApi "ProcessPayment" "Payment processing sequence" {{
+            paymentController -> paymentService "1. processPayment(request)"
+            paymentService -> validationService "2. validatePayment(payment)"
+            validationService -> validationRules "3. applyRules(payment)"
+            paymentService -> complianceService "4. checkCompliance(payment)"
+            complianceService -> complianceClient "5. checkOFAC(payerName)"
+            paymentService -> accountService "6. verifyAccount(accountId)"
+            accountService -> coreBankingClient "7. getAccountBalance(accountId)"
+            paymentService -> paymentDomain "8. createPaymentEntity(data)"
+            paymentService -> paymentRepository "9. save(payment)"
+            paymentService -> auditLogger "10. logPaymentCreated(payment)"
+            paymentService -> messagingGateway "11. publishPaymentCreatedEvent(payment)"
+            autoLayout lr
+        }}
+        
+        # STYLES
+        # ======
+        styles {{
+            element "Controller" {{
+                background #85bbf0
+                shape RoundedBox
+            }}
+            element "Service" {{
+                background #438dd5
+                color #ffffff
+                shape Hexagon
+            }}
+            element "Repository" {{
+                background #6cb33e
+                shape Cylinder
+            }}
+            element "Domain" {{
+                background #f4a261
+            }}
+            element "Integration" {{
+                background #cccccc
+                shape Component
+            }}
+            element "CrossCutting" {{
+                background #8b4513
+                color #ffffff
+            }}
+            element "Critical" {{
+                border solid
+                thickness 3
+            }}
+            element "Compliance" {{
+                background #ff6b6b
+                color #ffffff
+            }}
+        }}
+        
+        theme default
+    }}
+}}
+```
+
+---
+
+## 📊 YOUR TASK: ANALYZE AND DOCUMENT
+
+Based on the TAL code provided, create complete Structurizr DSL documentation.
+
+### Provided Context:
+
+**Procedures to Document**:
+"""
+
+        # List procedures to document
+        for i, proc in enumerate(context['primary_procedures'][:10], 1):
+            prompt += f"\n{i}. **{proc['name']}** - {proc['file']}:{proc['line']}"
+            if proc.get('parameters'):
+                prompt += f"\n   Parameters: {', '.join(proc['parameters'])}"
+            deps = proc.get('dependencies', {})
+            if deps.get('calls'):
+                prompt += f"\n   Calls: {', '.join(deps['calls'][:5])}"
+            prompt += "\n"
+        
+        if len(context['primary_procedures']) > 10:
+            prompt += f"\n... and {len(context['primary_procedures']) - 10} more procedures\n"
+
+        prompt += f"""
+**Data Structures**:
+"""
+        for struct in context['structures'][:5]:
+            prompt += f"- {struct['name']}: {len(struct.get('fields', []))} fields\n"
+        
+        if len(context['structures']) > 5:
+            prompt += f"- ... and {len(context['structures']) - 5} more structures\n"
+
+        prompt += """
+---
+
+## 📤 REQUIRED OUTPUT
+
+Provide your documentation in this structure:
+
+### Part 1: Architecture Overview
+
+```
+ARCHITECTURE DOCUMENTATION
+══════════════════════════════════════════════════════════════
+
+SYSTEM OVERVIEW:
+  Name: [System name]
+  Purpose: [What it does]
+  Context: [Where it fits in the enterprise]
+
+KEY ARCHITECTURAL DECISIONS:
+  1. [Decision]: [Rationale]
+  2. [Decision]: [Rationale]
+
+CONTAINERS IDENTIFIED:
+  - [Container 1]: [Purpose] - [Technology]
+  - [Container 2]: [Purpose] - [Technology]
+  
+EXTERNAL INTEGRATIONS:
+  - [System 1]: [Integration type] - [Protocol]
+  - [System 2]: [Integration type] - [Protocol]
+
+BUSINESS CAPABILITY MAPPING:
+  Capability 1 → Container X, Component Y
+  Capability 2 → Container Z, Component W
+```
+
+### Part 2: Complete Structurizr DSL
+
+```structurizr
+workspace {
+    name "..."
+    description "..."
+    
+    model {
+        # Complete model following the templates above
+        # Include:
+        # - All actors (users, administrators)
+        # - All external systems
+        # - Software system with containers
+        # - Components within critical containers
+        # - All relationships
+    }
+    
+    views {
+        # System context view
+        # Container view
+        # Component views for key containers
+        # Dynamic views for key flows
+        # Deployment view (if applicable)
+        # Styles
+    }
+}
+```
+
+### Part 3: TAL to Component Mapping
+
+```
+PROCEDURE → COMPONENT MAPPING
+══════════════════════════════════════════════════════════════
+
+TAL Procedure: [PROCEDURE_NAME_1]
+→ Java Component: [ComponentName]
+→ Container: [ContainerName]
+→ Layer: [Service/Repository/Controller]
+→ Responsibilities:
+    - [Responsibility 1]
+    - [Responsibility 2]
+→ Dependencies:
+    - Calls: [Other components]
+    - Uses: [Data structures]
+
+TAL Procedure: [PROCEDURE_NAME_2]
+→ Java Component: [ComponentName]
+...
+```
+
+### Part 4: Data Model Documentation
+
+```
+DATA MODEL OVERVIEW
+══════════════════════════════════════════════════════════════
+
+Entity: [EntityName]
+  TAL Structure: [STRUCT_NAME]
+  Fields:
+    - field1: type (from TAL: FIELD1)
+    - field2: type (from TAL: FIELD2)
+  Relationships:
+    - hasMany: [OtherEntity]
+    - belongsTo: [ParentEntity]
+  Usage:
+    - Used by: [Component1, Component2]
+    - Persisted in: [database.tableName]
+```
+
+### Part 5: Integration Specifications
+
+```
+INTEGRATION DETAILS
+══════════════════════════════════════════════════════════════
+
+External System: [SystemName]
+  Protocol: [REST/SOAP/JMS]
+  Operations:
+    - Operation1: [Description]
+      Request: [Format]
+      Response: [Format]
+    - Operation2: [Description]
+  
+  Error Handling:
+    - Error1: [How it's handled]
+    - Error2: [How it's handled]
+  
+  Security:
+    - Authentication: [Method]
+    - Authorization: [Method]
+```
+
+### Part 6: Design Patterns & Best Practices
+
+```
+DESIGN PATTERNS APPLIED
+══════════════════════════════════════════════════════════════
+
+Pattern: [Pattern Name]
+  Location: [Component/Layer]
+  Rationale: [Why this pattern]
+  Example: [How it's used]
+
+Pattern: [Pattern Name]
+  ...
+```
+
+---
+
+## ✅ DOCUMENTATION CHECKLIST
+
+Before submitting, verify:
+
+**Architecture Documentation**:
+- [ ] System context clearly shows boundaries
+- [ ] All external actors identified
+- [ ] All containers have clear purposes and technologies
+- [ ] Integration points are documented
+- [ ] Business capabilities are mapped
+
+**Design Documentation**:
+- [ ] Components within containers are identified
+- [ ] Component responsibilities are clear
+- [ ] TAL procedures are mapped to components
+- [ ] Data flow is documented
+- [ ] Key sequences are shown in dynamic views
+
+**Structurizr DSL**:
+- [ ] Valid Structurizr DSL syntax
+- [ ] Can be rendered without errors
+- [ ] Views are properly defined
+- [ ] Styles enhance readability
+- [ ] Relationships have descriptions
+
+**Traceability**:
+- [ ] TAL procedures → Java components
+- [ ] TAL structures → Java entities
+- [ ] Business capabilities → Implementation
+- [ ] External dependencies → Integration components
+
+**Completeness**:
+- [ ] Architecture addresses Level 1 (Context & Container)
+- [ ] Design addresses Level 2 (Component & Code)
+- [ ] All major TAL procedures are accounted for
+- [ ] Data model is documented
+- [ ] Integration patterns are clear
+
+---
+
+## 🚀 BEGIN DOCUMENTATION
+
+Analyze the TAL code and create comprehensive architecture and design documentation in Structurizr DSL format.
+
+**Remember**:
+- ✅ Clear separation: Architecture vs Design
+- ✅ Complete Structurizr DSL (valid syntax)
+- ✅ Map every TAL procedure to a component
+- ✅ Show data flows
+- ✅ Document integrations
+- ✅ Include dynamic views for key scenarios
+
+**START WITH** the architecture overview, then provide the complete Structurizr workspace.
+"""
+
+        return prompt
+    
+    @staticmethod
+    def save_prompt(prompt: str, output_file: str):
+        """Save prompt to file."""
+        from pathlib import Path
+        
+        output_path = Path(output_file)
+        output_path.parent.mkdir(exist_ok=True, parents=True)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(prompt)
+        
+        print(f"✓ Comprehensive prompt saved to: {output_file}")
+        print(f"  Prompt size: {len(prompt):,} characters")
+        print(f"  Estimated tokens: ~{len(prompt) // 4:,}")
+
+
+# Example usage
+if __name__ == "__main__":
+    # Example context structure (would come from TranslationContextBuilder)
+    example_context = {
+        'functionality': 'Payment Processing',
+        'summary': {
+            'total_procedures': 25,
+            'primary_procedures': 5,
+            'total_structures': 8,
+            'code_extraction': {
+                'total_chars': 45000
+            }
+        },
+        'primary_procedures': [
+            {
+                'name': 'PROCESS_PAYMENT',
+                'file': 'payment.tal',
+                'line': 100,
+                'parameters': ['payment_data', 'user_id'],
+                'return_type': 'INT',
+                'code': '! TAL code here...',
+                'code_length': 2500,
+                'dependencies': {
+                    'calls': ['VALIDATE_PAYMENT', 'CHECK_COMPLIANCE'],
+                    'called_by': ['MAIN_HANDLER'],
+                    'uses_structures': ['PAYMENT_RECORD'],
+                    'uses_variables': ['status', 'amount']
+                }
+            }
+        ],
+        'dependency_procedures': [],
+        'structures': [
+            {
+                'name': 'PAYMENT_RECORD',
+                'code': 'STRUCT payment_record...',
+                'fields': [
+                    {'name': 'transaction_id', 'type': 'INT'},
+                    {'name': 'amount', 'type': 'FIXED(2)'}
+                ]
+            }
+        ],
+        'call_graph': {}
+    }
+    
+    generator = ComprehensivePromptGenerator()
+    
+    # Generate translation prompt
+    translation_prompt = generator.generate_translation_prompt(example_context)
+    generator.save_prompt(translation_prompt, "/tmp/translation_prompt.md")
+    
+    # Generate documentation prompt
+    doc_prompt = generator.generate_documentation_prompt(
+        example_context,
+        system_name="Modern Payment System",
+        system_context="Replacing legacy TAL payment processing with modern Java microservices"
+    )
+    generator.save_prompt(doc_prompt, "/tmp/documentation_prompt.md")
+
