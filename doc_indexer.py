@@ -1,874 +1,909 @@
 """
-Wire Processing Business Capability Indexer with Query Expansion
-LIGHTWEIGHT VERSION - No spaCy dependency required
-FIXED: Now properly extracts domain terms like 'credit', 'party', 'determination'
+Universal File Indexer v2.0 - Production Ready
+Supports: PDFs, Code (Python, Java, C, TAL, COBOL, SQL), Text, Config files
+Features: BM25 search, stemming, business capability mapping, code metadata extraction
+
+All patches integrated, no modifications needed.
 """
 
 import os
 import json
 import math
+import re
+import pickle
+import hashlib
+import numpy as np
 from pathlib import Path
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Optional, Tuple
-import hashlib
-import re
-
-# PDF processing
-import PyPDF2
-import pdfplumber
-from PIL import Image
-
-# OCR for images
-try:
-    import pytesseract
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-    print("Warning: pytesseract not available, image OCR disabled")
-
-# Vector embeddings (optional)
-import numpy as np
-try:
-    from sentence_transformers import SentenceTransformer
-    EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    EMBEDDINGS_AVAILABLE = False
-    print("Warning: sentence_transformers not available, embeddings disabled")
-
-# Vector database (optional)
-try:
-    import faiss
-    FAISS_AVAILABLE = True
-except ImportError:
-    FAISS_AVAILABLE = False
-    print("Warning: faiss not available, using keyword search only")
-
-import pickle
-
-# BM25 for fast keyword search
 from rank_bm25 import BM25Okapi
 
+# Optional: PDF support
+try:
+    import pdfplumber
+    import PyPDF2
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+    print("⚠ PDF libraries not available. Install: pip install pdfplumber PyPDF2")
+
+# Optional: Stemming
+try:
+    from nltk.stem import PorterStemmer
+    STEMMER_AVAILABLE = True
+except ImportError:
+    STEMMER_AVAILABLE = False
+    print("⚠ NLTK not available. Install: pip install nltk")
+
+
+# ================================================================================
+# File Type Definitions
+# ================================================================================
+
+SUPPORTED_EXTENSIONS = {
+    'pdf': ['.pdf'],
+    'code': [
+        '.py', '.c', '.cpp', '.h', '.hpp', '.cc', '.cxx',
+        '.java', '.scala', '.kt', '.groovy',
+        '.js', '.ts', '.jsx', '.tsx',
+        '.go', '.rs', '.swift',
+        '.tal', '.cbl', '.cobol', '.cob',
+        '.sql', '.pl', '.pm',
+        '.rb', '.php', '.sh', '.bash',
+        '.cs', '.vb', '.fs', '.TXT'
+    ],
+    'text': ['.txt', '.md', '.rst', '.log', '.text'],
+    'config': ['.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg'],
+    'markup': ['.html', '.htm', '.xhtml', '.css', '.scss']
+}
+
+ALL_EXTENSIONS = set()
+for extensions in SUPPORTED_EXTENSIONS.values():
+    ALL_EXTENSIONS.update(extensions)
+
+
+# ================================================================================
+# Shared NLP Components
+# ================================================================================
+
+STOPWORDS = [
+    'how', 'what', 'when', 'where', 'why', 'who', 'which',
+    'do', 'does', 'did', 'is', 'are', 'was', 'were', 'be', 'been',
+    'have', 'has', 'had', 'will', 'would', 'should', 'could', 'can',
+    'implement', 'create', 'build', 'make', 'develop', 'setup',
+    'a', 'an', 'the', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
+    'from', 'by', 'as', 'into', 'through', 'during', 'before', 'after',
+    'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her',
+    'and', 'or', 'but', 'if', 'then', 'than', 'so', 'because',
+    'this', 'that', 'these', 'those', 'there', 'here',
+    'process', 'system', 'data', 'information', 'file', 'code'
+]
+
+
+class TextStemmer:
+    """Porter Stemmer with caching for performance"""
+
+    def __init__(self, use_stemming: bool = True):
+        self.use_stemming = use_stemming and STEMMER_AVAILABLE
+
+        if self.use_stemming:
+            self.stemmer = PorterStemmer()
+        else:
+            self.stemmer = None
+
+        self._cache = {}
+
+    def stem(self, word: str) -> str:
+        """Stem a single word"""
+        if not self.use_stemming or not word:
+            return word.lower()
+
+        word_lower = word.lower()
+        if word_lower in self._cache:
+            return self._cache[word_lower]
+
+        stemmed = self.stemmer.stem(word_lower)
+        self._cache[word_lower] = stemmed
+        return stemmed
+
+    def stem_tokens(self, tokens: List[str]) -> List[str]:
+        """Stem list of tokens"""
+        return [self.stem(t) for t in tokens]
+
+    def stem_text(self, text: str) -> str:
+        """Stem all words in text"""
+        words = re.findall(r'\b[\w-]+\b', text)
+        return ' '.join([self.stem(w) for w in words])
+
+
+class DomainQueryExpander:
+    """Expand queries with domain-specific synonyms"""
+
+    # EPX business capability-oriented synonyms (functional intent)
+    SYNONYMS = {
+        # Core payment concepts
+        'payment': [
+            'transaction', 'transfer', 'wire', 'remittance',
+            'book transfer', 'funds movement', 'pay instruction', 'outbound payment',
+            'credit transfer', 'customer transfer'
+        ],
+        'drawdown': ['advance', 'disbursement', 'funding', 'loan', 'withdraw'],
+        'stp': [
+            'straight thru processing', 'straight-through processing', 'straight through processing',
+            'stp analysis', 'stp', 'ace', 'pelican'
+        ],
+        'validation': [
+            'verification', 'checking', 'screening', 'confirmation',
+            'date validation', 'time validation', 'amount validation', 'currency validation',
+            'debit account validation', 'credit account validation', 'schema validation',
+            'format validation', 'technical duplicate detection', 'business duplicate checking'
+        ],
+        'repair': [
+            'fix', 'correction', 'enrichment', 'amendment',
+            'manual repair', 'auto repair', 'payment enrichment', 'manual verify', 'tech repair'
+        ],
+        'routing': [
+            'route', 'network determination', 'method of payment determination',
+            'payment routing', 'line selection', 'lterm selection', 'internation routing'
+        ],
+        'advising': [
+            'pre-advising', 'preadvising', 'pre advice', 'pre-advice',
+            'cover payments', 'split advising', 'advice', 'advisements',
+            'fed advising', 'chips advising', 'swift advising'
+        ],
+        'acknowledgement': [
+            'ack', 'acks', 'acknowledgment', 'acknowledgement',
+            'channel acknowledgements', 'network acknowledgements',
+            'payment engine acknowledgments', 'engine ack', 'level 1', 'level 2', 'confirms'
+        ],
+        'prioritization': ['payment prioritization', 'priority setting', 'queue priority'],
+        'warehousing': ['payment warehousing', 'hold and release', 'store and forward'],
+        'returns': ['payment returns', 'return items', 'rtrn processing'],
+        'exceptions': ['exceptions processing', 'exception handling', 'repair queue'],
+        'agreements': ['payment agreements', 'service agreements', 'entitlements'],
+        'orchestration': [
+            'workflow scheduling', 'workflow orchestration', 'scheduling', 'job orchestration'
+        ],
+        'cutoffs': ['fed cutoffs', 'chips cutoffs', 'network cutoffs', 'cut-off times'],
+        'liquidity': [
+            'liquidity management', 'intraday liquidity', 'intraday liq', 'ilms',
+            'intraday monitoring'
+        ],
+        'posting': [
+            'hard posting', 'memo posting', 'intraday posting', 'sod processing', 'eod processing'
+        ],
+        'id_generation': [
+            'id generation', 'network id generation', 'sequence generation', 'reference generation'
+        ],
+        'encryption': ['data encryption', 'encryption', 'crypto'],
+        'decryption': ['data decryption', 'decryption'],
+        'masking': ['data masking', 'obfuscation', 'redaction'],
+        'transformation': [
+            'format transformation', 'mapping', 'iso mapping', 'iso20022 mapping',
+            'mapping iso to upo', 'schema mapping'
+        ],
+        'api': [
+            'service api', 'api/service invocation', 'api invocation',
+            'service api endpoint publishing', 'endpoint publishing'
+        ],
+        'connectivity': [
+            'channel connectivity', 'network connectivity', 'queues connectivity',
+            'topics connectivity', 'mq connectivity', 'integration layer'
+        ],
+        'reconciliation': [
+            'client & account reconciliation', 'ops bank reconciliation', 'bank rec', 'recon'
+        ],
+        'billing': ['client billing', 'statements', 'billing & statements', 'fee billing'],
+        'fees': ['fee determination', 'fees management', 'dodd frank fees', 'analysis charges'],
+        'ring_fencing': ['ring fencing', 'funds ring-fencing', 'ringfence'],
+        'agreements_entitlements': ['user entitlements', 'entitlements maintenance'],
+        'monitoring': [
+            'business activity monitoring', 'telemetry', 'trend analysis',
+            'straight thru processing analysis', 'risk event information'
+        ],
+        'reporting': [
+            'report archiving', 'report viewing', 'report file distribution',
+            'adhoc bi', 'scheduled reporting', 'reporting - risk analysis',
+            'reporting - account activity', 'reporting - financial crimes'
+        ],
+        'alerts': ['alert dispositioning', 'payment event notification', 'notifications', 'alerts'],
+
+        # Parties
+        'party': ['entity', 'participant', 'customer', 'client', 'counterparty'],
+        'creditor': ['beneficiary', 'payee', 'receiver'],
+        'debtor': ['originator', 'payer', 'sender'],
+
+        # Risk, sanctions, fraud, controls
+        'sanctions': [
+            'ofac', 'sanction screening', 'sanctions screening', 'watchlist', 'fircosoft'
+        ],
+        'aml': ['anti-money laundering', 'newton', 'financial crimes', 'kyc'],
+        'fraud': [
+            'fraud checking', 'fraud management', 'ceo fraud management', 'cfm', 'wholesale cust fraud'
+        ],
+        'funds_control': ['funds control', 'debit authority', 'debit authority management'],
+        'controls': ['controls', 'anomalies detection', 'controls/anomalies & detection', 'kill switch'],
+        'risk': ['risk control system', 'rcs', 'risk controls'],
+
+        # Networks / rails / standards
+        'fedwire': ['fedwire', 'fed', 'federal reserve', 'frb', 'wire network'],
+        'chips': ['chips', 'chips network'],
+        'swift': ['swift', 'swift network', 'society for worldwide interbank financial telecommunication'],
+        'ach': ['ach', 'automated clearing house'],
+        'rtp': ['rtp', 'real-time payments'],
+        'fednow': ['fednow', 'instant payments', 'instant rail'],
+        'wires': ['wires', 'wire transfer', 'wire'],
+        'confirmation': ['confirmations', 'network confirmations', 'cust confirmations'],
+
+        # Channels / apps (aliases included for matching)
+        'channels': [
+            'channel', 'channel connectivity', 'channel acknowledgements', 'network acknowledgements'
+        ],
+        'ceo_wires': ['ceo & api wires', 'ceo wires', 'api wires'],
+        'online_wires': ['online wires', 'olw'],
+        'treasury_workstation': ['treasury workstation', 'pstw', 'tsys workstation'],
+        'secure_fax': ['secure fax', 'fax channel'],
+        'cyberpay': ['cyberpay', 'icyb'],
+        'intellitracs': ['intellitracs', 'itrx'],
+        'i5_gds': ['i5-gds', 'gds'],
+
+        # Payment services specifics
+        'debit_credit_determination': [
+            'debit/credit determination', 'debit credit confirmation', 'dc confirmation'
+        ],
+        'cover_payments': ['cover payments', 'cover'],
+        'payment_engine': ['payment engine acknowledgments', 'engine ack', 'engine response'],
+
+        # Integrations / systems
+        'dda_core': ['account dda', 'hogan', 'iis'],
+        'ilms': ['intraday liq. monitoring system', 'ilms'],
+        'tms': ['intraday posting', 'tms'],
+        'gabs': ['m/w integration layer', 'gabs', 'middleware'],
+        'axcis': ['report archiving & viewing', 'axcis'],
+        'rpm': ['customer revenue & profit', 'rpm'],
+        'fx': ['fx services', 'wxchg', 'opics', 'foreign exchange'],
+        'et_window': ['electronic window', 'et', 'txn & balance info'],
+        'investigations': ['investigations', 'pega', 'intellitracs', 'cases'],
+
+        # Data & analytics
+        'ai_ml': ['ai/ml', 'machine learning', 'modeling'],
+        'data_inquiry': ['payment data inquiry', 'data inquiry', 'account activity inquiry'],
+        'data_security': ['masking', 'encryption', 'decryption'],
+        'archiving': ['report archiving', 'archive & viewing'],
+
+        # Admin / network ops
+        'certifications': ['network certification testing', 'certifications', 'cert testing'],
+        'network_admin': ['network admin message generation', 'admin messages', 'service messages'],
+        'sequence': ['network id/sequence generation', 'sequence generation'],
+        'mapping': ['mapping iso to upo', 'lterms mapping', 'format transformation'],
+
+        # Compliance / regulatory named items
+        'dodd_frank': ['dodd frank fees management', 'dodd-frank', 'dfa fees'],
+
+        # Existing keys from your prior list (kept for backward-compat)
+        'ofac': ['sanctions', 'watchlist'],
+        'function': ['procedure', 'subroutine', 'method', 'proc'],
+
+        # Generic network label (for broad matches where needed)
+        'network': ['rail', 'fed', 'chips', 'swift', 'chps', 'swf', 'fedwire']
+    }
+
+    def __init__(self, stemmer: Optional[TextStemmer] = None):
+        self.stemmer = stemmer
+
+        if stemmer and stemmer.use_stemming:
+            self.synonyms_stemmed = {}
+            for key, values in self.SYNONYMS.items():
+                key_stem = stemmer.stem(key)
+                values_stem = [stemmer.stem(v) for v in values]
+                self.synonyms_stemmed[key_stem] = values_stem
+        else:
+            self.synonyms_stemmed = self.SYNONYMS
+
+    def expand_query(self, query: str, max_expansions: int = 2) -> str:
+        """Expand query with synonyms"""
+        terms = query.lower().split()
+        expanded = set(terms)
+
+        for term in terms:
+            if self.stemmer:
+                term_stem = self.stemmer.stem(term)
+            else:
+                term_stem = term
+
+            if term_stem in self.synonyms_stemmed:
+                synonyms = self.synonyms_stemmed[term_stem][:max_expansions]
+                expanded.update(synonyms)
+
+        return ' '.join(expanded)
+
+
+# ================================================================================
+# Business Capability Taxonomy
+# ================================================================================
 
 class BusinessCapabilityTaxonomy:
-    """Wire Processing Business Capabilities taxonomy"""
-    
+    """Wire Processing Business Capabilities"""
+
     CAPABILITIES = {
         "Core Payment & Network": [
             "clearing networks", "fed", "chips", "swift", "clearing house",
-            "network gateways", "network connectivity", "network acknowledgments",
-            "network admin", "network certification", "lterm", "ack", "nak"
+            "network gateways", "network connectivity", "lterm", "ack", "nak"
         ],
-        
+
         "Payment Processing & Execution": [
             "payment initiation", "payment routing", "payment execution",
             "preadvising", "cover payments", "liquidity management",
             "debit confirmation", "credit confirmation", "outbound payment",
             "hard posting", "cutoffs", "workflow scheduling", "orchestration",
-            "split advising", "intraday liquidity", "book transfer",
-            "eod processing", "fee determination", "payment agreements",
-            "payment returns", "payment prioritization", "warehousing",
-            "exceptions processing"
+            "intraday liquidity", "book transfer", "eod processing",
+            "fee determination", "payment returns", "warehousing"
         ],
-        
+
         "Instruction & Validation": [
             "instruction management", "straight thru processing", "stp",
             "pay thru validation", "method of payment", "payment enrichment",
-            "payment repair", "payment verify", "sod releasing",
-            "auto repair", "date validation", "time validation",
-            "account validation", "amount validation", "currency validation",
-            "standing orders", "repetitive orders", "party association"
+            "payment repair", "payment verify", "auto repair",
+            "date validation", "time validation", "account validation",
+            "amount validation", "currency validation", "standing orders"
         ],
-        
+
         "Controls & Risk Management": [
-            "controls services", "anomalies detection", "ca&d",
-            "sanctions screening", "fircosoft", "ofac", "funds control",
-            "fraud checking", "debit authority", "duplicate checking",
-            "debit blocks", "credit blocks", "memo posting",
-            "ceo fraud", "cfm", "anti-money laundering", "aml", "newton",
-            "risk control system", "rcs"
+            "controls services", "anomalies detection", "sanctions screening",
+            "fircosoft", "ofac", "funds control", "fraud checking",
+            "debit authority", "duplicate checking", "debit blocks",
+            "credit blocks", "ceo fraud", "anti money laundering", "aml"
         ],
-        
+
         "Data & Reporting": [
             "data management", "report distribution", "financial crimes reporting",
             "risk analysis reporting", "historical data", "payment reconciliation",
             "general ledger", "gl feeds", "account activity reporting",
-            "adhoc reporting", "scheduled reporting", "event notification",
-            "alert", "fee charges", "analysis charges", "product capabilities",
-            "data service integration", "ai ml modeling", "report archiving",
-            "axcis", "client billing", "statements", "client reconciliation",
-            "transaction info", "balance info", "electronic window",
-            "intelligence analytics", "trend analysis", "ecosystem analytics"
+            "adhoc reporting", "event notification", "alert", "statements"
         ],
-        
+
         "Service Integration": [
-            "data masking", "obfuscation", "transaction replay",
-            "data encryption", "decryption", "channel acknowledgments",
-            "service api", "endpoint publishing", "duplicate detection",
-            "api invocation", "service invocation", "queues", "topics",
+            "data masking", "transaction replay", "data encryption",
+            "channel acknowledgements", "service api", "endpoint publishing",
+            "duplicate detection", "api invocation", "queues", "topics",
             "format transformation", "id generation", "schema validation"
         ],
-        
-        "User Experience": [
-            "business activity monitoring", "alert dispositioning",
-            "queue drilldown", "telemetry", "ui maintenance",
-            "user entitlements", "payment data inquiry", "trend analysis",
-            "stp analysis", "risk event information", "smart alerting"
-        ],
-        
-        "Channel & Integration": [
-            "client authentication", "client preference", "channel connectivity",
-            "canonical management", "shared services", "global services",
-            "investigations", "pega", "intellitracs", "bank reconciliation",
-            "1bkr", "intraday posting", "tms", "middleware", "gabs",
-            "fx services", "wxchg", "opics", "revenue profit", "rpm",
-            "enterprise fax", "gfx", "online wires", "olw",
-            "treasury workstation", "pstw", "ceo api wires",
-            "secure fax", "voice response", "vru", "position management",
-            "loan q", "liq", "approval queue", "onq", "cyberpay",
-            "1cyb", "1trx", "js-gds"
-        ],
-        
+
         "ISO Standards & Formats": [
             "iso20022", "iso 20022", "pacs.008", "pacs.009", "pacs.002",
-            "pain.001", "camt.053", "mt103", "mt202", "mt199",
-            "fedwire", "chips format", "swift format", "xml", "json"
+            "pain.001", "camt.053", "mt103", "mt202", "fedwire", "xml"
         ],
-        
+
         "Validation & Screening": [
             "bic validation", "bic code", "iban validation", "iban",
-            "party validation", "account validation", "sanctions check",
-            "watchlist screening", "name screening", "address validation",
-            "routing validation", "aba", "sort code"
+            "party validation", "sanctions check", "watchlist screening",
+            "name screening", "address validation", "routing validation"
         ],
-        
+
         "Transaction Processing": [
             "wire transfer", "wire payment", "domestic wire", "international wire",
-            "cross-border payment", "same-day payment", "rtgs", "ach",
-            "clearing", "settlement", "netting", "gross settlement"
+            "cross border payment", "rtgs", "ach", "clearing", "settlement"
         ]
     }
-    
-    # Synonyms and variations
-    SYNONYMS = {
-        "ofac": ["ofac screening", "sanctions", "ofac_screen_party"],
-        "ace": ["automated clearing", "ace repair", "ace code"],
-        "stp": ["straight through", "straight thru", "straight-through"],
-        "aml": ["anti money laundering", "money laundering"],
-        "bic": ["bank identifier", "swift code", "bic code"],
-        "fed": ["federal reserve", "fedwire", "federal wire"],
-        "chips": ["clearing house interbank", "chips network"],
-        "iso20022": ["iso 20022", "iso-20022", "pacs", "pain", "camt"]
-    }
-    
+
     @classmethod
     def get_all_keywords(cls) -> List[str]:
         """Get all keywords across all capabilities"""
-        all_keywords = []
-        for keywords in cls.CAPABILITIES.values():
-            all_keywords.extend(keywords)
-        return list(set(all_keywords))
-    
-    @classmethod
-    def expand_with_synonyms(cls, keyword: str) -> List[str]:
-        """Expand keyword with synonyms"""
-        expanded = [keyword]
-        for main_term, synonyms in cls.SYNONYMS.items():
-            if keyword.lower() in [main_term] + [s.lower() for s in synonyms]:
-                expanded.extend([main_term] + synonyms)
-        return list(set(expanded))
-    
-    @classmethod
-    def get_related_capabilities(cls, capability: str) -> List[str]:
-        """Get keywords related to a specific capability"""
-        return cls.CAPABILITIES.get(capability, [])
-
-
-class QueryExpander:
-    """
-    Query expansion using LLM to improve BM25 search results
-    Handles typos, synonyms, and domain-specific expansions
-    """
-    
-    def __init__(
-        self,
-        taxonomy: BusinessCapabilityTaxonomy,
-        expansion_level: str = "medium",
-        max_expansions: int = 5
-    ):
-        """
-        Initialize Query Expander
-        
-        Args:
-            taxonomy: Business capability taxonomy
-            expansion_level: "basic", "medium", or "advanced"
-            max_expansions: Maximum number of query variations to generate
-        """
-        self.taxonomy = taxonomy
-        self.expansion_level = expansion_level
-        self.max_expansions = max_expansions
-        
-        # Build reverse lookup: keyword -> capabilities
-        self.keyword_to_capabilities = defaultdict(list)
-        for capability, keywords in taxonomy.CAPABILITIES.items():
-            for kw in keywords:
-                self.keyword_to_capabilities[kw.lower()].append(capability)
-    
-    def call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        """
-        Stub method for LLM calls - to be implemented by user
-        
-        Args:
-            prompt: The prompt to send to LLM
-            system_prompt: Optional system prompt for context
-            
-        Returns:
-            LLM response as string
-        """
-        # TODO: Implement actual LLM call
-        print(f"[STUB] call_llm() called with prompt: {prompt[:100]}...")
-        return ""
-    
-    def expand_query(
-        self,
-        query: str,
-        detected_capabilities: Optional[List[Tuple[str, float]]] = None
-    ) -> Dict[str, Any]:
-        """
-        Expand query using multi-level expansion strategy
-        """
-        result = {
-            "original_query": query,
-            "expanded_queries": [query],
-            "expanded_terms": [],
-            "capabilities_context": [],
-            "expansion_metadata": {
-                "level": self.expansion_level,
-                "methods_used": []
-            }
-        }
-        
-        # Level 1: Basic expansion (rule-based synonyms)
-        if self.expansion_level in ["basic", "medium", "advanced"]:
-            basic_expansions = self._basic_expansion(query)
-            result["expanded_queries"].extend(basic_expansions)
-            result["expansion_metadata"]["methods_used"].append("basic_synonyms")
-        
-        # Level 2: Domain-specific expansion (using capabilities)
-        if self.expansion_level in ["medium", "advanced"]:
-            domain_expansions = self._domain_expansion(
-                query, 
-                detected_capabilities
-            )
-            result["expanded_queries"].extend(domain_expansions["queries"])
-            result["expanded_terms"].extend(domain_expansions["terms"])
-            result["capabilities_context"] = domain_expansions["capabilities"]
-            result["expansion_metadata"]["methods_used"].append("domain_capabilities")
-        
-        # Level 3: LLM-based expansion (adaptive)
-        if self.expansion_level == "advanced":
-            llm_expansions = self._llm_expansion(
-                query,
-                detected_capabilities,
-                result["capabilities_context"]
-            )
-            result["expanded_queries"].extend(llm_expansions["queries"])
-            result["expanded_terms"].extend(llm_expansions["terms"])
-            result["expansion_metadata"]["methods_used"].append("llm_expansion")
-            result["expansion_metadata"]["llm_response"] = llm_expansions.get("llm_response", "")
-        
-        # Deduplicate and limit
-        result["expanded_queries"] = list(dict.fromkeys(result["expanded_queries"]))[:self.max_expansions]
-        result["expanded_terms"] = list(dict.fromkeys(result["expanded_terms"]))
-        
-        return result
-    
-    def _basic_expansion(self, query: str) -> List[str]:
-        """Level 1: Basic rule-based expansion using synonyms"""
-        expansions = []
-        query_lower = query.lower()
-        
-        # Apply synonym expansions
-        for term, synonyms in self.taxonomy.SYNONYMS.items():
-            if term in query_lower:
-                for synonym in synonyms[:2]:
-                    expanded = query_lower.replace(term, synonym)
-                    if expanded != query_lower:
-                        expansions.append(expanded)
-        
-        # Common typo corrections
-        typo_corrections = {
-            "ofac": ["ofac screening", "sanctions"],
-            "bic": ["swift code", "bank identifier"],
-            "iban": ["international bank account"],
-            "stp": ["straight through processing"],
-            "aml": ["anti money laundering"],
-            "pacs": ["iso20022 payment"],
-            "fedwire": ["federal reserve wire"],
-        }
-        
-        for typo, corrections in typo_corrections.items():
-            if typo in query_lower:
-                for correction in corrections[:2]:
-                    expansions.append(f"{query_lower} {correction}")
-        
-        return expansions[:3]
-    
-    def _domain_expansion(
-        self,
-        query: str,
-        detected_capabilities: Optional[List[Tuple[str, float]]]
-    ) -> Dict[str, Any]:
-        """Level 2: Domain-specific expansion using business capabilities"""
-        expansions = {
-            "queries": [],
-            "terms": [],
-            "capabilities": []
-        }
-        
-        if not detected_capabilities:
-            return expansions
-        
-        # Use top capabilities (score > 0.3)
-        relevant_capabilities = [
-            cap for cap, score in detected_capabilities 
-            if score > 0.3
-        ][:3]
-        
-        expansions["capabilities"] = relevant_capabilities
-        
-        # For each capability, add related keywords
-        for capability in relevant_capabilities:
-            related_keywords = self.taxonomy.get_related_capabilities(capability)
-            
-            # Add top related terms
-            for kw in related_keywords[:5]:
-                expansions["terms"].append(kw)
-                
-                # Create combined queries
-                combined = f"{query} {kw}"
-                expansions["queries"].append(combined)
-        
-        return expansions
-    
-    def _llm_expansion(
-        self,
-        query: str,
-        detected_capabilities: Optional[List[Tuple[str, float]]],
-        capabilities_context: List[str]
-    ) -> Dict[str, Any]:
-        """Level 3: LLM-based adaptive expansion"""
-        expansions = {
-            "queries": [],
-            "terms": [],
-            "llm_response": ""
-        }
-        
-        # Build context for LLM
-        capability_info = ""
-        if capabilities_context:
-            capability_info = f"\n\nRelevant business capabilities:\n- " + "\n- ".join(capabilities_context)
-        
-        domain_terms = []
-        if detected_capabilities:
-            for cap, _ in detected_capabilities[:3]:
-                terms = self.taxonomy.get_related_capabilities(cap)
-                domain_terms.extend(terms[:5])
-        
-        domain_context = ""
-        if domain_terms:
-            domain_context = f"\n\nDomain-specific terms to consider:\n- " + "\n- ".join(set(domain_terms))
-        
-        system_prompt = """You are an expert in wire processing, payment systems, and financial transaction processing. 
-Your task is to expand search queries with relevant synonyms, related terms, and corrections for better document retrieval."""
-
-        user_prompt = f"""Expand this search query for a wire processing document search system:
-
-Original query: "{query}"
-{capability_info}
-{domain_context}
-
-Provide:
-1. 3-5 expanded query variations that include synonyms and related terms
-2. 5-10 relevant individual terms that should boost matching documents
-
-Format your response as JSON:
-{{
-    "expanded_queries": ["variation 1", "variation 2", ...],
-    "expanded_terms": ["term1", "term2", ...],
-    "reasoning": "brief explanation"
-}}"""
-
-        try:
-            llm_response = self.call_llm(user_prompt, system_prompt)
-            expansions["llm_response"] = llm_response
-            
-            if llm_response:
-                try:
-                    parsed = json.loads(llm_response)
-                    expansions["queries"] = parsed.get("expanded_queries", [])
-                    expansions["expanded_terms"] = parsed.get("expanded_terms", [])
-                except json.JSONDecodeError:
-                    print("Warning: Could not parse LLM response as JSON")
-        
-        except Exception as e:
-            print(f"Warning: LLM expansion failed: {e}")
-        
-        return expansions
-
-
-class ImprovedQueryProcessor:
-    """
-    Pre-process queries to extract core terms and handle natural language
-    Ensures "how do I implement X" returns same results as "X"
-    FIXES: Issue where similar queries return different documents
-    """
-    
-    def __init__(self):
-        # Comprehensive stopwords
-        self.stopwords = {
-            # Question words
-            'how', 'what', 'when', 'where', 'why', 'who', 'which', 'whose',
-            
-            # Common verbs
-            'do', 'does', 'did', 'is', 'are', 'was', 'were', 'be', 'been',
-            'have', 'has', 'had', 'will', 'would', 'should', 'could', 'can',
-            'may', 'might', 'must', 'shall',
-            
-            # Implementation/action words
-            'implement', 'create', 'build', 'make', 'develop', 'setup', 'configure',
-            'explain', 'describe', 'show', 'tell', 'need', 'want', 'help',
-            
-            # Articles and prepositions
-            'a', 'an', 'the', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
-            'from', 'by', 'as', 'into', 'through', 'during', 'before', 'after',
-            
-            # Pronouns
-            'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her',
-            'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their',
-            
-            # Conjunctions
-            'and', 'or', 'but', 'if', 'then', 'than', 'so', 'because',
-            
-            # Other common words
-            'this', 'that', 'these', 'those', 'there', 'here',
-        }
-        
-        # Words that suggest action/question but should be removed for search
-        self.action_indicators = {
-            'how', 'implement', 'create', 'build', 'setup', 'configure',
-            'explain', 'describe', 'show', 'tell', 'need', 'want', 'help'
-        }
-    
-    def extract_core_terms(self, query: str) -> Dict[str, Any]:
-        """
-        Extract core searchable terms from query
-        
-        Returns:
-            {
-                'core_terms': ['credit', 'party', 'determination'],
-                'original_query': 'how do I implement credit party determination',
-                'cleaned_query': 'credit party determination',
-                'is_question': True,
-                'action_type': 'implement'
-            }
-        """
-        original = query.strip()
-        query_lower = query.lower()
-        
-        # Detect if it's a question
-        is_question = any(query_lower.startswith(q) for q in 
-                         ['how', 'what', 'when', 'where', 'why', 'who'])
-        
-        # Detect action type
-        action_type = None
-        for action in self.action_indicators:
-            if action in query_lower:
-                action_type = action
-                break
-        
-        # Tokenize - keep hyphenated terms together
-        tokens = re.findall(r'\b[\w-]+\b', query_lower)
-        
-        # Extract core terms (non-stopwords)
-        core_terms = []
-        for token in tokens:
-            # Skip single letters and numbers
-            if len(token) <= 1 or token.isdigit():
-                continue
-            
-            # Skip stopwords
-            if token in self.stopwords:
-                continue
-            
-            core_terms.append(token)
-        
-        # Reconstruct cleaned query
-        cleaned_query = ' '.join(core_terms)
-        
-        return {
-            'core_terms': core_terms,
-            'original_query': original,
-            'cleaned_query': cleaned_query,
-            'is_question': is_question,
-            'action_type': action_type,
-            'stopwords_removed': len(tokens) - len(core_terms)
-        }
-    
-    def extract_phrases(self, query: str) -> List[str]:
-        """Extract important multi-word phrases"""
-        phrases = []
-        
-        # Extract quoted phrases
-        quoted = re.findall(r'"([^"]+)"', query)
-        phrases.extend(quoted)
-        
-        # Extract capitalized phrases (likely important)
-        capitalized = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b', query)
-        phrases.extend(capitalized)
-        
-        # Extract technical patterns
-        technical_patterns = [
-            r'pacs\.\d+',
-            r'ISO[\s-]?\d+',
-            r'MT\d{3}',
-            r'[A-Z]{3,5}(?:\s+[A-Z]{3,5})*'  # Acronym sequences
-        ]
-        
-        for pattern in technical_patterns:
-            matches = re.findall(pattern, query, re.IGNORECASE)
-            phrases.extend(matches)
-        
-        return list(set(phrases))
-
-
-class FastKeywordExtractor:
-    """
-    Extract keywords using regex patterns only - NO spaCy required
-    FIXED: Now properly extracts domain terms like 'credit', 'party', 'determination'
-    """
-    
-    def __init__(self):
-        # Domain-specific patterns
-        self.patterns = [
-            (r'ISO[\s-]?\d+', 'iso_standard'),
-            (r'pacs\.\d+(?:\.\d+)*', 'payment_message'),
-            (r'pain\.\d+(?:\.\d+)*', 'payment_message'),
-            (r'camt\.\d+(?:\.\d+)*', 'payment_message'),
-            (r'MT\d{3}', 'swift_message'),
-            (r'ACE[\s-]?\d+', 'ace_code'),
-            (r'[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?', 'bic_code'),
-            (r'\$[A-Z_]+', 'system_function'),
-            (r'[A-Z]{2}\d{2}[A-Z0-9]+', 'iban'),
-        ]
-        
-        # Important domain-specific terms (ALWAYS extract these even if lowercase)
-        self.important_terms = {
-            # Core payment terms
-            'credit', 'debit', 'party', 'determination', 'validation',
-            'payment', 'wire', 'transfer', 'transaction', 'settlement',
-            'clearing', 'posting', 'execution', 'routing', 'initiation',
-            
-            # Validation & screening
-            'screening', 'sanctions', 'ofac', 'fircosoft', 'compliance',
-            'verification', 'confirmation', 'approval', 'authorization',
-            
-            # Networks & standards
-            'fedwire', 'chips', 'swift', 'ach', 'sepa', 'target',
-            'iso20022', 'pacs', 'pain', 'camt',
-            
-            # Entities & accounts
-            'creditor', 'debtor', 'beneficiary', 'originator', 'intermediary',
-            'nostro', 'vostro', 'account', 'customer', 'client',
-            
-            # Business capabilities
-            'repair', 'enrichment', 'orchestration', 'workflow', 'processing',
-            'reconciliation', 'exception', 'investigation', 'monitoring',
-            
-            # Technical
-            'format', 'message', 'instruction', 'queue', 'endpoint',
-            'service', 'api', 'integration', 'interface', 'channel'
-        }
-        
-        # Common stopwords to exclude (EXPANDED to filter generic business terms)
-        self.stopwords = {
-            # Basic stopwords
-            'process', 'system', 'data', 'information',
-            'general', 'related', 'based', 'using', 'including', 'provides',
-            'allows', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at',
-            'to', 'for', 'of', 'with', 'from', 'by', 'as', 'is', 'was', 'are',
-            'were', 'been', 'be', 'have', 'has', 'had', 'do', 'does', 'did',
-            'will', 'would', 'should', 'could', 'may', 'might', 'must', 'can',
-            'this', 'that', 'these', 'those', 'it', 'its', 'they', 'their', 'them',
-            
-            # Generic business terms that pollute results
-            'business', 'approved', 'technical', 'approval', 'requirement',
-            'requirements', 'document', 'documentation', 'section', 'page',
-            'table', 'figure', 'example', 'note', 'reference', 'description',
-            'overview', 'summary', 'details', 'detail', 'status', 'type',
-            'item', 'value', 'field', 'name', 'number', 'date', 'time',
-            'version', 'change', 'update', 'new', 'old', 'current', 'previous',
-            'next', 'first', 'last', 'high', 'low', 'medium', 'level', 'phase',
-            'step', 'procedure', 'method', 'function', 'operation', 'activity',
-            'action', 'result', 'output', 'input', 'parameter', 'attribute',
-            'property', 'component', 'element', 'module', 'application',
-            'user', 'source', 'target', 'object', 'entity', 'record', 'entry',
-            'list', 'set', 'group', 'class', 'category', 'code', 'identifier',
-            'key', 'index', 'flag', 'option', 'setting', 'configuration',
-            'setup', 'installation', 'deployment', 'implementation', 'definition',
-            'specification', 'standard', 'policy', 'rule', 'guideline', 'principle',
-            'practice', 'pattern', 'model', 'template', 'structure', 'schema',
-            'design', 'architecture', 'framework', 'platform', 'technology',
-            'tool', 'utility', 'helper', 'support', 'control', 'manage'
-        }
-    
-    def extract(self, text: str, max_keywords: int = 20) -> List[Tuple[str, float]]:
-        """
-        Extract keywords with confidence scores using regex only
-        Returns: List of (keyword, confidence) tuples
-        """
-        if not text or len(text.strip()) < 10:
-            return []
-        
-        keyword_scores = defaultdict(float)
-        text_lower = text.lower()
-        
-        # 1. Domain-specific patterns (highest confidence)
-        for pattern, pattern_type in self.patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                keyword_scores[match.lower()] += 3.0
-        
-        # 2. Important domain terms (NEW: extract these even if lowercase)
-        for term in self.important_terms:
-            if term in text_lower:
-                count = text_lower.count(term)
-                # BOOSTED: Important terms get highest priority
-                keyword_scores[term] += 3.0 * math.log1p(count)
-        
-        # 3. Capitalized words (medium-high confidence, but LOWER than important terms)
-        capitalized_words = re.findall(r'\b[A-Z][a-z]{2,}\b', text)
-        for word in capitalized_words:
-            word_lower = word.lower()
-            # Only add if NOT stopword and NOT already in important_terms
-            if (word_lower not in self.stopwords and 
-                word_lower not in self.important_terms):
-                keyword_scores[word_lower] += 1.5
-        
-        # 4. Multi-word capitalized phrases (high confidence)
-        capitalized_phrases = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b', text)
-        for phrase in capitalized_phrases:
-            if len(phrase) > 5:
-                keyword_scores[phrase.lower()] += 2.0
-        
-        # 5. Business capability keywords (boost known terms)
-        capability_keywords = BusinessCapabilityTaxonomy.get_all_keywords()
-        for kw in capability_keywords:
-            if kw in text_lower:
-                count = text_lower.count(kw)
-                keyword_scores[kw] += 2.0 * math.log1p(count)
-        
-        # 6. Extract individual words from multi-word capability keywords (NEW FIX)
-        for kw in capability_keywords:
-            words = kw.split()
-            if len(words) > 1:  # Multi-word phrase
-                for word in words:
-                    if (len(word) > 3 and 
-                        word not in self.stopwords and 
-                        word in text_lower):
-                        count = text_lower.count(word)
-                        keyword_scores[word] += 1.5 * math.log1p(count)
-        
-        # 7. Hyphenated technical terms
-        hyphenated = re.findall(r'\b[a-z]+-[a-z]+\b', text_lower)
-        for term in hyphenated:
-            if len(term) > 5:
-                keyword_scores[term] += 1.5
-        
-        # 8. Acronyms (3-5 capital letters)
-        acronyms = re.findall(r'\b[A-Z]{3,5}\b', text)
-        for acronym in acronyms:
-            keyword_scores[acronym.lower()] += 1.8
-        
-        # Filter and normalize
-        filtered = []
-        for kw, score in keyword_scores.items():
-            # Filter out stopwords and very short terms
-            if (len(kw) > 2 and 
-                kw not in self.stopwords and
-                not all(c.isdigit() for c in kw)):
-                filtered.append((kw, score))
-        
-        # Sort by score and return top N
-        filtered.sort(key=lambda x: x[1], reverse=True)
-        return filtered[:max_keywords]
+        keywords = []
+        for kws in cls.CAPABILITIES.values():
+            keywords.extend(kws)
+        return list(set(keywords))
 
 
 class CapabilityMapper:
     """Map documents to business capabilities"""
-    
-    def __init__(self):
+
+    def __init__(self, stemmer: Optional[TextStemmer] = None):
         self.taxonomy = BusinessCapabilityTaxonomy()
+        self.stemmer = stemmer
         self.capability_keywords = {}
-        
+
         # Build keyword to capability mapping
         for capability, keywords in self.taxonomy.CAPABILITIES.items():
             for kw in keywords:
-                if kw not in self.capability_keywords:
-                    self.capability_keywords[kw] = []
-                self.capability_keywords[kw].append(capability)
-    
+                if stemmer and stemmer.use_stemming:
+                    kw_stem = self.stemmer.stem_text(kw)
+                else:
+                    kw_stem = kw
+
+                if kw_stem not in self.capability_keywords:
+                    self.capability_keywords[kw_stem] = []
+                self.capability_keywords[kw_stem].append(capability)
+
     def map_to_capabilities(
-        self, 
-        keywords: List[Tuple[str, float]], 
+        self,
+        keywords: List[Tuple[str, float]],
         text: str
     ) -> List[Tuple[str, float]]:
-        """Map extracted keywords to business capabilities"""
+        """Map keywords to business capabilities"""
         capability_scores = defaultdict(float)
+
         text_lower = text.lower()
-        
-        # Score each capability based on keyword matches
+        if self.stemmer and self.stemmer.use_stemming:
+            text_stemmed = self.stemmer.stem_text(text_lower)
+        else:
+            text_stemmed = text_lower
+
+        # Score from keywords
         for keyword, kw_score in keywords:
             if keyword in self.capability_keywords:
-                for capability in self.capability_keywords[keyword]:
-                    capability_scores[capability] += kw_score
-            
-            expanded = self.taxonomy.expand_with_synonyms(keyword)
-            for exp_kw in expanded:
-                if exp_kw in self.capability_keywords:
-                    for capability in self.capability_keywords[exp_kw]:
-                        capability_scores[capability] += kw_score * 0.5
-        
-        # Direct capability keyword matching in text
+                for cap in self.capability_keywords[keyword]:
+                    capability_scores[cap] += kw_score
+
+        # Direct text matching
         for capability, keywords_list in self.taxonomy.CAPABILITIES.items():
             for kw in keywords_list:
-                if kw in text_lower:
+                if self.stemmer and self.stemmer.use_stemming:
+                    kw_stem = self.stemmer.stem_text(kw)
+                    count = text_stemmed.count(kw_stem)
+                else:
                     count = text_lower.count(kw)
+
+                if count > 0:
                     capability_scores[capability] += math.log1p(count) * 1.5
-        
-        # Normalize scores
+
+        # Normalize
         if capability_scores:
             max_score = max(capability_scores.values())
             capability_scores = {
-                cap: score / max_score 
+                cap: score / max_score
                 for cap, score in capability_scores.items()
             }
-        
-        # Sort by score
-        sorted_capabilities = sorted(
-            capability_scores.items(), 
-            key=lambda x: x[1], 
+
+        # Sort and return
+        sorted_caps = sorted(
+            capability_scores.items(),
+            key=lambda x: x[1],
             reverse=True
         )
-        
-        return sorted_capabilities
+        return sorted_caps
 
 
-class WireProcessingIndexer:
-    """Fast PDF indexer for wire processing documents - NO SPACY VERSION"""
-    
-    def __init__(
-        self,
-        pdf_folder: str,
-        index_path: str = "./wire_index",
-        embedding_model: str = "all-MiniLM-L6-v2",
-        chunk_size: int = 512,
-        chunk_overlap: int = 128,
-        enable_ocr: bool = False,
-        use_embeddings: bool = False  # Default False for lite version
-    ):
-        self.pdf_folder = Path(pdf_folder)
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.enable_ocr = enable_ocr and OCR_AVAILABLE
-        self.index_path = Path(index_path)
-        self.index_path.mkdir(parents=True, exist_ok=True)
-        self.use_embeddings = use_embeddings and EMBEDDINGS_AVAILABLE and FAISS_AVAILABLE
-        
-        print("Initializing keyword extractor (regex-based, FIXED for domain terms)...")
-        self.keyword_extractor = FastKeywordExtractor()
-        
-        print("Initializing capability mapper...")
-        self.capability_mapper = CapabilityMapper()
-        
-        if self.use_embeddings:
-            print(f"Loading embedding model: {embedding_model}")
-            self.embedder = SentenceTransformer(embedding_model)
-            self.embedding_dim = self.embedder.get_sentence_embedding_dimension()
-            self.faiss_index = faiss.IndexFlatIP(self.embedding_dim)
+# ================================================================================
+# File Extraction
+# ================================================================================
+
+class UniversalFileExtractor:
+    """Extract text from PDFs, code, and text files"""
+
+    def __init__(self):
+        self.pdf_available = PDF_AVAILABLE
+
+    def get_file_type(self, file_path: Path) -> str:
+        """Determine file type from extension"""
+        ext = file_path.suffix.lower()
+        for file_type, extensions in SUPPORTED_EXTENSIONS.items():
+            if ext in extensions:
+                return file_type
+        return 'unknown'
+
+    def extract(self, file_path: Path) -> Dict[str, Any]:
+        """Universal file extraction dispatcher"""
+        file_type = self.get_file_type(file_path)
+
+        if file_type == 'pdf':
+            return self._extract_pdf(file_path)
+        elif file_type == 'code':
+            return self._extract_code(file_path)
         else:
-            print("⚡ Embeddings disabled - using pure keyword/BM25 search (faster!)")
-            self.embedder = None
-            self.embedding_dim = None
-            self.faiss_index = None
-        
-        self.metadata_store = []
-        self.document_store = []
-        self.keyword_doc_counts = Counter()
-        self.capability_doc_counts = Counter()
-        self.total_chunks = 0
-    
-    def extract_text_from_pdf(self, pdf_path: Path) -> Dict[str, Any]:
-        """Extract text, tables, and images from PDF"""
+            return self._extract_text(file_path)
+
+    def _extract_pdf(self, pdf_path: Path) -> Dict[str, Any]:
+        """Extract text from PDF"""
         content = {
             "text": "",
-            "tables": [],
-            "images": []
+            "file_type": "pdf",
+            "line_count": 0,
+            "has_tables": False
         }
-        
+
+        if not self.pdf_available:
+            return content
+
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                for page_num, page in enumerate(pdf.pages):
+                for page in pdf.pages:
                     page_text = page.extract_text() or ""
                     content["text"] += page_text + "\n"
-                    
+
                     tables = page.extract_tables()
                     if tables:
+                        content["has_tables"] = True
                         for table in tables:
                             table_text = self._table_to_text(table)
-                            content["tables"].append({
-                                "page": page_num + 1,
-                                "text": table_text
-                            })
                             content["text"] += f"\n[TABLE]\n{table_text}\n[/TABLE]\n"
-        
         except Exception as e:
-            print(f"Error extracting from {pdf_path}: {e}")
-            try:
-                with open(pdf_path, 'rb') as file:
-                    pdf_reader = PyPDF2.PdfReader(file)
-                    for page in pdf_reader.pages:
-                        content["text"] += page.extract_text() + "\n"
-            except Exception as e2:
-                print(f"Fallback also failed: {e2}")
-        
+            print(f"Error extracting {pdf_path}: {e}")
+
+        content["line_count"] = content["text"].count('\n')
         return content
-    
+
+    def _extract_code(self, code_path: Path) -> Dict[str, Any]:
+        """Extract text from code files with metadata"""
+        content = {
+            "text": "",
+            "file_type": "code",
+            "language": code_path.suffix[1:],
+            "line_count": 0,
+            "metadata": {}
+        }
+
+        # Try different encodings
+        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+            try:
+                with open(code_path, 'r', encoding=encoding) as f:
+                    content["text"] = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                print(f"Error reading {code_path}: {e}")
+                break
+
+        content["line_count"] = content["text"].count('\n')
+
+        # Extract code metadata
+        content["metadata"] = self._extract_code_metadata(
+            content["text"],
+            content["language"]
+        )
+
+        return content
+
+    def _extract_text(self, text_path: Path) -> Dict[str, Any]:
+        """Extract text from plain text files"""
+        content = {
+            "text": "",
+            "file_type": "text",
+            "line_count": 0
+        }
+
+        for encoding in ['utf-8', 'latin-1', 'cp1252']:
+            try:
+                with open(text_path, 'r', encoding=encoding) as f:
+                    content["text"] = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+
+        content["line_count"] = content["text"].count('\n')
+        return content
+
+    def _extract_code_metadata(self, code_text: str, language: str) -> Dict[str, Any]:
+        """Extract metadata from code (functions, classes, imports)"""
+        metadata = {
+            "functions": [],
+            "classes": [],
+            "imports": [],
+            "system_calls": [],
+            "has_main": False
+        }
+
+        # Language-specific patterns
+        patterns = {
+            'python': {
+                'function': r'def\s+(\w+)\s*\(',
+                'class': r'class\s+(\w+)\s*[\(:]',
+                'import': r'(?:from\s+\S+\s+)?import\s+(\S+)'
+            },
+            'java': {
+                'function': r'(?:public|private|protected)?\s+\w+\s+(\w+)\s*\(',
+                'class': r'(?:public|private)?\s+class\s+(\w+)',
+                'import': r'import\s+([\w\.]+);'
+            },
+            'c': {
+                'function': r'\w+\s+(\w+)\s*\([^\)]*\)\s*\{',
+                'class': r'(?:struct|typedef\s+struct)\s+(\w+)',
+                'include': r'#include\s+[<"]([^>"]+)[>"]'
+            },
+            'cpp': {
+                'function': r'\w+\s+(\w+)\s*\([^\)]*\)\s*\{',
+                'class': r'class\s+(\w+)',
+                'include': r'#include\s+[<"]([^>"]+)[>"]'
+            },
+            'tal': {
+                'procedure': r'(?:PROC|PROCEDURE)\s+(\w+)',
+                'subproc': r'SUBPROC\s+(\w+)',
+                'function': r'INT\s+PROCEDURE\s+(\w+)',
+                'system_call': r'\$\(\w+\)',
+                'variable': r'(?:INT|STRING|FIXED|REAL)\s+(\w+)'
+            },
+            'cbl': {
+                'procedure': r'(?:PROCEDURE\s+DIVISION|PERFORM)\s+(\w+(?:-\w+)*)',
+                'section': r'(\w+(?:-\w+)*)\s+SECTION',
+                'paragraph': r'^(\w+(?:-\w+)*)\./',
+                'working_storage': r'01\s+(\w+(?:-\w+)*)',
+                'copybook': r'COPY\s+(\w+)'
+            },
+            'cobol': {
+                'procedure': r'(?:PROCEDURE\s+DIVISION|PERFORM)\s+(\w+(?:-\w+)*)',
+                'section': r'(\w+(?:-\w+)*)\s+SECTION',
+                'working_storage': r'01\s+(\w+(?:-\w+)*)'
+            },
+            'sql': {
+                'procedure': r'CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(\w+)',
+                'function': r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\w+)',
+                'table': r'(?:FROM|JOIN)\s+(\w+)',
+                'cte': r'WITH\s+(\w+)\s+AS'
+            }
+        }
+
+        lang_patterns = patterns.get(language, patterns.get('python', {}))
+
+        # Extract functions/procedures
+        for key in ['function', 'procedure', 'subproc']:
+            if key in lang_patterns:
+                matches = re.findall(
+                    lang_patterns[key],
+                    code_text,
+                    re.IGNORECASE | re.MULTILINE
+                )
+                metadata['functions'].extend(list(set(matches))[:50])
+
+        # Extract classes
+        if 'class' in lang_patterns:
+            classes = re.findall(
+                lang_patterns['class'],
+                code_text,
+                re.IGNORECASE | re.MULTILINE
+            )
+            metadata['classes'] = list(set(classes))[:50]
+
+        # Extract imports/includes
+        for key in ['import', 'include', 'copybook']:
+            if key in lang_patterns:
+                imports = re.findall(
+                    lang_patterns[key],
+                    code_text,
+                    re.IGNORECASE | re.MULTILINE
+                )
+                metadata['imports'].extend(list(set(imports))[:50])
+
+        # Extract system calls (TAL-specific)
+        if 'system_call' in lang_patterns:
+            system_calls = re.findall(lang_patterns['system_call'], code_text)
+            metadata['system_calls'] = list(set(system_calls))[:50]
+
+        # Check for main
+        if 'main' in [f.lower() for f in metadata['functions']]:
+            metadata['has_main'] = True
+
+        return metadata
+
     def _table_to_text(self, table: List[List]) -> str:
-        """Convert table structure to text"""
+        """Convert table to text"""
         if not table:
             return ""
-        
+
         text_rows = []
         for row in table:
-            cleaned_row = [str(cell) if cell else "" for cell in row]
-            text_rows.append(" | ".join(cleaned_row))
-        
+            cleaned = [str(cell) if cell else "" for cell in row]
+            text_rows.append(" | ".join(cleaned))
+
         return "\n".join(text_rows)
-    
+
+
+# ================================================================================
+# Keyword Extraction
+# ================================================================================
+
+class KeywordExtractor:
+    """Extract keywords from text using patterns and domain knowledge"""
+
+    def __init__(self, stemmer: Optional[TextStemmer] = None):
+        self.stemmer = stemmer
+
+        # Domain-specific patterns
+        self.patterns = [
+            (r'ISO[\s-]?\d+', 'iso_standard'),
+            (r'pacs\.\d+\{\?\.\d+\}*', 'payment_message'),
+            (r'pain\.\d+\{\?\.\d+\}*', 'payment_message'),
+            (r'camt\.\d+\{\?\.\d+\}*', 'payment_message'),
+            (r'MT\d{3}', 'swift_message'),
+            (r'ACE[\s-]?\d+', 'ace_code'),
+            (r'[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?', 'bic_code'),
+            (r'\$\{[A-Z_]+\}', 'system_function'),
+        ]
+
+        # Important domain terms
+        self.important_terms = {
+            'credit', 'debit', 'party', 'determination', 'validation',
+            'payment', 'wire', 'transfer', 'transaction', 'settlement',
+            'clearing', 'posting', 'execution', 'routing', 'initiation',
+            'cutoff', 'deadline', 'eod', 'sod', 'intraday', 'batch',
+            'screening', 'sanctions', 'ofac', 'fircosoft', 'compliance',
+            'fedwire', 'chips', 'swift', 'ach', 'sepa',
+            'creditor', 'debtor', 'beneficiary', 'originator',
+            'repair', 'enrichment', 'orchestration', 'workflow',
+            'function', 'class', 'method', 'procedure'
+        }
+
+        if stemmer and stemmer.use_stemming:
+            self.important_terms_stemmed = {stemmer.stem(t) for t in self.important_terms}
+        else:
+            self.important_terms_stemmed = self.important_terms
+
+        # Stopwords
+        if stemmer and stemmer.use_stemming:
+            self.stopwords = {stemmer.stem(sw) for sw in STOPWORDS}
+        else:
+            self.stopwords = STOPWORDS
+
+    def extract(self, text: str, max_keywords: int = 20) -> List[Tuple[str, float]]:
+        """Extract keywords with confidence scores"""
+        if not text or len(text.strip()) < 10:
+            return []
+
+        keyword_scores = defaultdict(float)
+        text_lower = text.lower()
+
+        # Tokenize
+        words = re.findall(r'\b[\w-]+\b', text_lower)
+        if self.stemmer and self.stemmer.use_stemming:
+            stemmed_words = [self.stemmer.stem(w) for w in words]
+        else:
+            stemmed_words = words
+
+        # 1. Domain patterns (highest confidence)
+        for pattern, pattern_type in self.patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                keyword_scores[match.lower()] += 3.0
+
+        # 2. Important domain terms
+        for term_stem in self.important_terms_stemmed:
+            count = stemmed_words.count(term_stem)
+            if count > 0:
+                keyword_scores[term_stem] += 3.0 * math.log1p(count)
+
+        # 3. Capitalized words
+        capitalized = re.findall(r'\b[A-Z][a-z]{2,}\b', text)
+        for word in capitalized:
+            if self.stemmer and self.stemmer.use_stemming:
+                word_stem = self.stemmer.stem(word.lower())
+            else:
+                word_stem = word.lower()
+
+            if word_stem not in self.stopwords:
+                keyword_scores[word_stem] += 1.5
+
+        # 4. Business capability keywords
+        capability_keywords = BusinessCapabilityTaxonomy.get_all_keywords()
+        for kw in capability_keywords:
+            if self.stemmer and self.stemmer.use_stemming:
+                kw_stem = self.stemmer.stem_text(kw)
+                count = text_lower.count(kw)
+            else:
+                kw_stem = kw
+                count = text_lower.count(kw)
+
+            if count > 0:
+                keyword_scores[kw_stem] += 2.0 * math.log1p(count)
+
+        # Filter and sort
+        filtered = []
+        for kw, score in keyword_scores.items():
+            if (len(kw) > 2 and
+                kw not in self.stopwords and
+                not kw.isdigit()):
+                filtered.append((kw, score))
+
+        filtered.sort(key=lambda x: x[1], reverse=True)
+        return filtered[:max_keywords]
+
+
+# ================================================================================
+# Main Indexer
+# ================================================================================
+
+class UniversalFileIndexer:
+    """Universal file indexer with BM25, stemming, and capability mapping"""
+
+    def __init__(
+        self,
+        files_folder: str,
+        index_path: str = "./universal_index",
+        file_extensions: Optional[List[str]] = None,
+        chunk_size: int = 512,
+        chunk_overlap: int = 128,
+        use_stemming: bool = True
+    ):
+        self.files_folder = Path(files_folder)
+        self.index_path = Path(index_path)
+        self.index_path.mkdir(parents=True, exist_ok=True)
+
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.use_stemming = use_stemming
+
+        # File extensions
+        if file_extensions:
+            self.file_extensions = [
+                ext if ext.startswith('.') else f'.{ext}'
+                for ext in file_extensions
+            ]
+        else:
+            self.file_extensions = list(ALL_EXTENSIONS)
+
+        # Components
+        self.file_extractor = UniversalFileExtractor()
+        self.stemmer = TextStemmer(use_stemming=use_stemming)
+        self.keyword_extractor = KeywordExtractor(stemmer=self.stemmer)
+        self.capability_mapper = CapabilityMapper(stemmer=self.stemmer)
+        self.query_expander = DomainQueryExpander(stemmer=self.stemmer)
+
+        # Storage
+        self.metadata_store = []
+        self.document_store = []
+        self.bm25 = None
+
+        # Statistics
+        self.keyword_doc_counts = Counter()
+        self.capability_doc_counts = Counter()
+        self.filetype_counts = Counter()
+        self.total_chunks = 0
+
+    def scan_files(self, verbose: bool = False) -> List[Path]:
+        """Scan folder for supported files (case-insensitive)"""
+        print(f"Scanning: {self.files_folder}")
+
+        files = []
+        seen = set()  # Avoid duplicates
+
+        # Get all files recursively
+        all_files = list(self.files_folder.glob("**/*"))
+
+        if verbose:
+            print(f"\nTotal files found: {len([f for f in all_files if f.is_file()])}")
+            print(f"Looking for extensions: {', '.join(self.file_extensions[:20])}...")
+
+        # Filter by extension (case-insensitive)
+        extensions_lower = [ext.lower() for ext in self.file_extensions]
+
+        for file_path in all_files:
+            if file_path.is_file():
+                file_ext_lower = file_path.suffix.lower()
+                if file_ext_lower in extensions_lower:
+                    # Avoid duplicates
+                    if str(file_path) not in seen:
+                        files.append(file_path)
+                        seen.add(str(file_path))
+                        if verbose:
+                            print(f"  ✓ {file_path.name}")
+            elif verbose and file_path.suffix:
+                print(f"  ✗ {file_path.name} (extension: {file_path.suffix})")
+
+        # Print breakdown by extension
+        ext_counts = {}
+        for f in files:
+            ext = f.suffix.lower()
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+        print(f"\nFound {len(files)} matching files:")
+        for ext, count in sorted(ext_counts.items()):
+            print(f"  {ext}: {count} files")
+
+        return files
+
     def chunk_text(self, text: str, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Split text into overlapping chunks"""
         words = text.split()
         chunks = []
-        
+
         for i in range(0, len(words), self.chunk_size - self.chunk_overlap):
             chunk_words = words[i:i + self.chunk_size]
             chunk_text = " ".join(chunk_words)
-            
+
             if len(chunk_text.strip()) < 50:
                 continue
-            
+
             chunk_id = hashlib.md5(chunk_text.encode()).hexdigest()
-            
+
             chunks.append({
                 "id": chunk_id,
                 "text": chunk_text,
@@ -877,596 +912,327 @@ class WireProcessingIndexer:
                 "end_word": i + len(chunk_words),
                 **metadata
             })
-        
+
         return chunks
-    
-    def index_pdfs(self, batch_size: int = 32):
+
+    def index_files(self, verbose_scan: bool = False):
         """Main indexing pipeline"""
-        print(f"Scanning PDF folder: {self.pdf_folder}")
-        pdf_files = list(self.pdf_folder.glob("**/*.pdf"))
-        print(f"Found {len(pdf_files)} PDF files")
-        
+        files = self.scan_files(verbose=verbose_scan)
+
+        if not files:
+            print("No files found!")
+            return None
+
         all_chunks = []
-        
+
         print("\n=== Phase 1: Extracting Content ===")
-        for idx, pdf_path in enumerate(pdf_files, 1):
-            print(f"Processing [{idx}/{len(pdf_files)}]: {pdf_path.name}")
-            
-            content = self.extract_text_from_pdf(pdf_path)
-            if not content["text"].strip():
+        for idx, file_path in enumerate(files, 1):
+            print(f"[{idx}/{len(files)}] {file_path.name}")
+
+            # Extract content
+            content = self.file_extractor.extract(file_path)
+
+            if not content.get("text") or len(content["text"].strip()) < 10:
                 print(f"  ⚠ No text extracted, skipping")
                 continue
-            
-            print(f"  Extracting keywords...")
+
+            file_type = content.get("file_type", "unknown")
+            self.filetype_counts[file_type] += 1
+
+            # Extract keywords
             keywords = self.keyword_extractor.extract(content["text"])
-            print(f"  Found {len(keywords)} keywords")
-            if keywords:
-                print(f"  Top keywords: {', '.join([kw for kw, _ in keywords[:5]])}")
-            
-            print(f"  Mapping to capabilities...")
+
+            # Map capabilities
             capabilities = self.capability_mapper.map_to_capabilities(
-                keywords, 
+                keywords,
                 content["text"]
             )
-            print(f"  Mapped to {len(capabilities)} capabilities")
-            
-            if capabilities:
-                top_3 = capabilities[:3]
-                for cap, score in top_3:
-                    print(f"    - {cap}: {score:.2f}")
-            
+
+            # Metadata
             doc_metadata = {
-                "source_file": str(pdf_path.name),
-                "source_path": str(pdf_path),
-                "file_size": pdf_path.stat().st_size,
-                "has_tables": len(content["tables"]) > 0,
-                "table_count": len(content["tables"])
+                "source_file": str(file_path.name),
+                "source_path": str(file_path),
+                "file_type": file_type,
+                "file_size": file_path.stat().st_size,
+                "language": content.get("language", ""),
+                "line_count": content.get("line_count", 0),
+                "has_tables": content.get("has_tables", False),
+                "code_metadata": content.get("metadata", {})
             }
-            
+
+            # Chunk
             chunks = self.chunk_text(content["text"], doc_metadata)
-            
+
             for chunk in chunks:
-                chunk["keywords"] = [kw for kw, score in keywords]
-                chunk["keyword_scores"] = dict(keywords)
-                chunk["capabilities"] = [cap for cap, score in capabilities]
-                chunk["capability_scores"] = dict(capabilities)
-                
+                chunk["keywords"] = [kw for kw, _ in keywords[:10]]
+                chunk["capabilities"] = [cap for cap, _ in capabilities[:3]]
+
                 self.keyword_doc_counts.update(set(chunk["keywords"]))
                 self.capability_doc_counts.update(set(chunk["capabilities"]))
-            
+
             all_chunks.extend(chunks)
             print(f"  Created {len(chunks)} chunks")
-        
+
         self.total_chunks = len(all_chunks)
-        print(f"\nTotal chunks created: {self.total_chunks}")
-        
-        print("\n=== Phase 2: Computing TF-IDF Scores ===")
+        print(f"\nTotal chunks: {self.total_chunks}")
+
+        # Phase 2: Compute TF-IDF
+        print("\n=== Phase 2: Computing TF-IDF ===")
         idf_scores = {}
         for keyword, doc_count in self.keyword_doc_counts.items():
             if doc_count > 0:
                 idf = math.log(self.total_chunks / doc_count)
                 idf_scores[keyword] = idf
-        
-        print(f"Computed IDF for {len(idf_scores)} unique keywords")
-        
+
+        # Phase 3: Store documents
+        print("\n=== Phase 3: Storing Documents ===")
         for chunk in all_chunks:
-            keyword_weights = {}
-            for kw in chunk["keywords"]:
-                if kw in idf_scores:
-                    keyword_weights[kw] = idf_scores[kw]
-            chunk["keyword_weights"] = keyword_weights
-            
-            sorted_kw = sorted(
-                keyword_weights.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-            chunk["top_keywords"] = [kw for kw, _ in sorted_kw[:5]]
-        
-        if self.use_embeddings:
-            print("\n=== Phase 3: Generating Embeddings ===")
-            for i in range(0, len(all_chunks), batch_size):
-                batch = all_chunks[i:i + batch_size]
-                texts = [chunk["text"] for chunk in batch]
-                embeddings = self.embedder.encode(texts, show_progress_bar=False)
-                faiss.normalize_L2(embeddings)
-                self.faiss_index.add(embeddings.astype('float32'))
-                
-                for chunk in batch:
-                    top_capabilities = chunk["capabilities"][:3]
-                    metadata = {
-                        "source_file": chunk["source_file"],
-                        "chunk_index": chunk["chunk_index"],
-                        "has_tables": chunk["has_tables"],
-                        "keywords": chunk["keywords"][:10],
-                        "top_keywords": chunk["top_keywords"],
-                        "capabilities": top_capabilities,
-                        "primary_capability": top_capabilities[0] if top_capabilities else "unknown",
-                        "capability_count": len(chunk["capabilities"]),
-                        "capability_scores": chunk["capability_scores"]
-                    }
-                    self.metadata_store.append(metadata)
-                    self.document_store.append(chunk["text"])
-                
-                print(f"  Indexed batch {i//batch_size + 1}/{(len(all_chunks)-1)//batch_size + 1}")
-        else:
-            print("\n=== Phase 3: Storing Metadata (No Embeddings) ===")
-            for chunk in all_chunks:
-                top_capabilities = chunk["capabilities"][:3]
-                metadata = {
-                    "source_file": chunk["source_file"],
-                    "chunk_index": chunk["chunk_index"],
-                    "has_tables": chunk["has_tables"],
-                    "keywords": chunk["keywords"][:10],
-                    "top_keywords": chunk["top_keywords"],
-                    "capabilities": top_capabilities,
-                    "primary_capability": top_capabilities[0] if top_capabilities else "unknown",
-                    "capability_count": len(chunk["capabilities"]),
-                    "capability_scores": chunk["capability_scores"]
-                }
-                self.metadata_store.append(metadata)
-                self.document_store.append(chunk["text"])
-            
-            print(f"✓ Stored {len(all_chunks)} chunks (keyword search only)")
-        
-        print("\n=== Saving Index to Disk ===")
-        
-        if self.use_embeddings:
-            faiss_index_path = self.index_path / "faiss.index"
-            faiss.write_index(self.faiss_index, str(faiss_index_path))
-            print(f"✓ Saved FAISS index to: {faiss_index_path}")
-        
-        metadata_path = self.index_path / "metadata.pkl"
-        documents_path = self.index_path / "documents.pkl"
-        
-        with open(metadata_path, 'wb') as f:
+            # Store processed text
+            if self.use_stemming:
+                processed_text = self.stemmer.stem_text(chunk["text"])
+            else:
+                processed_text = chunk["text"]
+
+            self.document_store.append(processed_text)
+
+            # Store metadata
+            top_capabilities = chunk["capabilities"][:3]
+            metadata = {
+                "source_file": chunk["source_file"],
+                "file_type": chunk["file_type"],
+                "language": chunk.get("language", ""),
+                "chunk_index": chunk["chunk_index"],
+                "keywords": chunk["keywords"],
+                "capabilities": top_capabilities,
+                "primary_capability": top_capabilities[0] if top_capabilities else "unknown",
+                "text_snippet": chunk["text"][:500]  # For display
+            }
+
+            self.metadata_store.append(metadata)
+
+        # Phase 4: Build BM25 index (CRITICAL - saves index!)
+        print("\n=== Phase 4: Building BM25 Index ===")
+        tokenized_docs = [doc.split() for doc in self.document_store]
+        self.bm25 = BM25Okapi(tokenized_docs)
+        print("✓ BM25 index built")
+
+        # Phase 5: Save everything
+        print("\n=== Phase 5: Saving Index ===")
+
+        with open(self.index_path / "metadata.pkl", 'wb') as f:
             pickle.dump(self.metadata_store, f)
-        print(f"✓ Saved metadata to: {metadata_path}")
-        
-        with open(documents_path, 'wb') as f:
+        print("✓ Saved metadata")
+
+        with open(self.index_path / "documents.pkl", 'wb') as f:
             pickle.dump(self.document_store, f)
-        print(f"✓ Saved documents to: {documents_path}")
-        
-        stats_path = self.index_path / "stats.json"
+        print("✓ Saved documents")
+
+        # CRITICAL: Save BM25 index
+        with open(self.index_path / "bm25.pkl", 'wb') as f:
+            pickle.dump(self.bm25, f)
+        print("✓ Saved BM25 index")
+
+        # Save statistics
         stats = {
-            "total_chunks": len(all_chunks),
+            "total_chunks": self.total_chunks,
             "total_keywords": len(idf_scores),
             "total_capabilities": len(self.capability_doc_counts),
-            "pdf_files": len(pdf_files),
+            "total_files": len(files),
+            "file_types": dict(self.filetype_counts),
             "idf_scores": idf_scores,
             "capability_distribution": dict(self.capability_doc_counts),
-            "embedding_dim": self.embedding_dim,
-            "use_embeddings": self.use_embeddings
+            "use_stemming": self.use_stemming,
+            "file_extensions": self.file_extensions
         }
-        
-        with open(stats_path, 'w') as f:
+
+        with open(self.index_path / "stats.json", 'w') as f:
             json.dump(stats, f, indent=2)
-        print(f"✓ Saved statistics to: {stats_path}")
-        
+        print("✓ Saved statistics")
+
+        self.print_statistics()
+
         return stats
-    
-    def get_statistics(self):
-        """Display indexing statistics"""
-        print("\n=== Indexing Statistics ===")
-        print(f"Total chunks: {self.total_chunks}")
-        print(f"Unique keywords: {len(self.keyword_doc_counts)}")
-        print(f"Unique capabilities: {len(self.capability_doc_counts)}")
-        
-        print("\n=== Top 10 Capabilities by Document Count ===")
+
+    def print_statistics(self):
+        """Print indexing statistics"""
+        print("\n" + "="*70)
+        print("INDEXING STATISTICS")
+        print("="*70)
+        print(f"Total chunks:            {self.total_chunks}")
+        print(f"Unique keywords:         {len(self.keyword_doc_counts)}")
+        print(f"Unique capabilities:     {len(self.capability_doc_counts)}")
+        print(f"Stemming:                {'Enabled' if self.use_stemming else 'Disabled'}")
+
+        print("\nFile Types:")
+        for file_type, count in self.filetype_counts.items():
+            print(f"  {file_type:15s} {count:4d} files")
+
+        print("\nTop 10 Capabilities:")
         for cap, count in self.capability_doc_counts.most_common(10):
-            print(f"  {cap:40s} - {count:4d} chunks")
-        
-        print("\n=== Top 10 Keywords by Document Count ===")
-        for kw, count in self.keyword_doc_counts.most_common(10):
-            idf = math.log(self.total_chunks / count) if count > 0 else 0
-            print(f"  {kw:30s} - {count:4d} chunks (IDF: {idf:.3f})")
+            print(f"  {cap:40s} {count:4d} chunks")
 
 
-class WireProcessingSearcher:
-    """Fast search using BM25 with enhanced query processing - NO SPACY VERSION"""
-    
-    def __init__(
-        self, 
-        index_path: str = "./wire_index",
-        enable_query_expansion: bool = True,
-        expansion_level: str = "medium",
-        enable_query_preprocessing: bool = True
-    ):
+class UniversalFileSearcher:
+    """Search indexed files with BM25 + query expansion"""
+
+    def __init__(self, index_path: str = "./universal_index"):
         self.index_path = Path(index_path)
-        self.enable_query_expansion = enable_query_expansion
-        self.enable_query_preprocessing = enable_query_preprocessing
-        
-        stats_path = self.index_path / "stats.json"
-        with open(stats_path, 'r') as f:
+
+        # Load stats
+        with open(self.index_path / "stats.json", 'r') as f:
             self.stats = json.load(f)
-        
-        self.use_embeddings = self.stats.get('use_embeddings', False)
-        
-        metadata_path = self.index_path / "metadata.pkl"
-        documents_path = self.index_path / "documents.pkl"
-        
-        with open(metadata_path, 'rb') as f:
+
+        self.use_stemming = self.stats.get('use_stemming', False)
+
+        # Load components
+        self.stemmer = TextStemmer(use_stemming=self.use_stemming)
+        self.query_expander = DomainQueryExpander(stemmer=self.stemmer)
+
+        # Load metadata and documents
+        with open(self.index_path / "metadata.pkl", 'rb') as f:
             self.metadata_store = pickle.load(f)
-        
-        with open(documents_path, 'rb') as f:
+
+        with open(self.index_path / "documents.pkl", 'rb') as f:
             self.document_store = pickle.load(f)
-        
-        if self.use_embeddings and EMBEDDINGS_AVAILABLE and FAISS_AVAILABLE:
-            faiss_index_path = self.index_path / "faiss.index"
-            if faiss_index_path.exists():
-                self.faiss_index = faiss.read_index(str(faiss_index_path))
-                self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
-                print("✓ Loaded FAISS index for semantic search")
-            else:
-                self.use_embeddings = False
-                self.faiss_index = None
-                self.embedder = None
-        else:
-            print("⚡ Using keyword/BM25 search (no embeddings)")
-            self.faiss_index = None
-            self.embedder = None
-        
-        tokenized_docs = [doc.lower().split() for doc in self.document_store]
-        self.bm25 = BM25Okapi(tokenized_docs)
-        
-        # Enhanced query processing
-        self.query_processor = ImprovedQueryProcessor()
-        self.keyword_extractor = FastKeywordExtractor()
-        self.capability_mapper = CapabilityMapper()
-        
-        if self.enable_query_expansion:
-            self.query_expander = QueryExpander(
-                taxonomy=BusinessCapabilityTaxonomy,
-                expansion_level=expansion_level,
-                max_expansions=5
-            )
-            print(f"✓ Query expansion enabled (level: {expansion_level})")
-        else:
-            self.query_expander = None
-        
-        if self.enable_query_preprocessing:
-            print(f"✓ Enhanced query preprocessing enabled (removes stopwords)")
-    
+
+        # Load BM25 index
+        with open(self.index_path / "bm25.pkl", 'rb') as f:
+            self.bm25 = pickle.load(f)
+
+        print(f"✓ Index loaded: {len(self.document_store)} chunks")
+
     def search(
         self,
         query: str,
         top_k: int = 20,
-        capability_filter: Optional[List[str]] = None,
-        min_capability_score: float = 0.3,
-        use_query_expansion: Optional[bool] = None,
+        file_type_filter: Optional[str] = None,
+        use_query_expansion: bool = True,
         verbose: bool = False
     ) -> List[Dict[str, Any]]:
         """
-        Enhanced search with query preprocessing and expansion
-        Handles natural language queries consistently
+        Search indexed files
+
+        Args:
+            query: Search query
+            top_k: Number of results
+            file_type_filter: Filter by 'code', 'pdf', 'text', etc.
+            use_query_expansion: Expand query with synonyms
+            verbose: Show details
         """
         if verbose:
-            print(f"\n{'='*80}")
+            print(f"\n{'='*70}")
             print(f"Query: {query}")
-            print(f"{'='*80}")
-        
-        # Step 1: Preprocess query (remove stopwords, extract core terms)
-        original_query = query
-        search_query = query
-        core_terms = []
-        phrases = []
-        
-        if self.enable_query_preprocessing:
-            query_analysis = self.query_processor.extract_core_terms(query)
-            search_query = query_analysis['cleaned_query']
-            core_terms = query_analysis['core_terms']
-            
-            if verbose:
-                print(f"\nQuery Preprocessing:")
-                print(f"  Original: {query}")
-                print(f"  Cleaned: {search_query}")
-                print(f"  Core terms: {core_terms}")
-                print(f"  Stopwords removed: {query_analysis['stopwords_removed']}")
-            
-            # Extract phrases
-            phrases = self.query_processor.extract_phrases(query)
-            if phrases and verbose:
-                print(f"  Phrases: {phrases}")
-        
-        # Step 2: Extract keywords and capabilities
-        query_keywords = self.keyword_extractor.extract(search_query)
-        query_capabilities = self.capability_mapper.map_to_capabilities(
-            query_keywords,
-            search_query
-        )
-        
-        if verbose:
-            print(f"\nKeywords: {[kw for kw, _ in query_keywords[:5]]}")
-            if query_capabilities:
-                print(f"Capabilities: {[cap for cap, _ in query_capabilities[:3]]}")
-        
-        # Step 3: Query expansion
-        expanded_info = None
-        if use_query_expansion is None:
-            use_query_expansion = self.enable_query_expansion
-        
-        if use_query_expansion and self.query_expander:
-            if verbose:
-                print(f"\nQuery Expansion:")
-            
-            expanded_info = self.query_expander.expand_query(
-                search_query,  # Use cleaned query
-                query_capabilities
-            )
-            
-            if verbose:
-                print(f"  Expanded queries: {expanded_info['expanded_queries'][:3]}")
-                if expanded_info['expanded_terms']:
-                    print(f"  Expanded terms: {expanded_info['expanded_terms'][:5]}")
-        
-        # Step 4: Auto-select capabilities
-        if not capability_filter and query_capabilities:
-            capability_filter = [cap for cap, score in query_capabilities 
-                               if score >= min_capability_score][:3]
-            if verbose and capability_filter:
-                print(f"  Auto-selected capabilities: {capability_filter}")
-        
-        # Step 5: Execute search
-        results = self._enhanced_bm25_search(
-            search_query=search_query,
-            core_terms=core_terms,
-            phrases=phrases,
-            query_capabilities=query_capabilities,
-            capability_filter=capability_filter,
-            expanded_info=expanded_info,
-            top_k=top_k
-        )
-        
-        if verbose:
-            print(f"\n{'='*80}")
-            print(f"Found {len(results)} results")
-            print(f"{'='*80}\n")
-        
-        return results
-    
-    def _enhanced_bm25_search(
-        self,
-        search_query: str,
-        core_terms: List[str],
-        phrases: List[str],
-        query_capabilities: List[Tuple[str, float]],
-        capability_filter: Optional[List[str]],
-        expanded_info: Optional[Dict[str, Any]],
-        top_k: int
-    ) -> List[Dict[str, Any]]:
-        """Enhanced BM25 search with better scoring"""
-        
-        # Collect all query variants
-        query_variants = [search_query]
-        
-        if expanded_info:
-            query_variants.extend(expanded_info.get('expanded_queries', []))
-            if expanded_info.get('expanded_terms'):
-                for term in expanded_info['expanded_terms'][:5]:
-                    query_variants.append(term)
-        
-        # Add core terms as individual queries
-        for term in core_terms:
-            if len(term) > 3:  # Only substantial terms
-                query_variants.append(term)
-        
-        # Aggregate scores across all variants
-        aggregated_scores = np.zeros(len(self.document_store))
-        
-        for variant_idx, variant in enumerate(query_variants):
-            query_tokens = variant.lower().split()
-            variant_scores = self.bm25.get_scores(query_tokens)
-            
-            # Smart weighting:
-            # - Cleaned query: 1.0 (highest)
-            # - Core terms: 0.8
-            # - Expanded queries: 0.5
-            # - Expanded terms: 0.3
-            if variant_idx == 0:
-                weight = 1.0  # Cleaned query
-            elif variant in core_terms:
-                weight = 0.8  # Core terms
-            elif expanded_info and variant in expanded_info.get('expanded_queries', []):
-                weight = 0.5  # Expanded queries
-            else:
-                weight = 0.3  # Expanded terms
-            
-            aggregated_scores += variant_scores * weight
-        
-        # Add phrase matching bonus
-        if phrases:
-            phrase_bonuses = self._compute_phrase_bonuses(phrases)
-            aggregated_scores += phrase_bonuses * 0.3
-        
-        # Get top candidates
-        search_k = min(1000, top_k * 20) if capability_filter else top_k
-        top_indices = np.argsort(aggregated_scores)[::-1][:search_k]
-        
-        # Format results
-        formatted_results = []
-        for idx in top_indices:
-            if aggregated_scores[idx] < 0.01:  # Skip very low scores
-                continue
-            
-            metadata = self.metadata_store[idx]
-            
-            # Filter by capability
-            if capability_filter:
-                if metadata['primary_capability'] not in capability_filter:
-                    if not any(cap in capability_filter for cap in metadata['capabilities']):
-                        continue
-            
-            # Compute capability overlap
-            if query_capabilities:
-                query_caps = set([cap for cap, _ in query_capabilities[:5]])
-                doc_caps = set(metadata['capabilities'])
-                overlap = len(query_caps & doc_caps)
-                capability_overlap = overlap / len(query_caps) if query_caps else 0
-            else:
-                capability_overlap = 1.0
-            
-            # Normalize score
-            max_score = aggregated_scores.max() if aggregated_scores.max() > 0 else 1.0
-            normalized_score = aggregated_scores[idx] / max_score
-            
-            # Check for exact phrase matches
-            doc_text_lower = self.document_store[idx].lower()
-            phrase_match_bonus = 0.0
-            for phrase in phrases:
-                if phrase.lower() in doc_text_lower:
-                    phrase_match_bonus += 0.1
-            
-            formatted_results.append({
-                "text": self.document_store[idx],
-                "source_file": metadata['source_file'],
-                "chunk_index": metadata['chunk_index'],
-                "bm25_score": aggregated_scores[idx],
-                "normalized_score": normalized_score,
-                "capabilities": metadata['capabilities'],
-                "keywords": metadata['keywords'],
-                "capability_overlap": capability_overlap,
-                "primary_capability": metadata['primary_capability'],
-                "phrase_match_bonus": phrase_match_bonus
-            })
-        
-        # Re-rank by combined score
-        for result in formatted_results:
-            result['combined_score'] = (
-                result['normalized_score'] * 0.5 +
-                result['capability_overlap'] * 0.3 +
-                result['phrase_match_bonus'] * 0.2
-            )
-        
-        formatted_results.sort(key=lambda x: x['combined_score'], reverse=True)
-        
-        return formatted_results[:top_k]
-    
-    def _compute_phrase_bonuses(self, phrases: List[str]) -> np.ndarray:
-        """Compute bonus scores for documents containing exact phrases"""
-        bonuses = np.zeros(len(self.document_store))
-        
-        for phrase in phrases:
-            phrase_lower = phrase.lower()
-            for idx, doc in enumerate(self.document_store):
-                if phrase_lower in doc.lower():
-                    count = doc.lower().count(phrase_lower)
-                    bonuses[idx] += np.log1p(count)
-        
-        return bonuses
-    
-    def search_by_capability(
-        self,
-        capability: str,
-        top_k: int = 20
-    ) -> List[Dict[str, Any]]:
-        """Search documents by specific capability"""
-        formatted = []
-        
-        for idx, metadata in enumerate(self.metadata_store):
-            if metadata['primary_capability'] == capability or capability in metadata['capabilities']:
-                formatted.append({
-                    "text": self.document_store[idx],
-                    "source_file": metadata['source_file'],
-                    "chunk_index": metadata['chunk_index'],
-                    "capabilities": metadata['capabilities'],
-                    "keywords": metadata['keywords'],
-                    "primary_capability": metadata['primary_capability']
-                })
-                
-                if len(formatted) >= top_k:
-                    break
-        
-        return formatted
+            print(f"{'='*70}")
 
+        # Process query
+        processed_query = query.lower()
+
+        # Expand query
+        if use_query_expansion:
+            expanded_query = self.query_expander.expand_query(processed_query)
+            #if verbose and expanded_query != processed_query:
+            print(f"Expanded: {expanded_query}")
+            processed_query = expanded_query
+
+        # Stem query
+        if self.use_stemming:
+            processed_query = self.stemmer.stem_text(processed_query)
+
+        # Search with BM25
+        query_tokens = processed_query.split()
+        scores = self.bm25.get_scores(query_tokens)
+
+        # Get top results
+        top_indices = np.argsort(scores)[::-1][:top_k * 5]
+
+        # Format results
+        results = []
+        for idx in top_indices:
+            if scores[idx] < 0.01:
+                break
+
+            metadata = self.metadata_store[idx]
+
+            # Filter by file type
+            if file_type_filter and metadata.get('file_type') != file_type_filter:
+                continue
+
+            results.append({
+                "text": metadata.get('text_snippet', self.document_store[idx][:500]),
+                "source_file": metadata['source_file'],
+                "file_type": metadata['file_type'],
+                "language": metadata.get('language', ''),
+                "chunk_index": metadata['chunk_index'],
+                "score": float(scores[idx]),
+                "capabilities": metadata.get('capabilities', []),
+                "keywords": metadata.get('keywords', [])
+            })
+
+            if len(results) >= top_k:
+                break
+
+        if verbose:
+            print(f"\nFound {len(results)} results")
+
+        return results
+
+
+# ================================================================================
+# Main Entry Point
+# ================================================================================
 
 def main():
-    """Example usage - NO SPACY VERSION - FIXED KEYWORD EXTRACTION"""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
-        description="Wire Processing Indexer - Lightweight (No spaCy required) - FIXED"
+        description="Universal File Indexer v2.0 - Production Ready"
     )
-    parser.add_argument("--pdf-folder", required=True, help="Path to PDF folder")
-    parser.add_argument("--index-path", default="./wire_index", help="Index storage path")
-    parser.add_argument("--action", choices=["index", "search", "stats"], default="index")
+    parser.add_argument("--folder", required=True, help="Path to files folder")
+    parser.add_argument("--index-path", default="./universal_index", help="Index storage path")
+    parser.add_argument("--action", choices=["index", "search"], default="index")
     parser.add_argument("--query", help="Search query")
-    parser.add_argument("--capability", help="Filter by capability")
     parser.add_argument("--top-k", type=int, default=10, help="Number of results")
-    parser.add_argument("--disable-expansion", action="store_true",
-                       help="Disable query expansion")
-    parser.add_argument("--expansion-level", default="medium",
-                       choices=["basic", "medium", "advanced"],
-                       help="Query expansion level")
-    parser.add_argument("--verbose", action="store_true",
-                       help="Show detailed search process")
-    
+    parser.add_argument("--extensions", nargs='+', help="File extensions to index")
+    parser.add_argument("--disable-stemming", action="store_true")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed file scanning")
+
     args = parser.parse_args()
-    
-    print("=" * 70)
-    print("Wire Processing Indexer - LITE VERSION (No spaCy) - FIXED")
-    print("=" * 70)
-    print()
-    
+
     if args.action == "index":
-        indexer = WireProcessingIndexer(
-            pdf_folder=args.pdf_folder,
+        indexer = UniversalFileIndexer(
+            files_folder=args.folder,
             index_path=args.index_path,
-            use_embeddings=False  # Lite version
+            file_extensions=args.extensions,
+            use_stemming=not args.disable_stemming
         )
-        
-        stats = indexer.index_pdfs()
-        indexer.get_statistics()
-        
+        indexer.index_files(verbose_scan=args.verbose)
+
     elif args.action == "search":
         if not args.query:
             print("Error: --query required for search")
             return
-        
-        searcher = WireProcessingSearcher(
-            index_path=args.index_path,
-            enable_query_expansion=not args.disable_expansion,
-            expansion_level=args.expansion_level
+
+        searcher = UniversalFileSearcher(index_path=args.index_path)
+        results = searcher.search(
+            args.query,
+            top_k=args.top_k,
+            verbose=args.verbose
         )
-        
-        if args.capability:
-            results = searcher.search_by_capability(args.capability, args.top_k)
-        else:
-            results = searcher.search(
-                args.query, 
-                top_k=args.top_k,
-                verbose=args.verbose
-            )
-        
-        print(f"\n{'='*80}")
-        print(f"Found {len(results)} results")
-        print(f"{'='*80}\n")
-        
+
+        print(f"\n{'='*70}")
+        print(f"Results for: {args.query}")
+        print(f"{'='*70}\n")
+
         for i, result in enumerate(results, 1):
-            print(f"[{i}] Score: {result.get('combined_score', 0):.3f}")
-            print(f"Source: {result['source_file']}")
-            print(f"Primary Capability: {result.get('primary_capability', 'N/A')}")
-            print(f"All Capabilities: {', '.join(result['capabilities'][:3])}")
-            print(f"Keywords: {', '.join(result['keywords'][:5])}")
-            print(f"Text: {result['text'][:200]}...")
-            print("-" * 80)
-    
-    elif args.action == "stats":
-        searcher = WireProcessingSearcher(index_path=args.index_path)
-        print("\n=== Capability Distribution ===")
-        cap_dist = searcher.stats.get('capability_distribution', {})
-        sorted_caps = sorted(cap_dist.items(), key=lambda x: x[1], reverse=True)
-        for cap, count in sorted_caps:
-            print(f"  {cap:40s} - {count:4d} chunks")
+            print(f"[{i}] {result['source_file']} (score: {result['score']:.3f})")
+            print(f"    Type: {result['file_type']}")
+            if result['language']:
+                print(f"    Language: {result['language']}")
+            if result['capabilities']:
+                print(f"    Capabilities: {', '.join(result['capabilities'][:2])}")
+            print(f"    {result['text'][:150]}...")
+            print()
 
 
 if __name__ == "__main__":
     main()
-
-print("\n" + "=" * 70)
-print("✓ Wire Processing Indexer - ENHANCED LITE VERSION - FIXED")
-print("  • NO spaCy required (regex-based keyword extraction)")
-print("  • FIXED: Now extracts 'credit', 'party', 'determination' etc.")
-print("  • Enhanced query preprocessing (removes stopwords)")
-print("  • Consistent results for similar queries")
-print("  • Query expansion enabled (basic/medium/advanced)")
-print("=" * 70)
