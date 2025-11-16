@@ -409,12 +409,13 @@ class QuickContextExtractor:
         # Find source file
         source_path = self._find_source_file(result)
         
-        if not source_path:
+        if not source_path or not source_path.exists():
             print(f"  ⚠ Could not find source file")
             return None
+        is_pdf = source_path.suffix.lower() == '.pdf'
         
         # Extract based on file type
-        if result['file_type'] == 'pdf' and PDF_AVAILABLE and embed_images:
+        if is_pdf and PDF_AVAILABLE and embed_images:
             return self._extract_pdf_context(
                 source_path,
                 result,
@@ -429,41 +430,6 @@ class QuickContextExtractor:
                 lines_after
             )
         
-        if not lines:
-            print(f"  ⚠ Could not read file or file is binary")
-            return None
-        
-        # Find match location in file
-        match_start, match_end = self._find_match_in_lines(
-            lines,
-            result['text']
-        )
-        
-        # Extract context
-        before_start = max(0, match_start - lines_before)
-        before_lines = lines[before_start:match_start]
-        
-        after_end = min(len(lines), match_end + lines_after)
-        after_lines = lines[match_end:after_end]
-        
-        match_lines = lines[match_start:match_end]
-        
-        print(f"  ✓ Lines {match_start}-{match_end} (+{len(before_lines)} before, +{len(after_lines)} after)")
-        
-        return {
-            'type': 'text',
-            'source_file': result['source_file'],
-            'source_path': source_path,
-            'match_start': match_start,
-            'match_end': match_end,
-            'before_lines': before_lines,
-            'match_lines': match_lines,
-            'after_lines': after_lines,
-            'score': result['score'],
-            'file_type': result['file_type'],
-            'query_term_matches': result.get('query_term_matches', 0)
-        }
-    
     def _extract_text_context(
         self,
         source_path: Path,
@@ -771,6 +737,11 @@ class QuickContextExtractor:
                 
                 if b'\x00' in chunk:
                     return True
+                text_chars = bytearray({7, 8, 9, 10, 12, 13, 27} | set (range(0x20, 0x100)) - {0x7f})
+                non_text = chunk.translate(None, text_chars)
+
+                if len(non_text) /max (1, len(chunk)) > 0.3:
+                    return True
         except:
             pass
         
@@ -916,7 +887,7 @@ class QuickContextExtractor:
         lang_map = {
             '.py': 'python', '.java': 'java', '.c': 'c', '.cpp': 'cpp',
             '.js': 'javascript', '.ts': 'typescript', '.tal': 'tal', '.cbl': 'cobol',
-            '.sql': 'sql', '.sh': 'bash', '.txt': 'text'
+            '.sql': 'sql', '.sh': 'bash', '.txt': 'text', '.TXT':'tal'
         }
         
         lang = lang_map.get(ext, 'text')
@@ -972,9 +943,9 @@ class QuickContextExtractor:
             
             for img in ctx['images']:
                 if img.get('full_page'):
-                    parts.append(f"**Complete page rendered as image** ({img['width']}.0f}x{img['height']}.0f} pixels):\n")
+                    parts.append(f"**Complete page rendered as image** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
                 else:
-                    parts.append(f"**Page Image** ({img['width']}.0f}x{img['height']}.0f} pixels):\n")
+                    parts.append(f"**Page Image** ({img['width']:.0f}x{img['height']:.0f} pixels):\n")
                 
                 parts.append(f"![Page Image](data:image/png;base64,{img['base64']})\n")
         
