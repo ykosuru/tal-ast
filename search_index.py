@@ -1105,7 +1105,6 @@ def quick_extract(
 
 
 def quick_search(query: str):
-    """
     # Check if we should look for specific file types
     image_keywords = ['diagram', 'chart', 'flow', 'graph', 'image', 'figure', 'illustration', 'picture']
     has_image_keyword = any(kw in query.lower() for kw in image_keywords)
