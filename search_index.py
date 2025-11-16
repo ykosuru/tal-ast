@@ -1158,9 +1158,9 @@ if __name__ == "__main__":
         description='Index TAL code with Wire Processing Taxonomy',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-    %(prog)s -s "drawdown"
-    """
+        Examples:
+            %(prog)s -s "drawdown"
+        """
     )
     
     parser.add_argument('--search', '-s',
