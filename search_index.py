@@ -781,8 +781,8 @@ class QuickContextExtractor:
                     return cleaned_lines
                 except UnicodeDecodeError:
                     continue
-            except Exception as e:
-                print(f"  Error reading file: {e}")
+        except Exception as e:
+            print(f"  Error reading file: {e}")
         
         return []
     
