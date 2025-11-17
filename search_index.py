@@ -1,6 +1,6 @@
 """
-Quick Context Extractor v3.6 - WITH ASYNC LLM SUMMARIZATION
-Enhanced with async API calls and HTML rendering
+Quick Context Extractor v4.0 - WITH LLM SUMMARIZATION
+Simplified with internal LLM provider
 """
 
 from pathlib import Path
@@ -11,7 +11,6 @@ import re
 import base64
 import io
 import os
-import asyncio
 from datetime import datetime
 
 # Import searcher
@@ -31,14 +30,6 @@ except ImportError:
     PDF_AVAILABLE = False
     print("⚠ PDF support not available. Install: pip install pdfplumber Pillow")
 
-# Anthropic API support
-try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
-    print("⚠ Anthropic SDK not available. Install: pip install anthropic")
-
 
 class QuickContextExtractor:
     """Extract context using UniversalFileSearcher with optional LLM summarization"""
@@ -46,8 +37,7 @@ class QuickContextExtractor:
     def __init__(
         self,
         universal_index: str = "./universal_index",
-        hybrid_index: str = "./hybrid_index",
-        api_key: Optional[str] = None
+        hybrid_index: str = "./hybrid_index"
     ):
         self.universal_index = Path(universal_index)
         self.hybrid_index = Path(hybrid_index)
@@ -58,7 +48,7 @@ class QuickContextExtractor:
         if UNIVERSAL_SEARCHER_AVAILABLE and self.universal_index.exists():
             try:
                 self.searcher = UniversalFileSearcher(str(self.universal_index))
-                print("✓ UniversalFileSearcher loaded (best ranking!)")
+                print("✓ UniversalFileSearcher loaded")
             except Exception as e:
                 print(f"⚠ Could not load UniversalFileSearcher: {e}")
                 self.searcher = None
@@ -68,84 +58,51 @@ class QuickContextExtractor:
         
         if PDF_AVAILABLE:
             print("✓ PDF/image support enabled")
-        
-        # Initialize Anthropic client (optional)
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self.anthropic_client = None
-        self.async_anthropic_client = None
-        
-        if ANTHROPIC_AVAILABLE and self.api_key:
-            try:
-                self.anthropic_client = anthropic.Anthropic(api_key=self.api_key)
-                self.async_anthropic_client = anthropic.AsyncAnthropic(api_key=self.api_key)
-                print("✓ Claude API initialized (sync + async)")
-            except Exception as e:
-                print(f"⚠ Could not initialize Claude API: {e}")
     
-    async def llm_wrapper(
+    def llm_wrapper(
         self,
         system_prompt: str,
         user_prompt: List[Dict[str, Any]],
-        content_type: str = "multimodal",
-        model: str = "claude-sonnet-4-20250514",
-        max_tokens: int = 4096
+        content_type: str = "multimodal"
     ) -> Dict[str, Any]:
         """
-        Async wrapper for Claude API chat completion
+        Wrapper for internal LLM provider
         
         Args:
-            system_prompt: System prompt for Claude
+            system_prompt: System prompt
             user_prompt: User message content (list of content blocks for multimodal)
             content_type: "multimodal" or "text"
-            model: Claude model to use
-            max_tokens: Maximum tokens to generate
         
         Returns:
             Dict with response text and metadata
         """
         
-        if not self.async_anthropic_client:
-            raise ValueError("Anthropic async client not initialized")
-        
         try:
-            # Build messages based on content type
-            if content_type == "multimodal":
-                # user_prompt is already a list of content blocks
-                messages = [{
-                    "role": "user",
-                    "content": user_prompt
-                }]
-            else:
-                # user_prompt should be a string
-                if isinstance(user_prompt, list):
-                    user_prompt = user_prompt[0].get("text", "")
-                messages = [{
-                    "role": "user",
-                    "content": user_prompt
-                }]
+            # Import internal LLM provider
+            import llm_provider
             
-            # Call Claude API asynchronously
-            response = await self.async_anthropic_client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=messages
+            # Call internal LLM
+            response = llm_provider.chat_completion(
+                system_prompt,
+                user_prompt,
+                content_type
             )
-            
-            # Extract response text
-            response_text = response.content[0].text
             
             return {
                 "success": True,
-                "text": response_text,
-                "model": model,
-                "usage": {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens
-                },
-                "stop_reason": response.stop_reason
+                "text": response.get("text", ""),
+                "usage": response.get("usage", {
+                    "input_tokens": 0,
+                    "output_tokens": 0
+                })
             }
             
+        except ImportError:
+            return {
+                "success": False,
+                "error": "llm_provider module not found. Please ensure llm_provider.py is available.",
+                "text": ""
+            }
         except Exception as e:
             return {
                 "success": False,
@@ -166,9 +123,7 @@ class QuickContextExtractor:
         min_query_terms: int = 1,
         dedup_similarity: float = 0.85,
         show_explanations: bool = False,
-        use_llm: bool = False,
-        llm_instructions: Optional[str] = None,
-        llm_model: str = "claude-sonnet-4-20250514"
+        use_llm: bool = False
     ) -> str:
         """
         Extract context for query with optional LLM summarization
@@ -242,18 +197,11 @@ class QuickContextExtractor:
         
         # Use LLM summarization if requested
         if use_llm:
-            if not self.async_anthropic_client:
-                print("\n⚠ LLM summarization requested but API not available")
-                print("  Set ANTHROPIC_API_KEY environment variable or pass api_key")
-                return formatted_context
-            
             print("\n🤖 Generating LLM summary...")
             return self._summarize_with_llm(
                 query,
                 formatted_context,
-                contexts,
-                llm_instructions,
-                llm_model
+                contexts
             )
         
         return formatted_context
@@ -262,12 +210,10 @@ class QuickContextExtractor:
         self,
         query: str,
         formatted_context: str,
-        contexts: List[Dict[str, Any]],
-        custom_instructions: Optional[str],
-        model: str
+        contexts: List[Dict[str, Any]]
     ) -> str:
         """
-        Use Claude AI to summarize the search results (synchronous wrapper)
+        Use internal LLM to summarize the search results
         Saves both markdown and HTML outputs
         """
         
@@ -280,26 +226,22 @@ class QuickContextExtractor:
         
         # Build prompts
         system_prompt = self._build_system_prompt()
-        user_content = self._build_user_content(query, parsed, custom_instructions)
+        user_content = self._build_user_content(query, parsed)
         
         # Determine content type
         content_type = "multimodal" if parsed['images'] else "text"
         
         try:
-            # Call async LLM wrapper using asyncio.run()
-            print(f"  - Calling Claude API ({content_type} mode)...")
-            response = asyncio.run(
-                self.llm_wrapper(
-                    system_prompt=system_prompt,
-                    user_prompt=user_content,
-                    content_type=content_type,
-                    model=model,
-                    max_tokens=4096
-                )
+            # Call LLM wrapper
+            print(f"  - Calling LLM ({content_type} mode)...")
+            response = self.llm_wrapper(
+                system_prompt=system_prompt,
+                user_prompt=user_content,
+                content_type=content_type
             )
             
             if not response["success"]:
-                print(f"✗ LLM API Error: {response.get('error', 'Unknown error')}")
+                print(f"✗ LLM Error: {response.get('error', 'Unknown error')}")
                 print("  Returning original context instead")
                 return formatted_context
             
@@ -309,30 +251,42 @@ class QuickContextExtractor:
             # Create metadata
             metadata = {
                 "query": query,
-                "model": model,
                 "sources": parsed['sources'],
                 "num_images": len(parsed['images']),
                 "num_text_blocks": len(parsed['text_blocks']),
-                "input_tokens": usage['input_tokens'],
-                "output_tokens": usage['output_tokens'],
+                "input_tokens": usage.get('input_tokens', 0),
+                "output_tokens": usage.get('output_tokens', 0),
                 "timestamp": datetime.now().isoformat()
             }
             
-            # Format markdown output
-            markdown_output = self._format_markdown_summary(summary, metadata)
+            print(f"✓ Summary generated ({usage.get('output_tokens', 0)} tokens)")
             
             # Save markdown
-            with open("llm_summary.md", 'w', encoding='utf-8') as f:
-                f.write(markdown_output)
-            print(f"✓ Saved: llm_summary.md")
+            try:
+                markdown_output = self._format_markdown_summary(summary, metadata)
+                with open("llm_summary.md", 'w', encoding='utf-8') as f:
+                    f.write(markdown_output)
+                print(f"✓ Saved: llm_summary.md")
+            except Exception as e:
+                print(f"✗ Error saving markdown: {e}")
+                import traceback
+                traceback.print_exc()
             
             # Generate and save HTML
-            html_output = self._format_html_summary(summary, metadata, parsed)
-            with open("llm_summary.html", 'w', encoding='utf-8') as f:
-                f.write(html_output)
-            print(f"✓ Saved: llm_summary.html")
-            
-            print(f"✓ Summary generated ({usage['output_tokens']} tokens)")
+            try:
+                print("  - Generating HTML...")
+                html_output = self._format_html_summary(summary, metadata, parsed)
+                
+                if html_output:
+                    with open("llm_summary.html", 'w', encoding='utf-8') as f:
+                        f.write(html_output)
+                    print(f"✓ Saved: llm_summary.html ({len(html_output):,} bytes)")
+                else:
+                    print(f"✗ HTML generation returned empty")
+            except Exception as e:
+                print(f"✗ Error generating/saving HTML: {e}")
+                import traceback
+                traceback.print_exc()
             
             return markdown_output
             
@@ -344,7 +298,7 @@ class QuickContextExtractor:
             return formatted_context
     
     def _build_system_prompt(self) -> str:
-        """Build system prompt for Claude"""
+        """Build system prompt for LLM"""
         return """You are an expert technical analyst and documentation specialist. 
 Your role is to analyze code, documentation, and technical diagrams to provide clear, actionable insights.
 
@@ -362,18 +316,14 @@ Format your response in clean markdown with appropriate headers, code blocks, an
     def _build_user_content(
         self,
         query: str,
-        parsed: Dict[str, Any],
-        custom_instructions: Optional[str]
+        parsed: Dict[str, Any]
     ) -> List[Dict]:
-        """Build user content blocks for Claude API"""
+        """Build user content blocks for LLM"""
         
         content_blocks = []
         
-        # 1. Instructions
-        if custom_instructions:
-            instructions = custom_instructions
-        else:
-            instructions = f"""I searched our codebase and documentation for: **"{query}"**
+        # Instructions
+        instructions = f"""I searched our codebase and documentation for: **"{query}"**
 
 Please provide a comprehensive analysis with the following structure:
 
@@ -410,7 +360,7 @@ Please be specific and reference actual details from the code and documentation.
             "text": instructions
         })
         
-        # 2. Add images with context
+        # Add images with context
         if parsed['images']:
             content_blocks.append({
                 "type": "text",
@@ -418,13 +368,11 @@ Please be specific and reference actual details from the code and documentation.
             })
             
             for i, img in enumerate(parsed['images'], 1):
-                # Add image description
                 content_blocks.append({
                     "type": "text",
                     "text": f"**Image {i}**: From `{img['source']}` (Page {img['page']})\n"
                 })
                 
-                # Add the actual image
                 media_type = f"image/{img['format'].lower()}"
                 if media_type == "image/jpg":
                     media_type = "image/jpeg"
@@ -443,17 +391,15 @@ Please be specific and reference actual details from the code and documentation.
                     "text": "\n"
                 })
         
-        # 3. Add text/code content
+        # Add text/code content
         if parsed['text_blocks']:
             content_blocks.append({
                 "type": "text",
                 "text": "\n## Code and Documentation Context\n\n"
             })
             
-            # Combine and limit text size
             combined_text = "\n\n---\n\n".join(parsed['text_blocks'])
             
-            # Truncate if too large
             max_text_length = 80000
             if len(combined_text) > max_text_length:
                 combined_text = combined_text[:max_text_length] + "\n\n[... content truncated for length ...]"
@@ -463,7 +409,7 @@ Please be specific and reference actual details from the code and documentation.
                 "text": combined_text
             })
         
-        # 4. Add sources footer
+        # Add sources footer
         if parsed['sources']:
             sources_text = "\n\n## Source Files Referenced\n\n" + "\n".join(
                 f"- `{source}`" for source in parsed['sources']
@@ -485,7 +431,6 @@ Please be specific and reference actual details from the code and documentation.
         parts = []
         parts.append(f"# LLM Summary: {metadata['query']}\n")
         parts.append(f"**Generated:** {metadata['timestamp']}")
-        parts.append(f"**Model:** {metadata['model']}")
         parts.append(f"**Sources:** {len(metadata['sources'])}")
         parts.append(f"**Images:** {metadata['num_images']}")
         parts.append(f"**Tokens:** {metadata['input_tokens']:,} in / {metadata['output_tokens']:,} out\n")
@@ -504,16 +449,18 @@ Please be specific and reference actual details from the code and documentation.
         metadata: Dict[str, Any],
         parsed: Dict[str, Any]
     ) -> str:
-        """
-        Format summary as beautiful HTML for browser rendering
-        Converts markdown to HTML and adds styling
-        """
+        """Format summary as beautiful HTML for browser rendering"""
         
-        # Convert markdown to HTML (basic conversion)
-        html_content = self._markdown_to_html(summary)
-        
-        # Build complete HTML document
-        html = f"""<!DOCTYPE html>
+        try:
+            print("    - Converting markdown to HTML...")
+            html_content = self._markdown_to_html(summary)
+            print(f"    - HTML content: {len(html_content)} chars")
+            
+            timestamp_str = datetime.fromisoformat(metadata['timestamp']).strftime('%H:%M')
+            
+            print("    - Building HTML document...")
+            
+            html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -633,7 +580,6 @@ Please be specific and reference actual details from the code and documentation.
         
         .summary p {{
             margin: 15px 0;
-            text-align: justify;
         }}
         
         .summary ul, .summary ol {{
@@ -759,13 +705,9 @@ Please be specific and reference actual details from the code and documentation.
 <body>
     <div class="container">
         <div class="header">
-            <h1>AI Analysis Summary</h1>
+            <h1>🤖 AI Analysis Summary</h1>
             <div class="query">Query: "{metadata['query']}"</div>
             <div class="metadata">
-                <div class="metadata-item">
-                    <span class="metadata-label">Model</span>
-                    <span class="metadata-value">{metadata['model'].split('-')[1].title()}</span>
-                </div>
                 <div class="metadata-item">
                     <span class="metadata-label">Sources</span>
                     <span class="metadata-value">{len(metadata['sources'])} files</span>
@@ -784,7 +726,7 @@ Please be specific and reference actual details from the code and documentation.
                 </div>
                 <div class="metadata-item">
                     <span class="metadata-label">Generated</span>
-                    <span class="metadata-value">{datetime.fromisoformat(metadata['timestamp']).strftime('%H:%M')}</span>
+                    <span class="metadata-value">{timestamp_str}</span>
                 </div>
             </div>
         </div>
@@ -797,96 +739,86 @@ Please be specific and reference actual details from the code and documentation.
             <div class="sources">
                 <h2>📁 Source Files Analyzed</h2>
                 <div class="source-list">
-                    {''.join(f'<div class="source-item">{source}</div>' for source in metadata['sources'])}
-                </div>
+"""
+            
+            for source in metadata['sources']:
+                html += f'                    <div class="source-item">{source}</div>\n'
+            
+            html += """                </div>
             </div>
         </div>
         
         <div class="footer">
-            Generated by Claude AI • {datetime.now().strftime('%B %d, %Y at %I:%M %p')}
+            Generated by Internal LLM • """ + datetime.now().strftime('%B %d, %Y at %I:%M %p') + """
         </div>
     </div>
 </body>
 </html>
 """
-        
-        return html
+            
+            print(f"    - Final HTML: {len(html):,} bytes")
+            return html
+            
+        except Exception as e:
+            print(f"    ✗ Error in _format_html_summary: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
     
     def _markdown_to_html(self, markdown_text: str) -> str:
-        """
-        Convert markdown to HTML (basic conversion)
-        Handles headers, code blocks, lists, bold, italic, code
-        """
+        """Convert markdown to HTML"""
         
         html_parts = []
         lines = markdown_text.split('\n')
         in_code_block = False
         in_list = False
-        code_language = ""
         
         i = 0
         while i < len(lines):
             line = lines[i]
             
-            # Code blocks
             if line.startswith('```'):
                 if not in_code_block:
-                    # Starting code block
-                    code_language = line[3:].strip()
                     html_parts.append('<pre><code>')
                     in_code_block = True
                 else:
-                    # Ending code block
                     html_parts.append('</code></pre>')
                     in_code_block = False
                 i += 1
                 continue
             
             if in_code_block:
-                # Escape HTML in code
                 escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                 html_parts.append(escaped)
                 i += 1
                 continue
             
-            # Headers
             if line.startswith('### '):
                 html_parts.append(f'<h3>{self._process_inline_markdown(line[4:])}</h3>')
             elif line.startswith('## '):
                 html_parts.append(f'<h2>{self._process_inline_markdown(line[3:])}</h2>')
             elif line.startswith('# '):
                 html_parts.append(f'<h1>{self._process_inline_markdown(line[2:])}</h1>')
-            
-            # Lists
             elif line.startswith('- ') or line.startswith('* '):
                 if not in_list:
                     html_parts.append('<ul>')
                     in_list = True
                 html_parts.append(f'<li>{self._process_inline_markdown(line[2:])}</li>')
-            
             elif line.startswith(tuple(f'{i}. ' for i in range(10))):
                 if not in_list:
                     html_parts.append('<ol>')
                     in_list = True
                 content = line.split('. ', 1)[1] if '. ' in line else line
                 html_parts.append(f'<li>{self._process_inline_markdown(content)}</li>')
-            
-            # Blockquotes
             elif line.startswith('> '):
                 html_parts.append(f'<blockquote>{self._process_inline_markdown(line[2:])}</blockquote>')
-            
-            # Horizontal rule
             elif line.strip() in ['---', '***', '___']:
                 html_parts.append('<hr>')
-            
-            # Regular paragraph
             elif line.strip():
                 if in_list:
                     html_parts.append('</ul>')
                     in_list = False
                 html_parts.append(f'<p>{self._process_inline_markdown(line)}</p>')
-            
-            # Empty line
             else:
                 if in_list:
                     html_parts.append('</ul>')
@@ -900,22 +832,13 @@ Please be specific and reference actual details from the code and documentation.
         return '\n'.join(html_parts)
     
     def _process_inline_markdown(self, text: str) -> str:
-        """
-        Process inline markdown: bold, italic, code, links
-        """
+        """Process inline markdown"""
         
-        # Bold (**text** or __text__)
         text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
         text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
-        
-        # Italic (*text* or _text_)
         text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
         text = re.sub(r'_(.+?)_', r'<em>\1</em>', text)
-        
-        # Inline code (`code`)
         text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
-        
-        # Links [text](url)
         text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', text)
         
         return text
@@ -925,7 +848,7 @@ Please be specific and reference actual details from the code and documentation.
         formatted_context: str,
         contexts: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Parse formatted context for LLM consumption"""
+        """Parse formatted context for LLM"""
         
         parsed = {
             'text_blocks': [],
@@ -933,13 +856,11 @@ Please be specific and reference actual details from the code and documentation.
             'sources': []
         }
         
-        # Extract sources from contexts
         for ctx in contexts:
             source = ctx.get('source_file', '')
             if source and source not in parsed['sources']:
                 parsed['sources'].append(source)
         
-        # Extract images from contexts
         for ctx in contexts:
             if ctx.get('type') == 'pdf' and ctx.get('images'):
                 for img in ctx['images']:
@@ -952,7 +873,6 @@ Please be specific and reference actual details from the code and documentation.
                         'height': img.get('height', 0)
                     })
         
-        # Extract text blocks
         sections = formatted_context.split('='*70)
         for section in sections:
             section_clean = re.sub(
@@ -966,9 +886,6 @@ Please be specific and reference actual details from the code and documentation.
         
         return parsed
     
-    # ... (keep all existing helper methods from previous version)
-    # _search_with_universal, _validate_query_terms, _deduplicate_results, etc.
-    
     def _search_with_universal(
         self,
         query: str,
@@ -976,13 +893,13 @@ Please be specific and reference actual details from the code and documentation.
         file_type_filter: Optional[str],
         show_explanations: bool
     ) -> List[Dict[str, Any]]:
-        """Search using UniversalFileSearcher with compatible parameters"""
+        """Search using UniversalFileSearcher"""
         
         if not self.searcher:
             print("\n⚠ No searcher available")
             return []
         
-        print("\n🔍 Searching with UniversalFileSearcher...")
+        print("\n🔍 Searching...")
         
         try:
             search_kwargs = {
@@ -1455,7 +1372,7 @@ Please be specific and reference actual details from the code and documentation.
         return (0, min(len(match_lines), len(lines)))
     
     def _format_contexts(self, contexts: List[Dict[str, Any]], query: str) -> str:
-        """Format for LLM"""
+        """Format for display"""
         if not contexts:
             return "No contexts found."
         
@@ -1591,17 +1508,13 @@ Please be specific and reference actual details from the code and documentation.
 
 
 def create_html_content(query: str, context: str, include_images: bool = True) -> Optional[str]:
-    def create_html_content(query: str, context: str, include_images: bool = True) -> Optional[str]:
-    """
-    Enhanced HTML creation for raw search context (non-LLM)
-    """
+    """Enhanced HTML creation for raw search context (non-LLM)"""
     
     if not context.strip():
         return None
     
     print(f"\n📄 Creating HTML view...")
     
-    # Enhanced CSS with beautiful styling
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1853,19 +1766,16 @@ def create_html_content(query: str, context: str, include_images: bool = True) -
     current_match = None
     
     for line in lines:
-        # Handle code blocks
         if line.startswith('```'):
             html += "</pre>\n" if in_code else "<pre>\n"
             in_code = not in_code
             continue
         
         if in_code:
-            # Escape HTML in code
             escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             html += f"{escaped}\n"
             continue
         
-        # Handle images
         if '![Page Image](data:image/' in line and include_images:
             match = re.search(r'!\[.*?\]\(data:image/(png|jpeg);base64,([^)]+)\)', line)
             if match:
@@ -1877,31 +1787,27 @@ def create_html_content(query: str, context: str, include_images: bool = True) -
                 html += '</div>\n'
             continue
         
-        # Handle match headers
         if line.startswith('## Match'):
             if current_match:
-                html += '</div>\n'  # Close previous match
+                html += '</div>\n'
             html += '<div class="match-header">\n'
             html += f'<div class="match-title">{line[3:]}</div>\n'
             html += '<div class="match-meta">\n'
             current_match = True
             continue
         
-        # Handle score in match header
         if line.startswith('Score:') and current_match:
             score_value = line.split(':')[1].strip()
             html += f'<span class="score">Score: {score_value}</span>\n'
             continue
         
-        # Handle query matches
         if line.startswith('Query matches:'):
             html += f'<span>{line}</span>\n'
             continue
         
-        # Handle ranking signals
         if line.startswith('Ranking:'):
-            html += '</div>\n'  # Close match-meta
-            html += '</div>\n'  # Close match-header
+            html += '</div>\n'
+            html += '</div>\n'
             html += '<div class="ranking-signals">\n'
             html += '<strong>Ranking Signals:</strong>\n<ul>\n'
             current_match = False
@@ -1911,14 +1817,12 @@ def create_html_content(query: str, context: str, include_images: bool = True) -
             html += f'<li>{line.strip()[1:].strip()}</li>\n'
             continue
         
-        # Close ranking signals at separator
         if line.strip() == '='*70:
             if not current_match:
                 html += '</ul></div>\n'
             html += '<hr>\n'
             continue
         
-        # Headers
         if line.startswith('# '):
             html += f"<h1>{line[2:]}</h1>\n"
         elif line.startswith('### '):
@@ -1940,7 +1844,6 @@ def create_html_content(query: str, context: str, include_images: bool = True) -
     </div>
     
     <script>
-        // Add click-to-zoom for images
         document.querySelectorAll('.image-container img').forEach(img => {
             img.addEventListener('click', function() {
                 if (this.style.maxWidth === 'none') {
@@ -1974,17 +1877,10 @@ def quick_extract(
     min_query_terms: int = 1,
     dedup_similarity: float = 0.85,
     show_explanations: bool = False,
-    use_llm: bool = False,
-    llm_instructions: Optional[str] = None,
-    llm_model: str = "claude-sonnet-4-20250514",
-    api_key: Optional[str] = None
+    use_llm: bool = False
 ) -> str:
-    """
-    Extract context using UniversalFileSearcher with optional LLM summarization
-    
-    When use_llm=True, saves both llm_summary.md and llm_summary.html
-    """
-    extractor = QuickContextExtractor(api_key=api_key)
+    """Extract context with optional LLM summarization"""
+    extractor = QuickContextExtractor()
     return extractor.extract(
         query,
         max_matches=max_matches,
@@ -1997,9 +1893,7 @@ def quick_extract(
         min_query_terms=min_query_terms,
         dedup_similarity=dedup_similarity,
         show_explanations=show_explanations,
-        use_llm=use_llm,
-        llm_instructions=llm_instructions,
-        llm_model=llm_model
+        use_llm=use_llm
     )
 
 
@@ -2011,20 +1905,18 @@ if __name__ == "__main__":
         print("Usage: python3 search_index.py --search <term> [--llm]")
         sys.exit(0)
     
-    parser = argparse.ArgumentParser(description='Context Extractor v3.6 - Async LLM')
+    parser = argparse.ArgumentParser(description='Context Extractor v4.0')
     parser.add_argument('--search', '-s', required=True, help='Search term')
     parser.add_argument('--max', type=int, default=5, help='Max matches')
     parser.add_argument('--type', choices=['code', 'pdf', 'text'], help='File type filter')
     parser.add_argument('--explain', action='store_true', help='Show explanations')
     parser.add_argument('--no-images', action='store_true', help='Disable PDF images')
     parser.add_argument('--llm', action='store_true', help='Use LLM to summarize')
-    parser.add_argument('--instructions', '-i', help='Custom LLM instructions')
-    parser.add_argument('--model', default='claude-sonnet-4-20250514', help='LLM model')
     
     args = parser.parse_args()
     
     print("="*70)
-    print("CONTEXT EXTRACTOR v3.6 - ASYNC LLM + HTML")
+    print("CONTEXT EXTRACTOR v4.0")
     print("="*70)
     
     context = quick_extract(
@@ -2034,9 +1926,7 @@ if __name__ == "__main__":
         embed_images=not args.no_images,
         show_explanations=args.explain,
         validate_query_terms=True,
-        use_llm=args.llm,
-        llm_instructions=args.instructions,
-        llm_model=args.model
+        use_llm=args.llm
     )
     
     print("\n" + "="*70)
@@ -2052,13 +1942,11 @@ if __name__ == "__main__":
         print("  - llm_summary.html (browser-ready)")
         print("\n💡 Open llm_summary.html in your browser!")
     else:
-        # Save text output
         output_file = "extracted_context.txt"
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(context)
         print(f"\n✅ Saved: {output_file} ({len(context):,} chars)")
         
-        # Generate and save HTML
         html_content = create_html_content(args.search, context, include_images=not args.no_images)
         if html_content:
             with open("extracted_context.html", 'w', encoding='utf-8') as f:
