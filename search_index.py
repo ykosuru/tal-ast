@@ -2052,7 +2052,18 @@ if __name__ == "__main__":
         print("  - llm_summary.html (browser-ready)")
         print("\n💡 Open llm_summary.html in your browser!")
     else:
+        # Save text output
         output_file = "extracted_context.txt"
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write(context)
         print(f"\n✅ Saved: {output_file} ({len(context):,} chars)")
+        
+        # Generate and save HTML
+        html_content = create_html_content(args.search, context, include_images=not args.no_images)
+        if html_content:
+            with open("extracted_context.html", 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            print(f"✅ Saved HTML: extracted_context.html")
+            print("\n💡 Open extracted_context.html in your browser!")
+        else:
+            print("⚠ No HTML generated (no content)")
