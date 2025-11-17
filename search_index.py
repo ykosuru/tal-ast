@@ -1591,21 +1591,375 @@ Please be specific and reference actual details from the code and documentation.
 
 
 def create_html_content(query: str, context: str, include_images: bool = True) -> Optional[str]:
+    def create_html_content(query: str, context: str, include_images: bool = True) -> Optional[str]:
     """
     Enhanced HTML creation for raw search context (non-LLM)
     """
     
-    has_images = "data:image/png;base64," in context or "data:image/jpeg;base64," in context
-    
-    if not has_images and not context.strip():
+    if not context.strip():
         return None
     
     print(f"\n📄 Creating HTML view...")
     
-    # Same HTML generation as before for raw context
-    # (Keep existing implementation)
+    # Enhanced CSS with beautiful styling
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Results: {query}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 30px 20px;
+        }}
+        
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }}
+        
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px 50px;
+            position: relative;
+        }}
+        
+        .header::before {{
+            content: '🔍';
+            position: absolute;
+            top: 20px;
+            right: 40px;
+            font-size: 3em;
+            opacity: 0.3;
+        }}
+        
+        .header h1 {{
+            font-size: 2.5em;
+            margin-bottom: 15px;
+            font-weight: 700;
+        }}
+        
+        .header .query {{
+            font-size: 1.3em;
+            opacity: 0.95;
+            font-weight: 500;
+        }}
+        
+        .content {{
+            padding: 50px;
+        }}
+        
+        h1 {{
+            color: #2c3e50;
+            font-size: 2em;
+            margin: 30px 0 20px 0;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #667eea;
+        }}
+        
+        h2 {{
+            color: #34495e;
+            font-size: 1.6em;
+            margin: 25px 0 15px 0;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #95a5a6;
+        }}
+        
+        h3 {{
+            color: #7f8c8d;
+            font-size: 1.3em;
+            margin: 20px 0 10px 0;
+        }}
+        
+        pre {{
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 25px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.95em;
+            line-height: 1.5;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            border-left: 4px solid #667eea;
+            margin: 20px 0;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }}
+        
+        .image-container {{
+            margin: 30px 0;
+            padding: 25px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            border: 2px solid #dee2e6;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        
+        .image-container img {{
+            max-width: 100%;
+            height: auto;
+            max-height: 1200px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.15);
+            margin: 15px auto;
+            display: block;
+            transition: transform 0.3s ease;
+            cursor: zoom-in;
+        }}
+        
+        .image-container img:hover {{
+            transform: scale(1.02);
+        }}
+        
+        .image-label {{
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 10px;
+            font-style: italic;
+        }}
+        
+        .match-header {{
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            padding: 20px 25px;
+            border-radius: 8px;
+            margin: 30px 0 20px 0;
+            border-left: 5px solid #667eea;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }}
+        
+        .match-title {{
+            font-size: 1.3em;
+            color: #2c3e50;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }}
+        
+        .match-meta {{
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            font-size: 0.9em;
+            color: #666;
+        }}
+        
+        .score {{
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }}
+        
+        .ranking-signals {{
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }}
+        
+        .ranking-signals strong {{
+            color: #856404;
+        }}
+        
+        .ranking-signals ul {{
+            margin: 5px 0 0 20px;
+            color: #856404;
+        }}
+        
+        hr {{
+            border: none;
+            border-top: 2px solid #e0e0e0;
+            margin: 30px 0;
+        }}
+        
+        .footer {{
+            background: #f8f9fa;
+            padding: 20px 50px;
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            border-top: 1px solid #e0e0e0;
+        }}
+        
+        code {{
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            color: #e83e8c;
+        }}
+        
+        strong {{
+            color: #2c3e50;
+        }}
+        
+        @media print {{
+            body {{
+                background: white;
+                padding: 0;
+            }}
+            .container {{
+                box-shadow: none;
+            }}
+        }}
+        
+        @media (max-width: 768px) {{
+            .header {{
+                padding: 30px 25px;
+            }}
+            .content {{
+                padding: 30px 25px;
+            }}
+            .header h1 {{
+                font-size: 2em;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Search Results</h1>
+            <div class="query">Query: "{query}"</div>
+        </div>
+        
+        <div class="content">
+"""
     
-    return None  # Simplified for brevity
+    lines = context.split('\n')
+    in_code = False
+    current_match = None
+    
+    for line in lines:
+        # Handle code blocks
+        if line.startswith('```'):
+            html += "</pre>\n" if in_code else "<pre>\n"
+            in_code = not in_code
+            continue
+        
+        if in_code:
+            # Escape HTML in code
+            escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            html += f"{escaped}\n"
+            continue
+        
+        # Handle images
+        if '![Page Image](data:image/' in line and include_images:
+            match = re.search(r'!\[.*?\]\(data:image/(png|jpeg);base64,([^)]+)\)', line)
+            if match:
+                img_type = match.group(1)
+                img_data = match.group(2)
+                html += f'<div class="image-container">\n'
+                html += f'<img src="data:image/{img_type};base64,{img_data}" alt="PDF Page Image" />\n'
+                html += f'<div class="image-label">Click to zoom</div>\n'
+                html += '</div>\n'
+            continue
+        
+        # Handle match headers
+        if line.startswith('## Match'):
+            if current_match:
+                html += '</div>\n'  # Close previous match
+            html += '<div class="match-header">\n'
+            html += f'<div class="match-title">{line[3:]}</div>\n'
+            html += '<div class="match-meta">\n'
+            current_match = True
+            continue
+        
+        # Handle score in match header
+        if line.startswith('Score:') and current_match:
+            score_value = line.split(':')[1].strip()
+            html += f'<span class="score">Score: {score_value}</span>\n'
+            continue
+        
+        # Handle query matches
+        if line.startswith('Query matches:'):
+            html += f'<span>{line}</span>\n'
+            continue
+        
+        # Handle ranking signals
+        if line.startswith('Ranking:'):
+            html += '</div>\n'  # Close match-meta
+            html += '</div>\n'  # Close match-header
+            html += '<div class="ranking-signals">\n'
+            html += '<strong>Ranking Signals:</strong>\n<ul>\n'
+            current_match = False
+            continue
+        
+        if line.strip().startswith('•'):
+            html += f'<li>{line.strip()[1:].strip()}</li>\n'
+            continue
+        
+        # Close ranking signals at separator
+        if line.strip() == '='*70:
+            if not current_match:
+                html += '</ul></div>\n'
+            html += '<hr>\n'
+            continue
+        
+        # Headers
+        if line.startswith('# '):
+            html += f"<h1>{line[2:]}</h1>\n"
+        elif line.startswith('### '):
+            html += f"<h3>{line[4:]}</h3>\n"
+        elif line.strip().startswith('—'):
+            html += f"<p>{line}</p>\n"
+        elif line.strip() and not line.startswith('Type:') and not line.startswith('Location:'):
+            html += f"<p>{line}</p>\n"
+    
+    if in_code:
+        html += "</pre>\n"
+    
+    html += """
+        </div>
+        
+        <div class="footer">
+            Generated by Search Index • """ + datetime.now().strftime('%B %d, %Y at %I:%M %p') + """
+        </div>
+    </div>
+    
+    <script>
+        // Add click-to-zoom for images
+        document.querySelectorAll('.image-container img').forEach(img => {
+            img.addEventListener('click', function() {
+                if (this.style.maxWidth === 'none') {
+                    this.style.maxWidth = '100%';
+                    this.style.maxHeight = '1200px';
+                    this.style.cursor = 'zoom-in';
+                } else {
+                    this.style.maxWidth = 'none';
+                    this.style.maxHeight = 'none';
+                    this.style.cursor = 'zoom-out';
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+"""
+    
+    return html
 
 
 def quick_extract(
