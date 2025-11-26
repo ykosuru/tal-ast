@@ -380,7 +380,7 @@ class IFMLDataPipeline:
                 code_counts[code][severity] += 1
         
         stats = []
-        for code, counts in sorted(code_counts.items(), key=lambda x: -x['total']):
+        for code, counts in sorted(code_counts.items(), key=lambda x: -x[1]['total']):
             row = {
                 'code': code,
                 'total': counts['total'],
