@@ -19,9 +19,13 @@ class PartyInfo:
     id_type: Optional[str] = None
     has_bic: bool = False
     bic: Optional[str] = None
+    bic_length: int = 0  # 4, 8, or 11 chars typically
+    bic_country: Optional[str] = None  # Country code from BIC (chars 5-6)
     has_account: bool = False
     account_type: Optional[str] = None  # IBAN, BBAN, etc.
     account_value: Optional[str] = None
+    iban_country: Optional[str] = None  # Country code from IBAN (first 2 chars)
+    bic_iban_country_match: Optional[bool] = None  # Do BIC and IBAN countries match?
     country: Optional[str] = None
     mailing_country: Optional[str] = None
     residence_country: Optional[str] = None
@@ -320,6 +324,23 @@ class IFMLParser:
         party.bank_flag = basic_info.get('BankFlag')
         party.charge_flag = basic_info.get('ChargeFlag')
         
+        # Parse BIC structure
+        if party.bic:
+            party.bic_length = len(party.bic)
+            # BIC country is characters 5-6 (0-indexed: 4-5)
+            if len(party.bic) >= 6:
+                party.bic_country = party.bic[4:6].upper()
+        
+        # Parse IBAN country
+        if party.account_type == 'IBAN' and party.account_value:
+            # IBAN country is first 2 characters
+            if len(party.account_value) >= 2:
+                party.iban_country = party.account_value[0:2].upper()
+        
+        # Check if BIC and IBAN countries match
+        if party.bic_country and party.iban_country:
+            party.bic_iban_country_match = (party.bic_country == party.iban_country)
+        
         return party
     
     def _parse_bank_info(self, basic_payment: dict, features: IFMLFeatures):
@@ -394,8 +415,12 @@ class IFMLParser:
                 result[f'{prefix}_present'] = True
                 result[f'{prefix}_has_id'] = party.has_id
                 result[f'{prefix}_has_bic'] = party.has_bic
+                result[f'{prefix}_bic_length'] = party.bic_length
+                result[f'{prefix}_bic_country'] = party.bic_country
                 result[f'{prefix}_has_account'] = party.has_account
                 result[f'{prefix}_account_type'] = party.account_type
+                result[f'{prefix}_iban_country'] = party.iban_country
+                result[f'{prefix}_bic_iban_match'] = party.bic_iban_country_match
                 result[f'{prefix}_country'] = party.country
                 result[f'{prefix}_mailing_country'] = party.mailing_country
                 result[f'{prefix}_address_lines'] = party.address_line_count
@@ -404,8 +429,12 @@ class IFMLParser:
                 result[f'{prefix}_present'] = False
                 result[f'{prefix}_has_id'] = False
                 result[f'{prefix}_has_bic'] = False
+                result[f'{prefix}_bic_length'] = 0
+                result[f'{prefix}_bic_country'] = None
                 result[f'{prefix}_has_account'] = False
                 result[f'{prefix}_account_type'] = None
+                result[f'{prefix}_iban_country'] = None
+                result[f'{prefix}_bic_iban_match'] = None
                 result[f'{prefix}_country'] = None
                 result[f'{prefix}_mailing_country'] = None
                 result[f'{prefix}_address_lines'] = 0
