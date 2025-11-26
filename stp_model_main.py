@@ -120,6 +120,16 @@ def train_model(data_dir: str = None, data_file: str = None,
     print(f"   - Accuracy: {metrics.get('accuracy', 0):.4f}")
     print(f"   - Macro F1: {metrics.get('macro_f1', 0):.4f}")
     print(f"   - Micro F1: {metrics.get('micro_f1', 0):.4f}")
+
+    # Per-class breakdown
+    report = metrics.get('classification_report', {})
+    if report:
+        print("\n   Per-class performance:")
+        print(f"   {'Code':<15} {'Precision':>10} {'Recall':>10} {'F1':>10} {'Support':>10}")
+        print(f"   {'-'*55}")
+        for cls, vals in sorted(report.items(), key=lambda x: -x[1].get('support', 0)):
+            if isinstance(vals, dict) and 'f1-score' in vals:
+                print(f"   {cls:<15} {vals['precision']:>10.3f} {vals['recall']:>10.3f} {vals['f1-score']:>10.3f} {vals['support']:>10}")
     
     # Feature importance
     print("\n   Top 10 Important Features:")
