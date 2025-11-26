@@ -462,7 +462,7 @@ def train_model(data_dir: str = None, data_file: str = None,
 
 
 def predict(model_dir: str, input_path: str = None, 
-            input_json: dict = None) -> PredictionResult:
+            input_json: dict = None, threshold: float = 0.5) -> PredictionResult:
     """
     Predict error codes for an IFML request.
     
@@ -470,6 +470,7 @@ def predict(model_dir: str, input_path: str = None,
         model_dir: Directory containing trained models
         input_path: Path to IFML JSON file
         input_json: IFML as dict (alternative to input_path)
+        threshold: Probability threshold (default 0.5, only codes > threshold returned)
     
     Returns:
         PredictionResult
@@ -483,7 +484,7 @@ def predict(model_dir: str, input_path: str = None,
     if not input_json:
         raise ValueError("Must provide either input_path or input_json")
     
-    return predictor.predict(input_json)
+    return predictor.predict(input_json, threshold=threshold)
 
 
 def analyze(model_dir: str, input_path: str) -> Dict[str, Any]:
@@ -875,7 +876,7 @@ Examples:
         print(json.dumps(results.get('training_info', {}), indent=2))
     
     elif args.command == 'predict':
-        result = predict(args.model_dir, args.input)
+        result = predict(args.model_dir, args.input, threshold=args.threshold)
         print(json.dumps({
             'transaction_id': result.transaction_id,
             'predicted_codes': result.predicted_codes,
