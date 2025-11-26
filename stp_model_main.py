@@ -259,7 +259,8 @@ def train_model(data_dir: str = None, data_file: str = None,
     print("\n   Top 10 Important Features:")
     importance = model.get_feature_importance(10)
     for _, row in importance.iterrows():
-        print(f"   - {row['feature']}: {row['importance']:.4f}")
+        clean_name = row['feature'].replace('_encoded', '').replace('_freq', '').replace('_', ' ')
+        print(f"   - {clean_name}: {row['importance']:.4f}")
     
     # Decision rules for each code
     print("\n" + "=" * 60)
@@ -274,7 +275,12 @@ def train_model(data_dir: str = None, data_file: str = None,
             # Get top features for this code
             top_feats = model.rule_extractor.get_top_features(code, top_n=3)
             if top_feats:
-                print(f"    Key features: {', '.join([f[0] for f in top_feats])}")
+                # Clean up feature names for display
+                clean_names = []
+                for f in top_feats:
+                    name = f[0].replace('_encoded', '').replace('_freq', '').replace('_', ' ')
+                    clean_names.append(name)
+                print(f"    Key features: {', '.join(clean_names)}")
             
             # Get simplified rules
             if code in model.rule_extractor.trees:
