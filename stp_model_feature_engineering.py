@@ -70,6 +70,11 @@ class IFMLFeatureEngineer:
         # Account numeric only
         'orig_account_numeric', 'send_account_numeric', 'dbt_account_numeric',
         'cdt_account_numeric', 'intm_account_numeric', 'bnf_account_numeric',
+        # Address-based domestic/international flags
+        'orig_is_domestic', 'send_is_domestic', 'dbt_is_domestic',
+        'cdt_is_domestic', 'intm_is_domestic', 'bnf_is_domestic',
+        'orig_is_international', 'send_is_international', 'dbt_is_international',
+        'cdt_is_international', 'intm_is_international', 'bnf_is_international',
     ]
     
     # Numeric columns
