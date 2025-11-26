@@ -49,6 +49,27 @@ class IFMLFeatureEngineer:
         # BIC/IBAN country match flags
         'orig_bic_iban_match', 'send_bic_iban_match', 'dbt_bic_iban_match',
         'cdt_bic_iban_match', 'intm_bic_iban_match', 'bnf_bic_iban_match',
+        # BIC validation flags
+        'orig_bic_valid_format', 'send_bic_valid_format', 'dbt_bic_valid_format',
+        'cdt_bic_valid_format', 'intm_bic_valid_format', 'bnf_bic_valid_format',
+        'orig_bic_valid_country', 'send_bic_valid_country', 'dbt_bic_valid_country',
+        'cdt_bic_valid_country', 'intm_bic_valid_country', 'bnf_bic_valid_country',
+        # IBAN validation flags
+        'orig_iban_valid_format', 'send_iban_valid_format', 'dbt_iban_valid_format',
+        'cdt_iban_valid_format', 'intm_iban_valid_format', 'bnf_iban_valid_format',
+        'orig_iban_checksum_valid', 'send_iban_checksum_valid', 'dbt_iban_checksum_valid',
+        'cdt_iban_checksum_valid', 'intm_iban_checksum_valid', 'bnf_iban_checksum_valid',
+        # BIC-Party country match
+        'orig_bic_party_country_match', 'send_bic_party_country_match', 'dbt_bic_party_country_match',
+        'cdt_bic_party_country_match', 'intm_bic_party_country_match', 'bnf_bic_party_country_match',
+        # Account type detection flags
+        'orig_is_clabe', 'send_is_clabe', 'dbt_is_clabe', 'cdt_is_clabe', 'intm_is_clabe', 'bnf_is_clabe',
+        'orig_is_fedaba', 'send_is_fedaba', 'dbt_is_fedaba', 'cdt_is_fedaba', 'intm_is_fedaba', 'bnf_is_fedaba',
+        'orig_is_chips_aba', 'send_is_chips_aba', 'dbt_is_chips_aba', 'cdt_is_chips_aba', 'intm_is_chips_aba', 'bnf_is_chips_aba',
+        'orig_is_chips_uid', 'send_is_chips_uid', 'dbt_is_chips_uid', 'cdt_is_chips_uid', 'intm_is_chips_uid', 'bnf_is_chips_uid',
+        # Account numeric only
+        'orig_account_numeric', 'send_account_numeric', 'dbt_account_numeric',
+        'cdt_account_numeric', 'intm_account_numeric', 'bnf_account_numeric',
     ]
     
     # Numeric columns
@@ -59,6 +80,9 @@ class IFMLFeatureEngineer:
         # BIC lengths (4, 8, or 11 typically)
         'orig_bic_length', 'send_bic_length', 'dbt_bic_length',
         'cdt_bic_length', 'intm_bic_length', 'bnf_bic_length',
+        # Account lengths
+        'orig_account_length', 'send_account_length', 'dbt_account_length',
+        'cdt_account_length', 'intm_account_length', 'bnf_account_length',
     ]
     
     # Account type columns (categorical)
