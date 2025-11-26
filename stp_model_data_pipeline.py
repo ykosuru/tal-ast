@@ -300,7 +300,8 @@ class IFMLDataPipeline:
                        filter_severity: Optional[List[str]] = None,
                        min_code_samples: int = 5,
                        use_composite_codes: bool = False,
-                       only_with_codes: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                       only_with_codes: bool = True,
+                       code_series_filter: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Create ML-ready dataset from loaded records.
         
@@ -311,6 +312,8 @@ class IFMLDataPipeline:
             use_composite_codes: If True, use code+party labels (e.g., '8004_BNPPTY')
                                 instead of just codes ('8004').
             only_with_codes: If True, filter to only records that have at least one code.
+            code_series_filter: If provided, only include codes starting with these prefixes.
+                               E.g., ['8', '9'] for 8XXX and 9XXX series only.
         
         Returns:
             Tuple of (X_raw, X_transformed, y_multilabel)
@@ -343,6 +346,15 @@ class IFMLDataPipeline:
                 codes = filtered_codes
             else:
                 codes = base_codes
+            
+            # Filter codes by series if requested (e.g., 8XXX, 9XXX only)
+            if code_series_filter:
+                filtered_codes = []
+                for code in codes:
+                    base_code = code.split('_')[0] if '_' in code else code
+                    if any(base_code.startswith(prefix) for prefix in code_series_filter):
+                        filtered_codes.append(code)
+                codes = filtered_codes
             
             code_lists.append(codes)
         
