@@ -432,12 +432,20 @@ class IFMLParser:
         # Handle both PartyInfo and PartyInf naming
         party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
         
+        # Ensure party_info is a dict
+        if not isinstance(party_info, dict):
+            return
+        
         # Try standard naming (Info)
         for party_type in self.PARTY_TYPES:
             party_data = party_info.get(party_type)
             if party_data:
-                parsed_party = self._parse_single_party(party_type, party_data)
-                features.parties[party_type] = parsed_party
+                # Handle list - take first element
+                if isinstance(party_data, list):
+                    party_data = party_data[0] if party_data else None
+                if party_data and isinstance(party_data, dict):
+                    parsed_party = self._parse_single_party(party_type, party_data)
+                    features.parties[party_type] = parsed_party
         
         # Try alternate naming (Inf) and map to standard names
         alt_to_standard = {
@@ -454,12 +462,20 @@ class IFMLParser:
             if standard_type not in features.parties:  # Don't overwrite if already parsed
                 party_data = party_info.get(alt_type)
                 if party_data:
-                    parsed_party = self._parse_single_party(standard_type, party_data)
-                    features.parties[standard_type] = parsed_party
+                    # Handle list - take first element
+                    if isinstance(party_data, list):
+                        party_data = party_data[0] if party_data else None
+                    if party_data and isinstance(party_data, dict):
+                        parsed_party = self._parse_single_party(standard_type, party_data)
+                        features.parties[standard_type] = parsed_party
     
     def _parse_single_party(self, party_type: str, party_data: dict) -> PartyInfo:
         """Parse a single party's information."""
         party = PartyInfo(party_type=party_type)
+        
+        # Ensure party_data is a dict
+        if not isinstance(party_data, dict):
+            return party
         
         # Handle nested structures - multiple naming conventions
         basic_info = (
@@ -472,6 +488,14 @@ class IFMLParser:
             party_data.get('BasicPartyBankInf') or
             party_data
         )
+        
+        # Handle basic_info being a list - take first element
+        if isinstance(basic_info, list):
+            basic_info = basic_info[0] if basic_info else {}
+        
+        # Ensure basic_info is a dict
+        if not isinstance(basic_info, dict):
+            return party
         
         # Extract ID - handle multiple formats
         id_field = basic_info.get('ID')
