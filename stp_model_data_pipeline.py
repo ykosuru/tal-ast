@@ -179,6 +179,99 @@ class IFMLDataPipeline:
         
         return loaded
     
+    def load_directory(self, data_dir: str, pattern: str = "*.json") -> int:
+        """
+        Load all JSON files from a directory containing Request/Response payments.
+        
+        Each file should have format:
+        {
+            "payment_id_1": {
+                "Request": { "IFML": { ... } },
+                "Response": { "IFML": { ... } }
+            },
+            "payment_id_2": { ... }
+        }
+        
+        Args:
+            data_dir: Directory containing JSON files
+            pattern: Glob pattern for files (default: *.json)
+            
+        Returns:
+            Total number of records loaded across all files.
+        """
+        data_path = Path(data_dir)
+        if not data_path.is_dir():
+            raise ValueError(f"Directory not found: {data_dir}")
+        
+        files = sorted(data_path.glob(pattern))
+        print(f"Found {len(files)} JSON files in {data_dir}")
+        print("-" * 60)
+        
+        total_loaded = 0
+        file_count = 0
+        
+        for filepath in files:
+            try:
+                before_count = len(self.records)
+                loaded = self._load_single_file_quiet(str(filepath))
+                file_count += 1
+                total_loaded += loaded
+                print(f"  [{file_count:3d}] {filepath.name}: {loaded} payment(s)")
+            except Exception as e:
+                print(f"  ERROR {filepath.name}: {e}")
+        
+        print("-" * 60)
+        print(f"Summary: {file_count} files, {total_loaded} payments loaded")
+        return total_loaded
+    
+    def _load_single_file_quiet(self, filepath: str) -> int:
+        """Load a single file without verbose output (used by load_directory)."""
+        filepath = Path(filepath)
+        loaded = 0
+        
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        
+        for txn_id, payment_data in data.items():
+            try:
+                if not isinstance(payment_data, dict):
+                    continue
+                
+                request_data = payment_data.get('Request')
+                response_data = payment_data.get('Response')
+                
+                if not request_data:
+                    if 'IFML' in payment_data:
+                        request_data = payment_data
+                        response_data = None
+                    else:
+                        continue
+                
+                features = self.parser.parse(request_data)
+                feature_dict = self.parser.to_dict(features)
+                
+                if response_data:
+                    txn_uid, codes = self.response_parser.parse(response_data)
+                else:
+                    txn_uid = txn_id
+                    codes = []
+                
+                record = PaymentRecord(
+                    transaction_id=txn_uid or txn_id,
+                    request_features=feature_dict,
+                    response_codes=codes,
+                    error_codes_only=[c['code'] for c in codes if c.get('code')],
+                    severity_map={c['code']: c['severity'] for c in codes if c.get('code')}
+                )
+                
+                self.records.append(record)
+                loaded += 1
+                
+            except Exception as e:
+                pass  # Silently skip bad records
+        
+        return loaded
+    
     def load_from_dataframe(self, df: pd.DataFrame,
                             request_col: str = 'request',
                             response_col: str = 'response',
