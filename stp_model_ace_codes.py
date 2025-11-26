@@ -429,6 +429,11 @@ def is_target_series(code: str, series: list = None) -> bool:
     return any(base_code.startswith(s) for s in series)
 
 
+def is_8xxx_or_9xxx(code: str) -> bool:
+    """Check if code is in 8XXX or 9XXX series. Backward-compatible alias."""
+    return is_target_series(code, ['8', '9'])
+
+
 # Code to relevant IFML fields mapping (for feature hints)
 CODE_IFML_RELEVANCE = {
     '8001': ['bic', 'bic_length', 'has_bic'],  # Invalid BIC
