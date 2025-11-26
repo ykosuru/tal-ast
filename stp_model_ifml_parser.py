@@ -273,6 +273,19 @@ class IFMLParser:
         'OrderingInstitution'
     ]
     
+    # Alternate naming (without 'o' - Inf instead of Info)
+    PARTY_TYPES_ALT = [
+        'OriginatingPartyInf',
+        'SendingBankInf',
+        'DebitPartyInf',
+        'CreditPartyInf',
+        'IntermediaryBankInf',
+        'BeneficiaryBankInf',
+        'BeneficiaryPartyInf',
+        'AccountWithInstitution',
+        'OrderingInstitution'
+    ]
+    
     def __init__(self, keep_raw: bool = False):
         self.keep_raw = keep_raw
     
@@ -313,8 +326,8 @@ class IFMLParser:
         features.incoming_format = basic_payment.get('IncomingFormat')
         features.bank_operation_code = basic_payment.get('BankOperationCode')
         
-        # Extract location info
-        location_info = basic_payment.get('LocationInfo', {})
+        # Extract location info - handle both naming conventions
+        location_info = basic_payment.get('LocationInfo') or basic_payment.get('LocationInf') or {}
         features.location_id_bank = location_info.get('IDBank')
         
         # Extract monetary amounts
@@ -381,7 +394,8 @@ class IFMLParser:
             amounts = [amounts]
         
         for amt in amounts:
-            amt_type = amt.get('@Type', 'Unknown')
+            # Handle both @Type and Type naming conventions
+            amt_type = amt.get('@Type') or amt.get('Type') or 'Unknown'
             currency = amt.get('@Currency') or amt.get('Currency')
             amount_val = self._parse_amount(amt.get('Amount', '0'))
             
@@ -415,34 +429,58 @@ class IFMLParser:
     
     def _parse_party_info(self, basic_payment: dict, features: IFMLFeatures):
         """Extract party information for all party types."""
-        party_info = basic_payment.get('PartyInfo', {})
+        # Handle both PartyInfo and PartyInf naming
+        party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
         
+        # Try standard naming (Info)
         for party_type in self.PARTY_TYPES:
             party_data = party_info.get(party_type)
             if party_data:
                 parsed_party = self._parse_single_party(party_type, party_data)
                 features.parties[party_type] = parsed_party
+        
+        # Try alternate naming (Inf) and map to standard names
+        alt_to_standard = {
+            'OriginatingPartyInf': 'OriginatingPartyInfo',
+            'SendingBankInf': 'SendingBankInfo',
+            'DebitPartyInf': 'DebitPartyInfo',
+            'CreditPartyInf': 'CreditPartyInfo',
+            'IntermediaryBankInf': 'IntermediaryBankInfo',
+            'BeneficiaryBankInf': 'BeneficiaryBankInfo',
+            'BeneficiaryPartyInf': 'BeneficiaryBankInfo',  # Map to BeneficiaryBank
+        }
+        
+        for alt_type, standard_type in alt_to_standard.items():
+            if standard_type not in features.parties:  # Don't overwrite if already parsed
+                party_data = party_info.get(alt_type)
+                if party_data:
+                    parsed_party = self._parse_single_party(standard_type, party_data)
+                    features.parties[standard_type] = parsed_party
     
     def _parse_single_party(self, party_type: str, party_data: dict) -> PartyInfo:
         """Parse a single party's information."""
         party = PartyInfo(party_type=party_type)
         
-        # Handle nested structures - BasicPartyInfo, BasicIDInfo, AccountPartyInfo, BasicPartyBankInfo
+        # Handle nested structures - multiple naming conventions
         basic_info = (
             party_data.get('BasicPartyInfo') or 
+            party_data.get('BasicPartyInf') or
             party_data.get('BasicIDInfo') or 
             party_data.get('AccountPartyInfo') or
+            party_data.get('AccountPartyInf') or
             party_data.get('BasicPartyBankInfo') or
+            party_data.get('BasicPartyBankInf') or
             party_data
         )
         
-        # Extract ID
+        # Extract ID - handle multiple formats
         id_field = basic_info.get('ID')
         if id_field:
             if isinstance(id_field, dict):
                 party.has_id = True
-                party.id_type = id_field.get('@Type')
-                party.id_value = id_field.get('#text')
+                # Handle both @Type/#text and Type/text formats
+                party.id_type = id_field.get('@Type') or id_field.get('Type')
+                party.id_value = id_field.get('#text') or id_field.get('text')
                 if party.id_type == 'BIC':
                     party.has_bic = True
                     party.bic = party.id_value
@@ -450,21 +488,22 @@ class IFMLParser:
                 party.has_id = True
                 party.id_value = str(id_field)
         
-        # Check for BIC in ID type (only if ID is a dict)
-        id_field_check = basic_info.get('ID')
-        if isinstance(id_field_check, dict) and id_field_check.get('@Type') == 'BIC':
-            party.has_bic = True
-            party.bic = id_field_check.get('#text')
+        # Check for BIC in ID type
+        if isinstance(id_field, dict):
+            id_type = id_field.get('@Type') or id_field.get('Type')
+            if id_type == 'BIC':
+                party.has_bic = True
+                party.bic = id_field.get('#text') or id_field.get('text')
         
-        # Extract account info
-        acct_info = basic_info.get('AcctIDInfo')
+        # Extract account info - handle both AcctIDInfo and AcctIDInf
+        acct_info = basic_info.get('AcctIDInfo') or basic_info.get('AcctIDInf')
         if acct_info:
             party.has_account = True
             if isinstance(acct_info, dict):
                 acct_id = acct_info.get('ID', {})
                 if isinstance(acct_id, dict):
-                    party.account_type = acct_id.get('@Type')
-                    party.account_value = acct_id.get('#text')
+                    party.account_type = acct_id.get('@Type') or acct_id.get('Type')
+                    party.account_value = acct_id.get('#text') or acct_id.get('text')
         
         # Check AdrBankID for additional account info
         adr_bank_id = basic_info.get('AdrBankID')
@@ -473,16 +512,27 @@ class IFMLParser:
             if isinstance(adr_bank_id, dict):
                 party.account_type = party.account_type or adr_bank_id.get('@Type')
         
-        # Extract country codes
+        # Extract country codes - check both basic_info and party_data levels
         party.country = (
             basic_info.get('Country') or 
             party_data.get('Country')
         )
-        party.mailing_country = basic_info.get('MailingCountry')
-        party.residence_country = basic_info.get('ResidenceCountry')
+        party.mailing_country = (
+            basic_info.get('MailingCountry') or
+            party_data.get('MailingCountry')
+        )
+        party.residence_country = (
+            basic_info.get('ResidenceCountry') or
+            party_data.get('ResidenceCountry')
+        )
         
-        # Extract address info
-        address_info = basic_info.get('AddressInfo') or party_data.get('AddressInfo')
+        # Extract address info - handle both AddressInfo and AddressInf
+        address_info = (
+            basic_info.get('AddressInfo') or 
+            basic_info.get('AddressInf') or
+            party_data.get('AddressInfo') or
+            party_data.get('AddressInf')
+        )
         if address_info:
             if isinstance(address_info, list):
                 party.address_line_count = len(address_info)
@@ -623,6 +673,7 @@ class IFMLParser:
                 result[f'{prefix}_is_chips_uid'] = party.is_chips_uid
                 result[f'{prefix}_country'] = party.country
                 result[f'{prefix}_mailing_country'] = party.mailing_country
+                result[f'{prefix}_residence_country'] = party.residence_country
                 result[f'{prefix}_address_lines'] = party.address_line_count
                 result[f'{prefix}_has_name'] = party.has_name
             else:
@@ -648,6 +699,7 @@ class IFMLParser:
                 result[f'{prefix}_is_chips_uid'] = False
                 result[f'{prefix}_country'] = None
                 result[f'{prefix}_mailing_country'] = None
+                result[f'{prefix}_residence_country'] = None
                 result[f'{prefix}_address_lines'] = 0
                 result[f'{prefix}_has_name'] = False
         
@@ -725,11 +777,22 @@ class IFMLResponseParser:
     
     def _find_message(self, data: dict) -> Optional[dict]:
         """Find Message node in response structure."""
+        def safe_get(d, *keys):
+            """Safely navigate nested dicts."""
+            current = d
+            for key in keys:
+                if not isinstance(current, dict):
+                    return None
+                current = current.get(key)
+                if current is None:
+                    return None
+            return current if isinstance(current, dict) else None
+        
         patterns = [
-            lambda d: d.get('Response', {}).get('IFML', {}).get('File', {}).get('Message'),
-            lambda d: d.get('IFML', {}).get('File', {}).get('Message'),
-            lambda d: d.get('File', {}).get('Message'),
-            lambda d: d.get('Message'),
+            lambda d: safe_get(d, 'Response', 'IFML', 'File', 'Message'),
+            lambda d: safe_get(d, 'IFML', 'File', 'Message'),
+            lambda d: safe_get(d, 'File', 'Message'),
+            lambda d: safe_get(d, 'Message'),
         ]
         
         for pattern in patterns:
@@ -741,10 +804,21 @@ class IFMLResponseParser:
     
     def _find_file(self, data: dict) -> Optional[dict]:
         """Find File node in response structure."""
+        def safe_get(d, *keys):
+            """Safely navigate nested dicts."""
+            current = d
+            for key in keys:
+                if not isinstance(current, dict):
+                    return None
+                current = current.get(key)
+                if current is None:
+                    return None
+            return current if isinstance(current, dict) else None
+        
         patterns = [
-            lambda d: d.get('Response', {}).get('IFML', {}).get('File'),
-            lambda d: d.get('IFML', {}).get('File'),
-            lambda d: d.get('File'),
+            lambda d: safe_get(d, 'Response', 'IFML', 'File'),
+            lambda d: safe_get(d, 'IFML', 'File'),
+            lambda d: safe_get(d, 'File'),
         ]
         
         for pattern in patterns:
