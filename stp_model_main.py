@@ -36,15 +36,90 @@ from model_training import (
 from predictor import ACEPredictor, PredictionResult
 
 
-def _extract_simple_rules(tree, feature_names, max_rules=5):
+def _extract_simple_rules(tree, feature_names, max_rules=5, feature_engineer=None):
     """
     Extract human-readable rules from a decision tree.
     Returns the top rules that lead to positive predictions.
+    Decodes encoded features back to original values when possible.
     """
     from sklearn.tree import _tree
     
+    # Build reverse lookup for encoded features
+    reverse_encoders = {}
+    bool_features = set()
+    freq_features = set()
+    
+    if feature_engineer:
+        # Get label encoder reverse mappings
+        for col, le in feature_engineer.label_encoders.items():
+            encoded_name = f"{col}_encoded"
+            reverse_encoders[encoded_name] = {i: c for i, c in enumerate(le.classes_)}
+        
+        # Track boolean and frequency features
+        bool_features = set(feature_engineer.BOOL_COLS)
+        freq_features = {f"{col}_freq" for col in feature_engineer.FREQUENCY_COLS}
+    
     tree_ = tree.tree_
     rules = []
+    
+    def decode_condition(feature, threshold, direction):
+        """Convert encoded condition to human-readable form."""
+        # Handle boolean features
+        if feature in bool_features:
+            if direction == '<=':
+                return f"{feature} = False"
+            else:
+                return f"{feature} = True"
+        
+        # Handle label-encoded features
+        if feature in reverse_encoders:
+            encoder = reverse_encoders[feature]
+            base_name = feature.replace('_encoded', '')
+            
+            if direction == '<=':
+                # Values at or below threshold
+                matches = [v for k, v in encoder.items() if k <= threshold and not v.startswith('__')]
+                if len(matches) == 1:
+                    return f"{base_name} = '{matches[0]}'"
+                elif len(matches) <= 3:
+                    return f"{base_name} IN {matches}"
+                else:
+                    # Show what's excluded
+                    excluded = [v for k, v in encoder.items() if k > threshold and not v.startswith('__')]
+                    if len(excluded) <= 2:
+                        return f"{base_name} NOT IN {excluded}"
+            else:
+                # Values above threshold
+                matches = [v for k, v in encoder.items() if k > threshold and not v.startswith('__')]
+                if len(matches) == 1:
+                    return f"{base_name} = '{matches[0]}'"
+                elif len(matches) <= 3:
+                    return f"{base_name} IN {matches}"
+        
+        # Handle frequency-encoded features
+        if feature in freq_features:
+            base_name = feature.replace('_freq', '')
+            if direction == '<=':
+                if threshold < 0.1:
+                    return f"{base_name} is rare"
+                else:
+                    return f"{base_name} frequency <= {threshold:.0%}"
+            else:
+                if threshold < 0.1:
+                    return f"{base_name} is common"
+                else:
+                    return f"{base_name} frequency > {threshold:.0%}"
+        
+        # Handle numeric features
+        display_name = feature.replace('_', ' ')
+        if direction == '<=':
+            if threshold == 0.5 and threshold == int(threshold):
+                return f"{display_name} = 0"
+            return f"{display_name} <= {threshold:.2f}"
+        else:
+            if threshold == 0.5 and threshold == int(threshold):
+                return f"{display_name} > 0"
+            return f"{display_name} > {threshold:.2f}"
     
     def recurse(node, path):
         if tree_.feature[node] == _tree.TREE_UNDEFINED:
@@ -65,15 +140,12 @@ def _extract_simple_rules(tree, feature_names, max_rules=5):
             feature = feature_names[tree_.feature[node]]
             threshold = tree_.threshold[node]
             
-            # Simplify feature names for readability
-            display_feature = feature.replace('_encoded', '').replace('_', ' ')
-            
             # Left branch (<=)
-            left_cond = f"{display_feature} <= {threshold:.2f}"
+            left_cond = decode_condition(feature, threshold, '<=')
             recurse(tree_.children_left[node], path + [left_cond])
             
             # Right branch (>)
-            right_cond = f"{display_feature} > {threshold:.2f}"
+            right_cond = decode_condition(feature, threshold, '>')
             recurse(tree_.children_right[node], path + [right_cond])
     
     recurse(0, [])
@@ -207,7 +279,7 @@ def train_model(data_dir: str = None, data_file: str = None,
             # Get simplified rules
             if code in model.rule_extractor.trees:
                 tree = model.rule_extractor.trees[code]
-                rules = _extract_simple_rules(tree, feature_names, max_rules=3)
+                rules = _extract_simple_rules(tree, feature_names, max_rules=3, feature_engineer=pipeline.feature_engineer)
                 for rule in rules:
                     print(f"    IF {rule['condition']} THEN {code} (confidence: {rule['confidence']:.0%})")
     else:
@@ -227,7 +299,7 @@ def train_model(data_dir: str = None, data_file: str = None,
                 continue
             if code in model.rule_extractor.trees:
                 tree = model.rule_extractor.trees[code]
-                rules = _extract_simple_rules(tree, feature_names, max_rules=5)
+                rules = _extract_simple_rules(tree, feature_names, max_rules=5, feature_engineer=pipeline.feature_engineer)
                 top_feats = model.rule_extractor.get_top_features(code, top_n=5)
                 code_rules[code] = {
                     'key_features': [f[0] for f in top_feats],
