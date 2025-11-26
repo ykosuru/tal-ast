@@ -36,6 +36,123 @@ from model_training import (
 from predictor import ACEPredictor, PredictionResult
 
 
+# Mapping from feature names to actual IFML element paths
+FEATURE_TO_IFML_PATH = {
+    # Transaction level
+    'source_code': 'IFML/File/Message/BasicPayment/@SourceCode',
+    'incoming_msg_type': 'IFML/File/Message/BasicPayment/@IncomingMsgType',
+    'incoming_format': 'IFML/File/Message/BasicPayment/@IncomingFormat',
+    'bank_operation_code': 'IFML/File/Message/BasicPayment/BankOperationCode',
+    'primary_amount': 'IFML/File/Message/BasicPayment/MonetaryInfo/Amount',
+    'primary_currency': 'IFML/File/Message/BasicPayment/MonetaryInfo/Currency',
+    'instructed_amount': 'IFML/File/Message/BasicPayment/MonetaryInfo[@Type="Instructed"]/Amount',
+    'has_instructed_amount': 'IFML/File/Message/BasicPayment/MonetaryInfo[@Type="Instructed"]',
+    'amount_mismatch': 'MonetaryInfo/Amount values differ',
+    'amount_count': 'Count of IFML/File/Message/BasicPayment/MonetaryInfo elements',
+    'is_cross_border': 'OriginatingPartyInfo/Country != CreditPartyInfo/Country',
+    'has_intermediary': 'IFML/File/Message/BasicPayment/PartyInfo/IntermediaryBankInfo present',
+    'has_beneficiary_bank': 'IFML/File/Message/BasicPayment/PartyInfo/BeneficiaryBankInfo present',
+    'has_bank_info': 'IFML/File/Message/BasicPayment/BankInfo present',
+    'bank_info_count': 'Count of IFML/File/Message/BasicPayment/BankInfo elements',
+    
+    # Originating Party
+    'orig_present': 'PartyInfo/OriginatingPartyInfo present',
+    'orig_has_id': 'PartyInfo/OriginatingPartyInfo/BasicPartyInfo/ID',
+    'orig_has_bic': 'PartyInfo/OriginatingPartyInfo/BasicPartyInfo/ID[@Type="BIC"]',
+    'orig_bic_length': 'Length of OriginatingPartyInfo/BasicPartyInfo/ID[@Type="BIC"]',
+    'orig_bic_country': 'OriginatingPartyInfo/BasicPartyInfo/ID[@Type="BIC"] chars 5-6',
+    'orig_has_account': 'PartyInfo/OriginatingPartyInfo/BasicPartyInfo/AcctIDInfo',
+    'orig_account_type': 'PartyInfo/OriginatingPartyInfo/BasicPartyInfo/AcctIDInfo/ID/@Type',
+    'orig_iban_country': 'OriginatingPartyInfo/AcctIDInfo/ID[@Type="IBAN"] chars 1-2',
+    'orig_bic_iban_match': 'OriginatingPartyInfo BIC country = IBAN country',
+    'orig_country': 'PartyInfo/OriginatingPartyInfo/BasicPartyInfo/Country',
+    'orig_address_lines': 'Count of OriginatingPartyInfo/BasicPartyInfo/AddressInfo elements',
+    'orig_has_name': 'PartyInfo/OriginatingPartyInfo/BasicPartyInfo/AddressInfo present',
+    
+    # Sending Bank
+    'send_present': 'PartyInfo/SendingBankInfo present',
+    'send_has_id': 'PartyInfo/SendingBankInfo/BasicPartyBankInfo/ID',
+    'send_has_bic': 'PartyInfo/SendingBankInfo/BasicPartyBankInfo/ID[@Type="BIC"]',
+    'send_bic_length': 'Length of SendingBankInfo/BasicPartyBankInfo/ID[@Type="BIC"]',
+    'send_bic_country': 'SendingBankInfo/BasicPartyBankInfo/ID[@Type="BIC"] chars 5-6',
+    'send_has_account': 'PartyInfo/SendingBankInfo/BasicPartyBankInfo/AcctIDInfo',
+    'send_account_type': 'PartyInfo/SendingBankInfo/BasicPartyBankInfo/AcctIDInfo/ID/@Type',
+    'send_iban_country': 'SendingBankInfo/AcctIDInfo/ID[@Type="IBAN"] chars 1-2',
+    'send_bic_iban_match': 'SendingBankInfo BIC country = IBAN country',
+    'send_country': 'PartyInfo/SendingBankInfo/BasicPartyBankInfo/Country',
+    'send_address_lines': 'Count of SendingBankInfo/BasicPartyBankInfo/AddressInfo elements',
+    'send_has_name': 'PartyInfo/SendingBankInfo/BasicPartyBankInfo/AddressInfo present',
+    
+    # Debit Party
+    'dbt_present': 'PartyInfo/DebitPartyInfo present',
+    'dbt_has_id': 'PartyInfo/DebitPartyInfo/BasicPartyInfo/ID',
+    'dbt_has_bic': 'PartyInfo/DebitPartyInfo/BasicPartyInfo/ID[@Type="BIC"]',
+    'dbt_bic_length': 'Length of DebitPartyInfo/BasicPartyInfo/ID[@Type="BIC"]',
+    'dbt_bic_country': 'DebitPartyInfo/BasicPartyInfo/ID[@Type="BIC"] chars 5-6',
+    'dbt_has_account': 'PartyInfo/DebitPartyInfo/BasicPartyInfo/AcctIDInfo',
+    'dbt_account_type': 'PartyInfo/DebitPartyInfo/BasicPartyInfo/AcctIDInfo/ID/@Type',
+    'dbt_iban_country': 'DebitPartyInfo/AcctIDInfo/ID[@Type="IBAN"] chars 1-2',
+    'dbt_bic_iban_match': 'DebitPartyInfo BIC country = IBAN country',
+    'dbt_country': 'PartyInfo/DebitPartyInfo/BasicPartyInfo/Country',
+    'dbt_address_lines': 'Count of DebitPartyInfo/BasicPartyInfo/AddressInfo elements',
+    'dbt_has_name': 'PartyInfo/DebitPartyInfo/BasicPartyInfo/AddressInfo present',
+    
+    # Credit Party
+    'cdt_present': 'PartyInfo/CreditPartyInfo present',
+    'cdt_has_id': 'PartyInfo/CreditPartyInfo/BasicPartyInfo/ID',
+    'cdt_has_bic': 'PartyInfo/CreditPartyInfo/BasicPartyInfo/ID[@Type="BIC"]',
+    'cdt_bic_length': 'Length of CreditPartyInfo/BasicPartyInfo/ID[@Type="BIC"]',
+    'cdt_bic_country': 'CreditPartyInfo/BasicPartyInfo/ID[@Type="BIC"] chars 5-6',
+    'cdt_has_account': 'PartyInfo/CreditPartyInfo/BasicPartyInfo/AcctIDInfo',
+    'cdt_account_type': 'PartyInfo/CreditPartyInfo/BasicPartyInfo/AcctIDInfo/ID/@Type',
+    'cdt_iban_country': 'CreditPartyInfo/AcctIDInfo/ID[@Type="IBAN"] chars 1-2',
+    'cdt_bic_iban_match': 'CreditPartyInfo BIC country = IBAN country',
+    'cdt_country': 'PartyInfo/CreditPartyInfo/BasicPartyInfo/Country',
+    'cdt_address_lines': 'Count of CreditPartyInfo/BasicPartyInfo/AddressInfo elements',
+    'cdt_has_name': 'PartyInfo/CreditPartyInfo/BasicPartyInfo/AddressInfo present',
+    
+    # Intermediary Bank
+    'intm_present': 'PartyInfo/IntermediaryBankInfo present',
+    'intm_has_id': 'PartyInfo/IntermediaryBankInfo/BasicPartyBankInfo/ID',
+    'intm_has_bic': 'PartyInfo/IntermediaryBankInfo/BasicPartyBankInfo/ID[@Type="BIC"]',
+    'intm_bic_length': 'Length of IntermediaryBankInfo/BasicPartyBankInfo/ID[@Type="BIC"]',
+    'intm_bic_country': 'IntermediaryBankInfo/BasicPartyBankInfo/ID[@Type="BIC"] chars 5-6',
+    'intm_has_account': 'PartyInfo/IntermediaryBankInfo/BasicPartyBankInfo/AcctIDInfo',
+    'intm_account_type': 'PartyInfo/IntermediaryBankInfo/BasicPartyBankInfo/AcctIDInfo/ID/@Type',
+    'intm_iban_country': 'IntermediaryBankInfo/AcctIDInfo/ID[@Type="IBAN"] chars 1-2',
+    'intm_bic_iban_match': 'IntermediaryBankInfo BIC country = IBAN country',
+    'intm_country': 'PartyInfo/IntermediaryBankInfo/BasicPartyBankInfo/Country',
+    'intm_address_lines': 'Count of IntermediaryBankInfo/BasicPartyBankInfo/AddressInfo elements',
+    'intm_has_name': 'PartyInfo/IntermediaryBankInfo/BasicPartyBankInfo/AddressInfo present',
+    
+    # Beneficiary Bank
+    'bnf_present': 'PartyInfo/BeneficiaryBankInfo present',
+    'bnf_has_id': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/ID',
+    'bnf_has_bic': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/ID[@Type="BIC"]',
+    'bnf_bic_length': 'Length of BeneficiaryBankInfo/BasicPartyBankInfo/ID[@Type="BIC"]',
+    'bnf_bic_country': 'BeneficiaryBankInfo/BasicPartyBankInfo/ID[@Type="BIC"] chars 5-6',
+    'bnf_has_account': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/AcctIDInfo',
+    'bnf_account_type': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/AcctIDInfo/ID/@Type',
+    'bnf_iban_country': 'BeneficiaryBankInfo/AcctIDInfo/ID[@Type="IBAN"] chars 1-2',
+    'bnf_bic_iban_match': 'BeneficiaryBankInfo BIC country = IBAN country',
+    'bnf_country': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/Country',
+    'bnf_address_lines': 'Count of BeneficiaryBankInfo/BasicPartyBankInfo/AddressInfo elements',
+    'bnf_has_name': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/AddressInfo present',
+}
+
+
+def _get_ifml_path(feature_name: str) -> str:
+    """Get IFML path for a feature name, handling encoded suffixes."""
+    # Strip common suffixes
+    base_name = feature_name.replace('_encoded', '').replace('_freq', '')
+    
+    if base_name in FEATURE_TO_IFML_PATH:
+        return FEATURE_TO_IFML_PATH[base_name]
+    
+    # Fallback to cleaned name
+    return base_name.replace('_', ' ')
+
+
 def _extract_simple_rules(tree, feature_names, max_rules=5, feature_engineer=None):
     """
     Extract human-readable rules from a decision tree.
@@ -63,63 +180,63 @@ def _extract_simple_rules(tree, feature_names, max_rules=5, feature_engineer=Non
     rules = []
     
     def decode_condition(feature, threshold, direction):
-        """Convert encoded condition to human-readable form."""
+        """Convert encoded condition to human-readable form using IFML paths."""
+        # Get IFML path for this feature
+        ifml_path = _get_ifml_path(feature)
+        
         # Handle boolean features
         if feature in bool_features:
             if direction == '<=':
-                return f"{feature} = False"
+                return f"{ifml_path} = False (not present)"
             else:
-                return f"{feature} = True"
+                return f"{ifml_path} = True (present)"
         
         # Handle label-encoded features
         if feature in reverse_encoders:
             encoder = reverse_encoders[feature]
-            base_name = feature.replace('_encoded', '')
             
             if direction == '<=':
                 # Values at or below threshold
                 matches = [v for k, v in encoder.items() if k <= threshold and not v.startswith('__')]
                 if len(matches) == 1:
-                    return f"{base_name} = '{matches[0]}'"
+                    return f"{ifml_path} = '{matches[0]}'"
                 elif len(matches) <= 3:
-                    return f"{base_name} IN {matches}"
+                    return f"{ifml_path} IN {matches}"
                 else:
                     # Show what's excluded
                     excluded = [v for k, v in encoder.items() if k > threshold and not v.startswith('__')]
                     if len(excluded) <= 2:
-                        return f"{base_name} NOT IN {excluded}"
+                        return f"{ifml_path} NOT IN {excluded}"
             else:
                 # Values above threshold
                 matches = [v for k, v in encoder.items() if k > threshold and not v.startswith('__')]
                 if len(matches) == 1:
-                    return f"{base_name} = '{matches[0]}'"
+                    return f"{ifml_path} = '{matches[0]}'"
                 elif len(matches) <= 3:
-                    return f"{base_name} IN {matches}"
+                    return f"{ifml_path} IN {matches}"
         
         # Handle frequency-encoded features
         if feature in freq_features:
-            base_name = feature.replace('_freq', '')
             if direction == '<=':
                 if threshold < 0.1:
-                    return f"{base_name} is rare"
+                    return f"{ifml_path} is rare value"
                 else:
-                    return f"{base_name} frequency <= {threshold:.0%}"
+                    return f"{ifml_path} frequency <= {threshold:.0%}"
             else:
                 if threshold < 0.1:
-                    return f"{base_name} is common"
+                    return f"{ifml_path} is common value"
                 else:
-                    return f"{base_name} frequency > {threshold:.0%}"
+                    return f"{ifml_path} frequency > {threshold:.0%}"
         
         # Handle numeric features
-        display_name = feature.replace('_', ' ')
         if direction == '<=':
-            if threshold == 0.5 and threshold == int(threshold):
-                return f"{display_name} = 0"
-            return f"{display_name} <= {threshold:.2f}"
+            if threshold == 0.5:
+                return f"{ifml_path} = 0 or missing"
+            return f"{ifml_path} <= {threshold:.2f}"
         else:
-            if threshold == 0.5 and threshold == int(threshold):
-                return f"{display_name} > 0"
-            return f"{display_name} > {threshold:.2f}"
+            if threshold == 0.5:
+                return f"{ifml_path} > 0 (present)"
+            return f"{ifml_path} > {threshold:.2f}"
     
     def recurse(node, path):
         if tree_.feature[node] == _tree.TREE_UNDEFINED:
@@ -259,8 +376,8 @@ def train_model(data_dir: str = None, data_file: str = None,
     print("\n   Top 10 Important Features:")
     importance = model.get_feature_importance(10)
     for _, row in importance.iterrows():
-        clean_name = row['feature'].replace('_encoded', '').replace('_freq', '').replace('_', ' ')
-        print(f"   - {clean_name}: {row['importance']:.4f}")
+        ifml_path = _get_ifml_path(row['feature'])
+        print(f"   - {ifml_path}: {row['importance']:.4f}")
     
     # Decision rules for each code
     print("\n" + "=" * 60)
@@ -275,12 +392,11 @@ def train_model(data_dir: str = None, data_file: str = None,
             # Get top features for this code
             top_feats = model.rule_extractor.get_top_features(code, top_n=3)
             if top_feats:
-                # Clean up feature names for display
-                clean_names = []
-                for f in top_feats:
-                    name = f[0].replace('_encoded', '').replace('_freq', '').replace('_', ' ')
-                    clean_names.append(name)
-                print(f"    Key features: {', '.join(clean_names)}")
+                # Show IFML paths for key features
+                print(f"    Key IFML elements:")
+                for feat_name, importance in top_feats:
+                    ifml_path = _get_ifml_path(feat_name)
+                    print(f"      - {ifml_path}")
             
             # Get simplified rules
             if code in model.rule_extractor.trees:
