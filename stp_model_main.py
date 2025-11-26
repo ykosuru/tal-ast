@@ -34,6 +34,7 @@ from model_training import (
     train_with_cross_validation
 )
 from predictor import ACEPredictor, PredictionResult
+from ace_codes import get_code_description, get_code_category, is_8xxx_or_9xxx, ALL_CODES
 
 
 # Mapping from feature names to actual IFML element paths
@@ -138,6 +139,96 @@ FEATURE_TO_IFML_PATH = {
     'bnf_country': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/Country',
     'bnf_address_lines': 'Count of BeneficiaryBankInfo/BasicPartyBankInfo/AddressInfo elements',
     'bnf_has_name': 'PartyInfo/BeneficiaryBankInfo/BasicPartyBankInfo/AddressInfo present',
+    
+    # === NEW VALIDATION FEATURES ===
+    
+    # BIC Format Validation (8 or 11 chars, proper structure)
+    'orig_bic_valid_format': 'OriginatingPartyInfo BIC passes format check (AAAACCLL or AAAACCLLBBB)',
+    'send_bic_valid_format': 'SendingBankInfo BIC passes format check',
+    'dbt_bic_valid_format': 'DebitPartyInfo BIC passes format check',
+    'cdt_bic_valid_format': 'CreditPartyInfo BIC passes format check',
+    'intm_bic_valid_format': 'IntermediaryBankInfo BIC passes format check',
+    'bnf_bic_valid_format': 'BeneficiaryBankInfo BIC passes format check',
+    
+    # BIC Country Validation (ISO 3166-1 alpha-2)
+    'orig_bic_valid_country': 'OriginatingPartyInfo BIC country is valid ISO code',
+    'send_bic_valid_country': 'SendingBankInfo BIC country is valid ISO code',
+    'dbt_bic_valid_country': 'DebitPartyInfo BIC country is valid ISO code',
+    'cdt_bic_valid_country': 'CreditPartyInfo BIC country is valid ISO code',
+    'intm_bic_valid_country': 'IntermediaryBankInfo BIC country is valid ISO code',
+    'bnf_bic_valid_country': 'BeneficiaryBankInfo BIC country is valid ISO code',
+    
+    # IBAN Format Validation (correct length for country)
+    'orig_iban_valid_format': 'OriginatingPartyInfo IBAN passes format check',
+    'send_iban_valid_format': 'SendingBankInfo IBAN passes format check',
+    'dbt_iban_valid_format': 'DebitPartyInfo IBAN passes format check',
+    'cdt_iban_valid_format': 'CreditPartyInfo IBAN passes format check',
+    'intm_iban_valid_format': 'IntermediaryBankInfo IBAN passes format check',
+    'bnf_iban_valid_format': 'BeneficiaryBankInfo IBAN passes format check',
+    
+    # IBAN Checksum Validation (mod-97)
+    'orig_iban_checksum_valid': 'OriginatingPartyInfo IBAN passes mod-97 checksum',
+    'send_iban_checksum_valid': 'SendingBankInfo IBAN passes mod-97 checksum',
+    'dbt_iban_checksum_valid': 'DebitPartyInfo IBAN passes mod-97 checksum',
+    'cdt_iban_checksum_valid': 'CreditPartyInfo IBAN passes mod-97 checksum',
+    'intm_iban_checksum_valid': 'IntermediaryBankInfo IBAN passes mod-97 checksum',
+    'bnf_iban_checksum_valid': 'BeneficiaryBankInfo IBAN passes mod-97 checksum',
+    
+    # BIC-Party Country Match
+    'orig_bic_party_country_match': 'OriginatingPartyInfo BIC country = Party country',
+    'send_bic_party_country_match': 'SendingBankInfo BIC country = Party country',
+    'dbt_bic_party_country_match': 'DebitPartyInfo BIC country = Party country',
+    'cdt_bic_party_country_match': 'CreditPartyInfo BIC country = Party country',
+    'intm_bic_party_country_match': 'IntermediaryBankInfo BIC country = Party country',
+    'bnf_bic_party_country_match': 'BeneficiaryBankInfo BIC country = Party country',
+    
+    # Account Length
+    'orig_account_length': 'Length of OriginatingPartyInfo/AcctIDInfo/ID',
+    'send_account_length': 'Length of SendingBankInfo/AcctIDInfo/ID',
+    'dbt_account_length': 'Length of DebitPartyInfo/AcctIDInfo/ID',
+    'cdt_account_length': 'Length of CreditPartyInfo/AcctIDInfo/ID',
+    'intm_account_length': 'Length of IntermediaryBankInfo/AcctIDInfo/ID',
+    'bnf_account_length': 'Length of BeneficiaryBankInfo/AcctIDInfo/ID',
+    
+    # Account Numeric Only
+    'orig_account_numeric': 'OriginatingPartyInfo account is all digits',
+    'send_account_numeric': 'SendingBankInfo account is all digits',
+    'dbt_account_numeric': 'DebitPartyInfo account is all digits',
+    'cdt_account_numeric': 'CreditPartyInfo account is all digits',
+    'intm_account_numeric': 'IntermediaryBankInfo account is all digits',
+    'bnf_account_numeric': 'BeneficiaryBankInfo account is all digits',
+    
+    # CLABE Detection (Mexican 18-digit)
+    'orig_is_clabe': 'OriginatingPartyInfo account is CLABE (18 digits)',
+    'send_is_clabe': 'SendingBankInfo account is CLABE (18 digits)',
+    'dbt_is_clabe': 'DebitPartyInfo account is CLABE (18 digits)',
+    'cdt_is_clabe': 'CreditPartyInfo account is CLABE (18 digits)',
+    'intm_is_clabe': 'IntermediaryBankInfo account is CLABE (18 digits)',
+    'bnf_is_clabe': 'BeneficiaryBankInfo account is CLABE (18 digits)',
+    
+    # FEDABA Detection (US 9-digit routing)
+    'orig_is_fedaba': 'OriginatingPartyInfo account is FEDABA (9 digits)',
+    'send_is_fedaba': 'SendingBankInfo account is FEDABA (9 digits)',
+    'dbt_is_fedaba': 'DebitPartyInfo account is FEDABA (9 digits)',
+    'cdt_is_fedaba': 'CreditPartyInfo account is FEDABA (9 digits)',
+    'intm_is_fedaba': 'IntermediaryBankInfo account is FEDABA (9 digits)',
+    'bnf_is_fedaba': 'BeneficiaryBankInfo account is FEDABA (9 digits)',
+    
+    # CHIPS ABA Detection
+    'orig_is_chips_aba': 'OriginatingPartyInfo account is CHIPS ABA (9 digits)',
+    'send_is_chips_aba': 'SendingBankInfo account is CHIPS ABA (9 digits)',
+    'dbt_is_chips_aba': 'DebitPartyInfo account is CHIPS ABA (9 digits)',
+    'cdt_is_chips_aba': 'CreditPartyInfo account is CHIPS ABA (9 digits)',
+    'intm_is_chips_aba': 'IntermediaryBankInfo account is CHIPS ABA (9 digits)',
+    'bnf_is_chips_aba': 'BeneficiaryBankInfo account is CHIPS ABA (9 digits)',
+    
+    # CHIPS UID Detection (6-digit)
+    'orig_is_chips_uid': 'OriginatingPartyInfo account is CHIPS UID (6 digits)',
+    'send_is_chips_uid': 'SendingBankInfo account is CHIPS UID (6 digits)',
+    'dbt_is_chips_uid': 'DebitPartyInfo account is CHIPS UID (6 digits)',
+    'cdt_is_chips_uid': 'CreditPartyInfo account is CHIPS UID (6 digits)',
+    'intm_is_chips_uid': 'IntermediaryBankInfo account is CHIPS UID (6 digits)',
+    'bnf_is_chips_uid': 'BeneficiaryBankInfo account is CHIPS UID (6 digits)',
 }
 
 
@@ -277,7 +368,8 @@ def train_model(data_dir: str = None, data_file: str = None,
                 config: ModelConfig = None,
                 filter_severity: List[str] = None,
                 use_composite_codes: bool = False,
-                min_code_samples: int = 5) -> Dict[str, Any]:
+                min_code_samples: int = 5,
+                code_series_filter: List[str] = None) -> Dict[str, Any]:
     """
     Train error code prediction model from IFML data.
     
@@ -289,6 +381,7 @@ def train_model(data_dir: str = None, data_file: str = None,
         filter_severity: Filter codes by severity (e.g., ['E'] for errors only)
         use_composite_codes: If True, use code+party labels (e.g., '8004_BNPPTY')
         min_code_samples: Minimum samples for a code to have its own class
+        code_series_filter: Filter to specific code series (e.g., ['8', '9'] for 8XXX/9XXX)
     
     Returns:
         Training results dictionary
@@ -332,10 +425,13 @@ def train_model(data_dir: str = None, data_file: str = None,
     
     # Create dataset
     print("\n[2/5] Creating dataset...")
+    if code_series_filter:
+        print(f"   Filtering to code series: {code_series_filter}")
     X_raw, X_transformed, y_multilabel = pipeline.create_dataset(
         filter_severity=filter_severity,
         min_code_samples=min_code_samples,
-        use_composite_codes=use_composite_codes
+        use_composite_codes=use_composite_codes,
+        code_series_filter=code_series_filter
     )
     
     X = X_transformed.values.astype(np.float32)
@@ -387,7 +483,10 @@ def train_model(data_dir: str = None, data_file: str = None,
         for code in class_names:
             if code.startswith('__'):  # Skip __RARE__, __NO_ERROR__
                 continue
-            print(f"\n>>> {code}")
+            desc = get_code_description(code)
+            category = get_code_category(code)
+            print(f"\n>>> {code} [{category}]")
+            print(f"    Description: {desc}")
             
             # Get top features for this code
             top_feats = model.rule_extractor.get_top_features(code, top_n=3)
@@ -837,6 +936,8 @@ Examples:
                              help='Use composite labels (code+party, e.g., 8004_BNPPTY)')
     train_parser.add_argument('--min-samples', type=int, default=5,
                              help='Minimum samples for a code to have its own class (default: 5)')
+    train_parser.add_argument('--code-series', nargs='+', default=None,
+                             help='Filter to specific code series (e.g., 8 9 for 8XXX and 9XXX only)')
     
     # Predict command
     predict_parser = subparsers.add_parser('predict', help='Predict error codes')
@@ -871,17 +972,26 @@ Examples:
             config=config,
             filter_severity=args.severity,
             use_composite_codes=args.composite,
-            min_code_samples=args.min_samples
+            min_code_samples=args.min_samples,
+            code_series_filter=args.code_series
         )
         print(json.dumps(results.get('training_info', {}), indent=2))
     
     elif args.command == 'predict':
         result = predict(args.model_dir, args.input, threshold=args.threshold)
+        # Add descriptions to output
+        predictions_with_desc = []
+        for code in result.predicted_codes:
+            predictions_with_desc.append({
+                'code': code,
+                'description': get_code_description(code),
+                'category': get_code_category(code),
+                'probability': round(result.probabilities.get(code, 0), 4)
+            })
         print(json.dumps({
             'transaction_id': result.transaction_id,
-            'predicted_codes': result.predicted_codes,
+            'predictions': predictions_with_desc,
             'confidence': result.confidence,
-            'probabilities': {k: round(v, 4) for k, v in result.probabilities.items()},
             'warnings': result.warnings
         }, indent=2))
     
