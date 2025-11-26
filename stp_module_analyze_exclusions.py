@@ -53,12 +53,16 @@ def extract_codes_from_response(response: dict) -> Set[str]:
             if 'Code' in obj:
                 code = obj['Code']
                 if code:
-                    # Also capture party hint from InformationalData
-                    info = obj.get('InformationalData', '')
-                    party = extract_party_hint(info)
-                    if party:
-                        codes.add(f"{code}_{party}")
-                    codes.add(str(code))
+                    code_str = str(code)
+                    # Only include valid ACE codes (4-digit codes starting with 6, 7, 8, or 9)
+                    base_code = code_str.split('_')[0]
+                    if base_code.isdigit() and len(base_code) == 4 and base_code[0] in '6789':
+                        # Also capture party hint from InformationalData
+                        info = obj.get('InformationalData', '')
+                        party = extract_party_hint(info)
+                        if party:
+                            codes.add(f"{code_str}_{party}")
+                        codes.add(code_str)
             
             # Check for MsgStatus which may be a list
             if 'MsgStatus' in obj:
@@ -135,8 +139,13 @@ def find_mutual_exclusions(code_sets: List[Set[str]],
     # Find candidate exclusions
     exclusions = []
     
-    # Get codes that meet minimum frequency
-    frequent_codes = {c for c, f in code_freq.items() if f >= min_individual_freq}
+    # Get codes that meet minimum frequency AND are valid ACE codes
+    def is_valid_ace_code(code):
+        base = code.split('_')[0]
+        return base.isdigit() and len(base) == 4 and base[0] in '6789'
+    
+    frequent_codes = {c for c, f in code_freq.items() 
+                      if f >= min_individual_freq and is_valid_ace_code(c)}
     
     # Check all pairs
     for c1, c2 in itertools.combinations(sorted(frequent_codes), 2):
@@ -159,8 +168,13 @@ def find_mutual_exclusions(code_sets: List[Set[str]],
                 relationship = f"same_party_{party1}"
             elif base1 == base2:
                 relationship = "same_base_code"
-            elif abs(int(base1) - int(base2)) <= 10:
-                relationship = "nearby_codes"
+            else:
+                # Check if nearby numeric codes
+                try:
+                    if base1.isdigit() and base2.isdigit() and abs(int(base1) - int(base2)) <= 10:
+                        relationship = "nearby_codes"
+                except (ValueError, TypeError):
+                    pass  # Non-numeric codes, skip nearby check
             
             exclusions.append({
                 'code1': c1,
