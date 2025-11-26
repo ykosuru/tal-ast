@@ -169,6 +169,95 @@ def detect_account_type(account: str, account_type: str = None) -> Dict[str, boo
     return result
 
 
+def extract_country_from_address(address_info: list) -> Tuple[Optional[str], bool, bool]:
+    """
+    Extract country code from AddressInf list.
+    
+    Looks at line 3 (Seq: 3) or last line for country code.
+    Country code should be a valid ISO code, often surrounded by commas
+    or at the end of the line.
+    
+    Examples:
+        "NEW YORK, NY, US" -> 'US'
+        "New York NY 10036 US" -> 'US'
+        "LONDON, GB" -> 'GB'
+        "FRANKFURT, DE 60311" -> 'DE'
+    
+    Args:
+        address_info: List of address line dicts with 'Seq' and 'text' keys
+        
+    Returns:
+        Tuple of (country_code, is_domestic, is_international)
+        is_domestic = True if country is US
+        is_international = True if country is non-US valid country
+    """
+    if not address_info or not isinstance(address_info, list):
+        return None, False, False
+    
+    # Find line 3 (Seq: "3") or use last line
+    target_line = None
+    
+    # Sort by Seq if available and find line 3
+    for item in address_info:
+        if isinstance(item, dict):
+            seq = item.get('Seq') or item.get('seq')
+            if seq == '3' or seq == 3:
+                target_line = item.get('text') or item.get('Text') or ''
+                break
+    
+    # If no line 3, use the last line
+    if not target_line and address_info:
+        last_item = address_info[-1]
+        if isinstance(last_item, dict):
+            target_line = last_item.get('text') or last_item.get('Text') or ''
+        elif isinstance(last_item, str):
+            target_line = last_item
+    
+    if not target_line:
+        return None, False, False
+    
+    target_line = target_line.upper().strip()
+    
+    # Strategy 1: Look for country code with comma before it (", US" or ", GB")
+    # Split by comma and check each part
+    parts = [p.strip() for p in target_line.replace(',', ' , ').split()]
+    
+    # Check each word/part for valid country code
+    found_country = None
+    for i, part in enumerate(parts):
+        # Clean the part - remove any punctuation
+        clean_part = ''.join(c for c in part if c.isalpha())
+        if len(clean_part) == 2 and clean_part in VALID_COUNTRY_CODES:
+            found_country = clean_part
+            # Prefer codes that come after a comma or at the end
+            if i > 0 and parts[i-1] == ',':
+                break  # Found country after comma, this is likely the right one
+    
+    # Strategy 2: Check last 2-3 characters if no country found
+    if not found_country:
+        # Check if last word is a country code
+        words = target_line.split()
+        if words:
+            last_word = ''.join(c for c in words[-1] if c.isalpha())
+            if len(last_word) == 2 and last_word in VALID_COUNTRY_CODES:
+                found_country = last_word
+    
+    # Strategy 3: Check for country code embedded in zip (e.g., "10036 US")
+    if not found_country:
+        import re
+        # Look for pattern: digits followed by space and 2-letter code
+        match = re.search(r'\d+\s+([A-Z]{2})\b', target_line)
+        if match and match.group(1) in VALID_COUNTRY_CODES:
+            found_country = match.group(1)
+    
+    if found_country:
+        is_domestic = (found_country == 'US')
+        is_international = (found_country != 'US')
+        return found_country, is_domestic, is_international
+    
+    return None, False, False
+
+
 @dataclass
 class PartyInfo:
     """Normalized party information."""
@@ -204,6 +293,10 @@ class PartyInfo:
     has_name: bool = False
     bank_flag: Optional[str] = None
     charge_flag: Optional[str] = None
+    # Address parsing features
+    address_country: Optional[str] = None  # Country code extracted from address line 3
+    is_domestic: bool = False  # True if address country is US
+    is_international: bool = False  # True if address country is non-US
 
 
 @dataclass 
@@ -561,6 +654,11 @@ class IFMLParser:
             if isinstance(address_info, list):
                 party.address_line_count = len(address_info)
                 party.has_name = len(address_info) > 0
+                # Extract country from address line 3
+                addr_country, is_dom, is_intl = extract_country_from_address(address_info)
+                party.address_country = addr_country
+                party.is_domestic = is_dom
+                party.is_international = is_intl
             elif isinstance(address_info, dict):
                 party.address_line_count = 1
                 party.has_name = True
@@ -700,6 +798,9 @@ class IFMLParser:
                 result[f'{prefix}_residence_country'] = party.residence_country
                 result[f'{prefix}_address_lines'] = party.address_line_count
                 result[f'{prefix}_has_name'] = party.has_name
+                result[f'{prefix}_address_country'] = party.address_country
+                result[f'{prefix}_is_domestic'] = party.is_domestic
+                result[f'{prefix}_is_international'] = party.is_international
             else:
                 result[f'{prefix}_present'] = False
                 result[f'{prefix}_has_id'] = False
@@ -726,6 +827,9 @@ class IFMLParser:
                 result[f'{prefix}_residence_country'] = None
                 result[f'{prefix}_address_lines'] = 0
                 result[f'{prefix}_has_name'] = False
+                result[f'{prefix}_address_country'] = None
+                result[f'{prefix}_is_domestic'] = False
+                result[f'{prefix}_is_international'] = False
         
         return result
     
