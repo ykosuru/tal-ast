@@ -36,6 +36,53 @@ from model_training import (
 from predictor import ACEPredictor, PredictionResult
 
 
+def _extract_simple_rules(tree, feature_names, max_rules=5):
+    """
+    Extract human-readable rules from a decision tree.
+    Returns the top rules that lead to positive predictions.
+    """
+    from sklearn.tree import _tree
+    
+    tree_ = tree.tree_
+    rules = []
+    
+    def recurse(node, path):
+        if tree_.feature[node] == _tree.TREE_UNDEFINED:
+            # Leaf node
+            value = tree_.value[node][0]
+            if len(value) > 1:
+                total = value.sum()
+                positive = value[1]
+                confidence = positive / total if total > 0 else 0
+                # Only include rules that predict positive class with some confidence
+                if confidence > 0.3 and positive >= 2:
+                    rules.append({
+                        'condition': ' AND '.join(path) if path else 'Always',
+                        'confidence': confidence,
+                        'support': int(positive)
+                    })
+        else:
+            feature = feature_names[tree_.feature[node]]
+            threshold = tree_.threshold[node]
+            
+            # Simplify feature names for readability
+            display_feature = feature.replace('_encoded', '').replace('_', ' ')
+            
+            # Left branch (<=)
+            left_cond = f"{display_feature} <= {threshold:.2f}"
+            recurse(tree_.children_left[node], path + [left_cond])
+            
+            # Right branch (>)
+            right_cond = f"{display_feature} > {threshold:.2f}"
+            recurse(tree_.children_right[node], path + [right_cond])
+    
+    recurse(0, [])
+    
+    # Sort by confidence and support, return top rules
+    rules.sort(key=lambda x: (-x['confidence'], -x['support']))
+    return rules[:max_rules]
+
+
 def train_model(data_dir: str = None, data_file: str = None,
                 output_dir: str = './models', 
                 config: ModelConfig = None,
@@ -142,10 +189,50 @@ def train_model(data_dir: str = None, data_file: str = None,
     for _, row in importance.iterrows():
         print(f"   - {row['feature']}: {row['importance']:.4f}")
     
+    # Decision rules for each code
+    print("\n" + "=" * 60)
+    print("DECISION RULES BY CODE")
+    print("=" * 60)
+    if model.rule_extractor:
+        for code in class_names:
+            if code.startswith('__'):  # Skip __RARE__, __NO_ERROR__
+                continue
+            print(f"\n>>> {code}")
+            
+            # Get top features for this code
+            top_feats = model.rule_extractor.get_top_features(code, top_n=3)
+            if top_feats:
+                print(f"    Key features: {', '.join([f[0] for f in top_feats])}")
+            
+            # Get simplified rules
+            if code in model.rule_extractor.trees:
+                tree = model.rule_extractor.trees[code]
+                rules = _extract_simple_rules(tree, feature_names, max_rules=3)
+                for rule in rules:
+                    print(f"    IF {rule['condition']} THEN {code} (confidence: {rule['confidence']:.0%})")
+    else:
+        print("   Rule extractor not available.")
+    print("=" * 60)
+    
     # Save models
     print("\n[5/5] Saving models...")
     model.save(str(output_path / 'model.pkl'))
     pipeline.save_encoders(str(output_path))
+    
+    # Extract rules for saving
+    code_rules = {}
+    if model.rule_extractor:
+        for code in class_names:
+            if code.startswith('__'):
+                continue
+            if code in model.rule_extractor.trees:
+                tree = model.rule_extractor.trees[code]
+                rules = _extract_simple_rules(tree, feature_names, max_rules=5)
+                top_feats = model.rule_extractor.get_top_features(code, top_n=5)
+                code_rules[code] = {
+                    'key_features': [f[0] for f in top_feats],
+                    'rules': [{'condition': r['condition'], 'confidence': r['confidence']} for r in rules]
+                }
     
     # Save training info
     training_info = {
@@ -161,7 +248,8 @@ def train_model(data_dir: str = None, data_file: str = None,
             'task_type': config.task_type,
             'n_estimators': config.n_estimators,
             'max_depth': config.max_depth,
-        }
+        },
+        'decision_rules': code_rules
     }
     
     with open(output_path / 'training_info.json', 'w') as f:
