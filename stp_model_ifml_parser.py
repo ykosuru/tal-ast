@@ -10,6 +10,165 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 
+# Valid ISO 3166-1 alpha-2 country codes (subset of most common)
+VALID_COUNTRY_CODES = {
+    'AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AO', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AW', 'AX', 'AZ',
+    'BA', 'BB', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ', 'BL', 'BM', 'BN', 'BO', 'BQ', 'BR', 'BS',
+    'BT', 'BV', 'BW', 'BY', 'BZ', 'CA', 'CC', 'CD', 'CF', 'CG', 'CH', 'CI', 'CK', 'CL', 'CM', 'CN',
+    'CO', 'CR', 'CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DE', 'DJ', 'DK', 'DM', 'DO', 'DZ', 'EC', 'EE',
+    'EG', 'EH', 'ER', 'ES', 'ET', 'FI', 'FJ', 'FK', 'FM', 'FO', 'FR', 'GA', 'GB', 'GD', 'GE', 'GF',
+    'GG', 'GH', 'GI', 'GL', 'GM', 'GN', 'GP', 'GQ', 'GR', 'GS', 'GT', 'GU', 'GW', 'GY', 'HK', 'HM',
+    'HN', 'HR', 'HT', 'HU', 'ID', 'IE', 'IL', 'IM', 'IN', 'IO', 'IQ', 'IR', 'IS', 'IT', 'JE', 'JM',
+    'JO', 'JP', 'KE', 'KG', 'KH', 'KI', 'KM', 'KN', 'KP', 'KR', 'KW', 'KY', 'KZ', 'LA', 'LB', 'LC',
+    'LI', 'LK', 'LR', 'LS', 'LT', 'LU', 'LV', 'LY', 'MA', 'MC', 'MD', 'ME', 'MF', 'MG', 'MH', 'MK',
+    'ML', 'MM', 'MN', 'MO', 'MP', 'MQ', 'MR', 'MS', 'MT', 'MU', 'MV', 'MW', 'MX', 'MY', 'MZ', 'NA',
+    'NC', 'NE', 'NF', 'NG', 'NI', 'NL', 'NO', 'NP', 'NR', 'NU', 'NZ', 'OM', 'PA', 'PE', 'PF', 'PG',
+    'PH', 'PK', 'PL', 'PM', 'PN', 'PR', 'PS', 'PT', 'PW', 'PY', 'QA', 'RE', 'RO', 'RS', 'RU', 'RW',
+    'SA', 'SB', 'SC', 'SD', 'SE', 'SG', 'SH', 'SI', 'SJ', 'SK', 'SL', 'SM', 'SN', 'SO', 'SR', 'SS',
+    'ST', 'SV', 'SX', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK', 'TL', 'TM', 'TN', 'TO',
+    'TR', 'TT', 'TV', 'TW', 'TZ', 'UA', 'UG', 'UM', 'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI',
+    'VN', 'VU', 'WF', 'WS', 'XK', 'YE', 'YT', 'ZA', 'ZM', 'ZW'
+}
+
+# IBAN lengths by country (ISO 13616)
+IBAN_LENGTHS = {
+    'AL': 28, 'AD': 24, 'AT': 20, 'AZ': 28, 'BH': 22, 'BY': 28, 'BE': 16, 'BA': 20,
+    'BR': 29, 'BG': 22, 'CR': 22, 'HR': 21, 'CY': 28, 'CZ': 24, 'DK': 18, 'DO': 28,
+    'TL': 23, 'EE': 20, 'FO': 18, 'FI': 18, 'FR': 27, 'GE': 22, 'DE': 22, 'GI': 23,
+    'GR': 27, 'GL': 18, 'GT': 28, 'HU': 28, 'IS': 26, 'IQ': 23, 'IE': 22, 'IL': 23,
+    'IT': 27, 'JO': 30, 'KZ': 20, 'XK': 20, 'KW': 30, 'LV': 21, 'LB': 28, 'LI': 21,
+    'LT': 20, 'LU': 20, 'MK': 19, 'MT': 31, 'MR': 27, 'MU': 30, 'MC': 27, 'MD': 24,
+    'ME': 22, 'NL': 18, 'NO': 15, 'PK': 24, 'PS': 29, 'PL': 28, 'PT': 25, 'QA': 29,
+    'RO': 24, 'SM': 27, 'SA': 24, 'RS': 22, 'SC': 31, 'SK': 24, 'SI': 19, 'ES': 24,
+    'SE': 24, 'CH': 21, 'TN': 24, 'TR': 26, 'AE': 23, 'GB': 22, 'VA': 22, 'VG': 24,
+    'UA': 29,
+}
+
+
+def validate_bic(bic: str) -> Tuple[bool, bool]:
+    """
+    Validate BIC format and country code.
+    Returns (format_valid, country_valid)
+    
+    BIC format: 4 letters (bank) + 2 letters (country) + 2 alphanum (location) + optional 3 alphanum (branch)
+    """
+    if not bic:
+        return False, False
+    
+    bic = bic.upper().strip()
+    
+    # Check length (8 or 11)
+    if len(bic) not in (8, 11):
+        return False, False
+    
+    # Check format: AAAACCLL or AAAACCLLBBB
+    # First 4: letters (bank code)
+    # Next 2: letters (country code)
+    # Next 2: alphanumeric (location)
+    # Optional 3: alphanumeric (branch)
+    pattern = r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$'
+    format_valid = bool(re.match(pattern, bic))
+    
+    # Check country code (positions 5-6, 0-indexed 4-5)
+    country_code = bic[4:6] if len(bic) >= 6 else ''
+    country_valid = country_code in VALID_COUNTRY_CODES
+    
+    return format_valid, country_valid
+
+
+def validate_iban(iban: str) -> Tuple[bool, bool]:
+    """
+    Validate IBAN format and checksum.
+    Returns (format_valid, checksum_valid)
+    
+    IBAN format: 2 letters (country) + 2 digits (check) + up to 30 alphanum (BBAN)
+    Checksum: mod-97 validation
+    """
+    if not iban:
+        return False, False
+    
+    iban = iban.upper().replace(' ', '').replace('-', '')
+    
+    # Check minimum length and country code
+    if len(iban) < 5:
+        return False, False
+    
+    country_code = iban[:2]
+    if not country_code.isalpha():
+        return False, False
+    
+    # Check if country is in our IBAN length table
+    expected_length = IBAN_LENGTHS.get(country_code)
+    if expected_length:
+        format_valid = len(iban) == expected_length
+    else:
+        # Unknown country, just check basic format
+        format_valid = 15 <= len(iban) <= 34
+    
+    # Validate checksum using mod-97
+    try:
+        # Move first 4 chars to end
+        rearranged = iban[4:] + iban[:4]
+        
+        # Convert letters to numbers (A=10, B=11, etc.)
+        numeric = ''
+        for char in rearranged:
+            if char.isdigit():
+                numeric += char
+            elif char.isalpha():
+                numeric += str(ord(char) - ord('A') + 10)
+            else:
+                return format_valid, False
+        
+        # Check if mod 97 == 1
+        checksum_valid = int(numeric) % 97 == 1
+    except (ValueError, OverflowError):
+        checksum_valid = False
+    
+    return format_valid, checksum_valid
+
+
+def detect_account_type(account: str, account_type: str = None) -> Dict[str, bool]:
+    """
+    Detect specific account identifier types.
+    Returns dict with is_clabe, is_fedaba, is_chips_aba, is_chips_uid
+    """
+    result = {
+        'is_clabe': False,
+        'is_fedaba': False,
+        'is_chips_aba': False,
+        'is_chips_uid': False,
+        'is_numeric': False,
+        'length': 0
+    }
+    
+    if not account:
+        return result
+    
+    account = account.strip()
+    result['length'] = len(account)
+    result['is_numeric'] = account.isdigit()
+    
+    # CLABE: Mexican 18-digit bank account
+    if len(account) == 18 and account.isdigit():
+        result['is_clabe'] = True
+    
+    # FEDABA / Fedwire ABA: US 9-digit routing number
+    if len(account) == 9 and account.isdigit():
+        result['is_fedaba'] = True
+    
+    # CHIPS ABA: Also 9 digits but different validation
+    # For now, same as FEDABA
+    if len(account) == 9 and account.isdigit():
+        result['is_chips_aba'] = True
+    
+    # CHIPS UID: 6 digits
+    if len(account) == 6 and account.isdigit():
+        result['is_chips_uid'] = True
+    
+    return result
+
+
 @dataclass
 class PartyInfo:
     """Normalized party information."""
@@ -21,11 +180,23 @@ class PartyInfo:
     bic: Optional[str] = None
     bic_length: int = 0  # 4, 8, or 11 chars typically
     bic_country: Optional[str] = None  # Country code from BIC (chars 5-6)
+    bic_valid_format: bool = False  # Is BIC format valid (8 or 11 alphanumeric)?
+    bic_valid_country: bool = False  # Is BIC country code valid ISO?
     has_account: bool = False
     account_type: Optional[str] = None  # IBAN, BBAN, etc.
     account_value: Optional[str] = None
+    account_length: int = 0
+    account_numeric_only: bool = False
     iban_country: Optional[str] = None  # Country code from IBAN (first 2 chars)
+    iban_valid_format: bool = False  # Is IBAN format valid?
+    iban_checksum_valid: bool = False  # Does IBAN pass mod-97 check?
     bic_iban_country_match: Optional[bool] = None  # Do BIC and IBAN countries match?
+    bic_party_country_match: Optional[bool] = None  # Does BIC country match party country?
+    # Account identifier types detected
+    is_clabe: bool = False  # Mexican 18-digit
+    is_fedaba: bool = False  # US 9-digit routing
+    is_chips_aba: bool = False
+    is_chips_uid: bool = False
     country: Optional[str] = None
     mailing_country: Optional[str] = None
     residence_country: Optional[str] = None
@@ -324,22 +495,40 @@ class IFMLParser:
         party.bank_flag = basic_info.get('BankFlag')
         party.charge_flag = basic_info.get('ChargeFlag')
         
-        # Parse BIC structure
+        # Parse BIC structure and validate
         if party.bic:
             party.bic_length = len(party.bic)
             # BIC country is characters 5-6 (0-indexed: 4-5)
             if len(party.bic) >= 6:
                 party.bic_country = party.bic[4:6].upper()
+            # Validate BIC format and country
+            party.bic_valid_format, party.bic_valid_country = validate_bic(party.bic)
         
-        # Parse IBAN country
+        # Parse IBAN and validate
         if party.account_type == 'IBAN' and party.account_value:
             # IBAN country is first 2 characters
             if len(party.account_value) >= 2:
                 party.iban_country = party.account_value[0:2].upper()
+            # Validate IBAN format and checksum
+            party.iban_valid_format, party.iban_checksum_valid = validate_iban(party.account_value)
+        
+        # Detect account type (CLABE, FEDABA, etc.) and get length
+        if party.account_value:
+            acct_info = detect_account_type(party.account_value, party.account_type)
+            party.account_length = acct_info['length']
+            party.account_numeric_only = acct_info['is_numeric']
+            party.is_clabe = acct_info['is_clabe']
+            party.is_fedaba = acct_info['is_fedaba']
+            party.is_chips_aba = acct_info['is_chips_aba']
+            party.is_chips_uid = acct_info['is_chips_uid']
         
         # Check if BIC and IBAN countries match
         if party.bic_country and party.iban_country:
             party.bic_iban_country_match = (party.bic_country == party.iban_country)
+        
+        # Check if BIC country matches party country
+        if party.bic_country and party.country:
+            party.bic_party_country_match = (party.bic_country == party.country.upper())
         
         return party
     
@@ -417,10 +606,21 @@ class IFMLParser:
                 result[f'{prefix}_has_bic'] = party.has_bic
                 result[f'{prefix}_bic_length'] = party.bic_length
                 result[f'{prefix}_bic_country'] = party.bic_country
+                result[f'{prefix}_bic_valid_format'] = party.bic_valid_format
+                result[f'{prefix}_bic_valid_country'] = party.bic_valid_country
                 result[f'{prefix}_has_account'] = party.has_account
                 result[f'{prefix}_account_type'] = party.account_type
+                result[f'{prefix}_account_length'] = party.account_length
+                result[f'{prefix}_account_numeric'] = party.account_numeric_only
                 result[f'{prefix}_iban_country'] = party.iban_country
+                result[f'{prefix}_iban_valid_format'] = party.iban_valid_format
+                result[f'{prefix}_iban_checksum_valid'] = party.iban_checksum_valid
                 result[f'{prefix}_bic_iban_match'] = party.bic_iban_country_match
+                result[f'{prefix}_bic_party_country_match'] = party.bic_party_country_match
+                result[f'{prefix}_is_clabe'] = party.is_clabe
+                result[f'{prefix}_is_fedaba'] = party.is_fedaba
+                result[f'{prefix}_is_chips_aba'] = party.is_chips_aba
+                result[f'{prefix}_is_chips_uid'] = party.is_chips_uid
                 result[f'{prefix}_country'] = party.country
                 result[f'{prefix}_mailing_country'] = party.mailing_country
                 result[f'{prefix}_address_lines'] = party.address_line_count
@@ -431,10 +631,21 @@ class IFMLParser:
                 result[f'{prefix}_has_bic'] = False
                 result[f'{prefix}_bic_length'] = 0
                 result[f'{prefix}_bic_country'] = None
+                result[f'{prefix}_bic_valid_format'] = False
+                result[f'{prefix}_bic_valid_country'] = False
                 result[f'{prefix}_has_account'] = False
                 result[f'{prefix}_account_type'] = None
+                result[f'{prefix}_account_length'] = 0
+                result[f'{prefix}_account_numeric'] = False
                 result[f'{prefix}_iban_country'] = None
+                result[f'{prefix}_iban_valid_format'] = False
+                result[f'{prefix}_iban_checksum_valid'] = False
                 result[f'{prefix}_bic_iban_match'] = None
+                result[f'{prefix}_bic_party_country_match'] = None
+                result[f'{prefix}_is_clabe'] = False
+                result[f'{prefix}_is_fedaba'] = False
+                result[f'{prefix}_is_chips_aba'] = False
+                result[f'{prefix}_is_chips_uid'] = False
                 result[f'{prefix}_country'] = None
                 result[f'{prefix}_mailing_country'] = None
                 result[f'{prefix}_address_lines'] = 0
