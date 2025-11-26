@@ -192,10 +192,14 @@ class ACEPredictor:
                                 key=lambda c: code_probs.get(c, 0), 
                                 reverse=True)
         
+        # Filter probabilities to only codes above threshold
+        filtered_probs = {k: v for k, v in code_probs.items() 
+                        if v >= threshold and k not in ['__NO_ERROR__', '__RARE__']}
+        
         return PredictionResult(
             transaction_id=txn_id,
             predicted_codes=predicted_codes,
-            probabilities=code_probs,
+            probabilities=filtered_probs,
             confidence=float(confidence),
             explanations=explanations,
             warnings=warnings
