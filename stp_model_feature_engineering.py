@@ -27,7 +27,13 @@ class IFMLFeatureEngineer:
     # Columns that should be target/frequency encoded (high cardinality)
     FREQUENCY_COLS = [
         'primary_currency', 'originator_country', 'beneficiary_country',
-        'cdt_country', 'bnf_country', 'dbt_country', 'intm_country'
+        'cdt_country', 'bnf_country', 'dbt_country', 'intm_country',
+        # BIC country codes
+        'orig_bic_country', 'send_bic_country', 'dbt_bic_country',
+        'cdt_bic_country', 'intm_bic_country', 'bnf_bic_country',
+        # IBAN country codes
+        'orig_iban_country', 'send_iban_country', 'dbt_iban_country',
+        'cdt_iban_country', 'intm_iban_country', 'bnf_iban_country',
     ]
     
     # Boolean columns - keep as-is
@@ -40,13 +46,19 @@ class IFMLFeatureEngineer:
         'cdt_present', 'cdt_has_id', 'cdt_has_bic', 'cdt_has_account', 'cdt_has_name',
         'intm_present', 'intm_has_id', 'intm_has_bic', 'intm_has_account', 'intm_has_name',
         'bnf_present', 'bnf_has_id', 'bnf_has_bic', 'bnf_has_account', 'bnf_has_name',
+        # BIC/IBAN country match flags
+        'orig_bic_iban_match', 'send_bic_iban_match', 'dbt_bic_iban_match',
+        'cdt_bic_iban_match', 'intm_bic_iban_match', 'bnf_bic_iban_match',
     ]
     
     # Numeric columns
     NUMERIC_COLS = [
         'primary_amount', 'instructed_amount', 'bank_info_count', 'amount_count',
         'orig_address_lines', 'send_address_lines', 'dbt_address_lines',
-        'cdt_address_lines', 'intm_address_lines', 'bnf_address_lines'
+        'cdt_address_lines', 'intm_address_lines', 'bnf_address_lines',
+        # BIC lengths (4, 8, or 11 typically)
+        'orig_bic_length', 'send_bic_length', 'dbt_bic_length',
+        'cdt_bic_length', 'intm_bic_length', 'bnf_bic_length',
     ]
     
     # Account type columns (categorical)
