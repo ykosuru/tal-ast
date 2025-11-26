@@ -39,7 +39,9 @@ from predictor import ACEPredictor, PredictionResult
 def train_model(data_dir: str = None, data_file: str = None,
                 output_dir: str = './models', 
                 config: ModelConfig = None,
-                filter_severity: List[str] = None) -> Dict[str, Any]:
+                filter_severity: List[str] = None,
+                use_composite_codes: bool = False,
+                min_code_samples: int = 5) -> Dict[str, Any]:
     """
     Train error code prediction model from IFML data.
     
@@ -49,6 +51,8 @@ def train_model(data_dir: str = None, data_file: str = None,
         output_dir: Directory to save trained models
         config: Model configuration (uses defaults if None)
         filter_severity: Filter codes by severity (e.g., ['E'] for errors only)
+        use_composite_codes: If True, use code+party labels (e.g., '8004_BNPPTY')
+        min_code_samples: Minimum samples for a code to have its own class
     
     Returns:
         Training results dictionary
@@ -94,7 +98,8 @@ def train_model(data_dir: str = None, data_file: str = None,
     print("\n[2/5] Creating dataset...")
     X_raw, X_transformed, y_multilabel = pipeline.create_dataset(
         filter_severity=filter_severity,
-        min_code_samples=10
+        min_code_samples=min_code_samples,
+        use_composite_codes=use_composite_codes
     )
     
     X = X_transformed.values.astype(np.float32)
@@ -120,7 +125,7 @@ def train_model(data_dir: str = None, data_file: str = None,
     print(f"   - Accuracy: {metrics.get('accuracy', 0):.4f}")
     print(f"   - Macro F1: {metrics.get('macro_f1', 0):.4f}")
     print(f"   - Micro F1: {metrics.get('micro_f1', 0):.4f}")
-
+    
     # Per-class breakdown
     report = metrics.get('classification_report', {})
     if report:
@@ -543,8 +548,12 @@ Examples:
     train_parser.add_argument('--output-dir', default='./models', help='Output directory')
     train_parser.add_argument('--model-type', default='random_forest',
                              choices=['lightgbm', 'xgboost', 'random_forest', 'gradient_boost', 'decision_tree'])
-    train_parser.add_argument('--severity', nargs='+', default=['E', 'W'],
-                             help='Filter codes by severity (E, W, I)')
+    train_parser.add_argument('--severity', nargs='+', default=None,
+                             help='Filter codes by severity (E, W, I, R). Default: all')
+    train_parser.add_argument('--composite', action='store_true',
+                             help='Use composite labels (code+party, e.g., 8004_BNPPTY)')
+    train_parser.add_argument('--min-samples', type=int, default=5,
+                             help='Minimum samples for a code to have its own class (default: 5)')
     
     # Predict command
     predict_parser = subparsers.add_parser('predict', help='Predict error codes')
@@ -577,7 +586,9 @@ Examples:
             data_file=args.data_file,
             output_dir=args.output_dir,
             config=config,
-            filter_severity=args.severity
+            filter_severity=args.severity,
+            use_composite_codes=args.composite,
+            min_code_samples=args.min_samples
         )
         print(json.dumps(results.get('training_info', {}), indent=2))
     
