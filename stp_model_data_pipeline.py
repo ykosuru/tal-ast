@@ -299,7 +299,8 @@ class IFMLDataPipeline:
     def create_dataset(self, 
                        filter_severity: Optional[List[str]] = None,
                        min_code_samples: int = 5,
-                       use_composite_codes: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                       use_composite_codes: bool = False,
+                       only_with_codes: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Create ML-ready dataset from loaded records.
         
@@ -309,6 +310,7 @@ class IFMLDataPipeline:
             min_code_samples: Minimum samples for a code to be a separate class.
             use_composite_codes: If True, use code+party labels (e.g., '8004_BNPPTY')
                                 instead of just codes ('8004').
+            only_with_codes: If True, filter to only records that have at least one code.
         
         Returns:
             Tuple of (X_raw, X_transformed, y_multilabel)
@@ -343,6 +345,14 @@ class IFMLDataPipeline:
                 codes = base_codes
             
             code_lists.append(codes)
+        
+        # Filter to only records with codes
+        if only_with_codes:
+            total_before = len(raw_features)
+            indices = [i for i, codes in enumerate(code_lists) if codes]
+            raw_features = [raw_features[i] for i in indices]
+            code_lists = [code_lists[i] for i in indices]
+            print(f"   Filtered to {len(indices)} records with codes (from {total_before} total)")
         
         # Create DataFrames
         X_raw = pd.DataFrame(raw_features)
