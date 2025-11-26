@@ -229,6 +229,25 @@ FEATURE_TO_IFML_PATH = {
     'cdt_is_chips_uid': 'CreditPartyInfo account is CHIPS UID (6 digits)',
     'intm_is_chips_uid': 'IntermediaryBankInfo account is CHIPS UID (6 digits)',
     'bnf_is_chips_uid': 'BeneficiaryBankInfo account is CHIPS UID (6 digits)',
+    # Address-based country detection
+    'orig_address_country': 'OriginatingPartyInfo country extracted from AddressInf line 3',
+    'send_address_country': 'SendingBankInfo country extracted from AddressInf line 3',
+    'dbt_address_country': 'DebitPartyInfo country extracted from AddressInf line 3',
+    'cdt_address_country': 'CreditPartyInfo country extracted from AddressInf line 3',
+    'intm_address_country': 'IntermediaryBankInfo country extracted from AddressInf line 3',
+    'bnf_address_country': 'BeneficiaryBankInfo country extracted from AddressInf line 3',
+    'orig_is_domestic': 'OriginatingPartyInfo address is US (domestic)',
+    'send_is_domestic': 'SendingBankInfo address is US (domestic)',
+    'dbt_is_domestic': 'DebitPartyInfo address is US (domestic)',
+    'cdt_is_domestic': 'CreditPartyInfo address is US (domestic)',
+    'intm_is_domestic': 'IntermediaryBankInfo address is US (domestic)',
+    'bnf_is_domestic': 'BeneficiaryBankInfo address is US (domestic)',
+    'orig_is_international': 'OriginatingPartyInfo address is non-US (international)',
+    'send_is_international': 'SendingBankInfo address is non-US (international)',
+    'dbt_is_international': 'DebitPartyInfo address is non-US (international)',
+    'cdt_is_international': 'CreditPartyInfo address is non-US (international)',
+    'intm_is_international': 'IntermediaryBankInfo address is non-US (international)',
+    'bnf_is_international': 'BeneficiaryBankInfo address is non-US (international)',
 }
 
 
