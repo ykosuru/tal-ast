@@ -368,24 +368,28 @@ class IFMLDataPipeline:
     
     def get_code_statistics(self) -> pd.DataFrame:
         """Get statistics about error code distribution."""
-        code_counts = defaultdict(lambda: {'total': 0, 'E': 0, 'W': 0, 'I': 0})
+        # Use nested defaultdict to handle any severity code
+        code_counts = defaultdict(lambda: defaultdict(int))
+        all_severities = set()
         
         for record in self.records:
             for code in record.error_codes_only:
                 severity = record.severity_map.get(code, 'I')
+                all_severities.add(severity)
                 code_counts[code]['total'] += 1
                 code_counts[code][severity] += 1
         
         stats = []
-        for code, counts in sorted(code_counts.items(), key=lambda x: -x[1]['total']):
-            stats.append({
+        for code, counts in sorted(code_counts.items(), key=lambda x: -x['total']):
+            row = {
                 'code': code,
                 'total': counts['total'],
-                'errors': counts['E'],
-                'warnings': counts['W'],
-                'info': counts['I'],
                 'pct': counts['total'] / len(self.records) * 100
-            })
+            }
+            # Add counts for each severity found
+            for sev in sorted(all_severities):
+                row[sev] = counts.get(sev, 0)
+            stats.append(row)
         
         return pd.DataFrame(stats)
     
@@ -438,7 +442,13 @@ class IFMLDataPipeline:
         
         stats = self.get_code_statistics()
         for _, row in stats.head(10).iterrows():
-            lines.append(f"  {row['code']}: {row['total']} ({row['pct']:.1f}%) [E:{row['errors']}, W:{row['warnings']}, I:{row['info']}]")
+            # Build severity breakdown dynamically
+            sev_parts = []
+            for col in row.index:
+                if col not in ['code', 'total', 'pct'] and row[col] > 0:
+                    sev_parts.append(f"{col}:{int(row[col])}")
+            sev_str = ', '.join(sev_parts) if sev_parts else 'none'
+            lines.append(f"  {row['code']}: {row['total']} ({row['pct']:.1f}%) [{sev_str}]")
         
         return '\n'.join(lines)
 
