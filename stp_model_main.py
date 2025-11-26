@@ -374,7 +374,7 @@ def train_model(data_dir: str = None, data_file: str = None,
     Train error code prediction model from IFML data.
     
     Args:
-        data_dir: Directory containing IFML request/response files
+        data_dir: Directory containing IFML request/response JSON files
         data_file: Single JSON file with multiple payments (alternative to data_dir)
         output_dir: Directory to save trained models
         config: Model configuration (uses defaults if None)
@@ -402,16 +402,8 @@ def train_model(data_dir: str = None, data_file: str = None,
         # Single file with multiple payments
         n_loaded = pipeline.load_single_file(data_file)
     elif data_dir:
-        data_path = Path(data_dir)
-        if (data_path / 'requests').exists() and (data_path / 'responses').exists():
-            # Paired directories
-            n_loaded = pipeline.load_paired_files(
-                str(data_path / 'requests'),
-                str(data_path / 'responses')
-            )
-        else:
-            # Combined files in directory
-            n_loaded = pipeline.load_combined_files(str(data_path))
+        # Directory of JSON files with Request/Response format
+        n_loaded = pipeline.load_directory(data_dir)
     else:
         print("ERROR: Must provide either --data-dir or --data-file")
         return {'error': 'No data source specified'}
