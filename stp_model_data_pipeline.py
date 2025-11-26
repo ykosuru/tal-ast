@@ -25,6 +25,19 @@ class PaymentRecord:
     response_codes: List[dict]
     error_codes_only: List[str]  # Just the codes (e.g., ['8004', '7452'])
     severity_map: Dict[str, str]  # code -> severity
+    composite_codes: List[str] = None  # code + party (e.g., ['8004_BNPPTY', '602_CDTPTY'])
+    
+    def __post_init__(self):
+        # Build composite codes from response_codes if not provided
+        if self.composite_codes is None:
+            self.composite_codes = []
+            for rc in self.response_codes:
+                code = rc.get('code')
+                party = rc.get('party_hint')
+                if code and party:
+                    self.composite_codes.append(f"{code}_{party}")
+                elif code:
+                    self.composite_codes.append(code)
 
 
 class IFMLDataPipeline:
@@ -285,7 +298,8 @@ class IFMLDataPipeline:
     
     def create_dataset(self, 
                        filter_severity: Optional[List[str]] = None,
-                       min_code_samples: int = 5) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                       min_code_samples: int = 5,
+                       use_composite_codes: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Create ML-ready dataset from loaded records.
         
@@ -293,6 +307,8 @@ class IFMLDataPipeline:
             filter_severity: If provided, only include codes with these severities.
                            E.g., ['E'] for errors only, ['E', 'W'] for errors and warnings.
             min_code_samples: Minimum samples for a code to be a separate class.
+            use_composite_codes: If True, use code+party labels (e.g., '8004_BNPPTY')
+                                instead of just codes ('8004').
         
         Returns:
             Tuple of (X_raw, X_transformed, y_multilabel)
@@ -307,14 +323,24 @@ class IFMLDataPipeline:
         for record in self.records:
             raw_features.append(record.request_features)
             
+            # Use composite or simple codes
+            if use_composite_codes:
+                base_codes = record.composite_codes or record.error_codes_only
+            else:
+                base_codes = record.error_codes_only
+            
             # Filter codes by severity if requested
             if filter_severity:
-                codes = [
-                    code for code in record.error_codes_only
-                    if record.severity_map.get(code) in filter_severity
-                ]
+                # For composite codes, need to look up severity from original code
+                filtered_codes = []
+                for code in base_codes:
+                    # Extract base code (before underscore) for severity lookup
+                    base_code = code.split('_')[0] if '_' in code else code
+                    if record.severity_map.get(base_code) in filter_severity:
+                        filtered_codes.append(code)
+                codes = filtered_codes
             else:
-                codes = record.error_codes_only
+                codes = base_codes
             
             code_lists.append(codes)
         
