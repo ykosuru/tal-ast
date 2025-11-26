@@ -209,19 +209,41 @@ class IFMLDataPipeline:
         
         total_loaded = 0
         file_count = 0
+        error_files = []
         
         for filepath in files:
             try:
-                before_count = len(self.records)
                 loaded = self._load_single_file_quiet(str(filepath))
                 file_count += 1
                 total_loaded += loaded
                 print(f"  [{file_count:3d}] {filepath.name}: {loaded} payment(s)")
             except Exception as e:
+                error_files.append((filepath.name, str(e)))
                 print(f"  ERROR {filepath.name}: {e}")
         
         print("-" * 60)
         print(f"Summary: {file_count} files, {total_loaded} payments loaded")
+        if error_files:
+            print(f"Errors: {len(error_files)} files failed")
+            # Debug first error
+            if error_files:
+                fname, err = error_files[0]
+                print(f"  First error in {fname}: {err}")
+                # Try to show structure
+                try:
+                    fpath = data_path / fname
+                    with open(fpath) as f:
+                        data = json.load(f)
+                    print(f"  File structure: type={type(data).__name__}", end="")
+                    if isinstance(data, dict):
+                        keys = list(data.keys())[:3]
+                        print(f", keys={keys}")
+                        for k in keys[:1]:
+                            print(f"    data['{k}'] type: {type(data[k]).__name__}")
+                    else:
+                        print()
+                except:
+                    pass
         return total_loaded
     
     def _load_single_file_quiet(self, filepath: str) -> int:
@@ -232,8 +254,23 @@ class IFMLDataPipeline:
         with open(filepath, 'r') as f:
             data = json.load(f)
         
+        # Handle list at top level
+        if isinstance(data, list):
+            # Convert to dict keyed by index or msgdb_id
+            temp = {}
+            for i, item in enumerate(data):
+                if isinstance(item, dict):
+                    key = str(item.get('msgdb_id', i))
+                    temp[key] = item
+            data = temp
+        
+        # Handle case where entire file is a single payment
+        if isinstance(data, dict) and 'Request' in data and 'Response' in data:
+            data = {'single_payment': data}
+        
         for txn_id, payment_data in data.items():
             try:
+                # Skip if payment_data is not a dict
                 if not isinstance(payment_data, dict):
                     continue
                 
@@ -244,13 +281,30 @@ class IFMLDataPipeline:
                     if 'IFML' in payment_data:
                         request_data = payment_data
                         response_data = None
+                    elif 'File' in payment_data:
+                        # Direct File structure
+                        request_data = {'IFML': payment_data}
+                        response_data = None
                     else:
                         continue
+                
+                # Handle case where Request/Response contains IFML directly or nested
+                if isinstance(request_data, dict):
+                    if 'IFML' not in request_data:
+                        if 'File' in request_data:
+                            request_data = {'IFML': request_data}
+                        else:
+                            request_data = {'IFML': {'File': request_data}}
                 
                 features = self.parser.parse(request_data)
                 feature_dict = self.parser.to_dict(features)
                 
                 if response_data:
+                    if isinstance(response_data, dict) and 'IFML' not in response_data:
+                        if 'File' in response_data:
+                            response_data = {'IFML': response_data}
+                        else:
+                            response_data = {'IFML': {'File': response_data}}
                     txn_uid, codes = self.response_parser.parse(response_data)
                 else:
                     txn_uid = txn_id
