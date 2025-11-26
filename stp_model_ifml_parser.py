@@ -471,11 +471,14 @@ class IFMLResponseParser:
         
         codes = []
         for status in msg_status:
+            info_data = status.get('InformationalData', '')
+            party_short, party_full = self._extract_party_hint(info_data)
             codes.append({
                 'code': status.get('Code'),
                 'severity': status.get('Severity'),
-                'info': status.get('InformationalData'),
-                'party_hint': self._extract_party_hint(status.get('InformationalData', ''))
+                'info': info_data,
+                'party_hint': party_short,  # Short code like CDTPTY, BNFBNK
+                'party_type': party_full,   # Full type like CreditPartyInfo
             })
         
         return transaction_uid, codes
@@ -511,8 +514,11 @@ class IFMLResponseParser:
         
         return None
     
-    def _extract_party_hint(self, info: str) -> Optional[str]:
-        """Extract party identifier from informational data."""
+    def _extract_party_hint(self, info: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract party identifier from informational data.
+        Returns (short_code, full_party_type) tuple.
+        """
         # Common patterns: "BNFBNK ...", "CDTPTY ...", "BNPPTY ..."
         party_patterns = {
             'BNFBNK': 'BeneficiaryBankInfo',
@@ -523,13 +529,15 @@ class IFMLResponseParser:
             'ORGPTY': 'OriginatingPartyInfo',
             'INTBNK': 'IntermediaryBankInfo',
             'SNDBNK': 'SendingBankInfo',
+            'ACWBNK': 'AccountWithInstitution',
+            'ORDBNK': 'OrderingInstitution',
         }
         
         for pattern, party_type in party_patterns.items():
             if info.startswith(pattern):
-                return party_type
+                return pattern, party_type
         
-        return None
+        return None, None
 
 
 if __name__ == '__main__':
