@@ -48,6 +48,7 @@ class ACEPredictor:
         self.label_mapping: Dict[int, str] = {}
         self.threshold: float = 0.5
         self.loaded = False
+        self.exclusion_rules: Dict = {}  # Loaded from exclusion_rules.json
         
         self._load_models()
     
@@ -82,6 +83,12 @@ class ACEPredictor:
                 code = detector_file.stem
                 with open(detector_file, 'rb') as f:
                     self.rare_detectors[code] = pickle.load(f)
+        
+        # Load exclusion rules if present
+        rules_path = self.model_dir / 'exclusion_rules.json'
+        if rules_path.exists():
+            with open(rules_path, 'r') as f:
+                self.exclusion_rules = json.load(f)
         
         self.loaded = True
     
@@ -168,6 +175,11 @@ class ACEPredictor:
         else:
             confidence = code_probs.get('__NO_ERROR__', 1.0)
         
+        # Post-filter: Apply mutual exclusivity rules
+        predicted_codes = self._apply_mutual_exclusivity(
+            predicted_codes, code_probs, feature_dict
+        )
+        
         # Generate explanations
         explanations = []
         if include_explanation and predicted_codes:
@@ -204,6 +216,148 @@ class ACEPredictor:
             explanations=explanations,
             warnings=warnings
         )
+    
+    def _apply_mutual_exclusivity(self, 
+                                   predicted_codes: List[str], 
+                                   code_probs: Dict[str, float],
+                                   feature_dict: Dict[str, Any]) -> List[str]:
+        """
+        Apply mutual exclusivity rules to filter conflicting predictions.
+        
+        Uses rules from:
+        1. Loaded exclusion_rules.json (data-driven)
+        2. Built-in rules (semantic knowledge)
+        """
+        if not predicted_codes:
+            return predicted_codes
+        
+        codes_to_remove = set()
+        
+        # === Apply loaded rules from exclusion_rules.json ===
+        if self.exclusion_rules:
+            # Apply mutual exclusions (codes that never co-occur)
+            for rule in self.exclusion_rules.get('mutual_exclusions', []):
+                codes = rule.get('codes', [])
+                if len(codes) == 2:
+                    c1, c2 = codes
+                    if c1 in predicted_codes and c2 in predicted_codes:
+                        # Keep the one with higher probability
+                        if code_probs.get(c1, 0) >= code_probs.get(c2, 0):
+                            codes_to_remove.add(c2)
+                        else:
+                            codes_to_remove.add(c1)
+            
+            # Apply same-field conflicts with resolution hints
+            for conflict in self.exclusion_rules.get('same_field_conflicts', []):
+                codes = conflict.get('codes', [])
+                resolution = conflict.get('resolution')
+                if len(codes) == 2:
+                    c1, c2 = codes
+                    if c1 in predicted_codes and c2 in predicted_codes:
+                        # Use resolution hint if available
+                        resolved = self._resolve_conflict(c1, c2, resolution, 
+                                                         feature_dict, code_probs)
+                        if resolved:
+                            codes_to_remove.add(resolved)
+        
+        # === Built-in rules for known conflicts ===
+        # 8894 (Invalid IBAN) vs 8896 (Invalid Domestic Account)
+        builtin_rules = [
+            # (code1, code2, feature, keep_code1_if_feature_true)
+            ('8894', '8896', 'cdt_is_international', '8894'),
+            ('8894_CDTPTY', '8896_CDTPTY', 'cdt_is_international', '8894_CDTPTY'),
+            ('8894_BNFPTY', '8896_BNFPTY', 'bnf_is_international', '8894_BNFPTY'),
+            ('8894_BNPPTY', '8896_BNPPTY', 'bnf_is_international', '8894_BNPPTY'),
+            ('8894_DBTPTY', '8896_DBTPTY', 'dbt_is_international', '8894_DBTPTY'),
+            ('8894_ORGPTY', '8896_ORGPTY', 'orig_is_international', '8894_ORGPTY'),
+        ]
+        
+        for code1, code2, feature, keep_if_true in builtin_rules:
+            has_code1 = code1 in predicted_codes
+            has_code2 = code2 in predicted_codes
+            
+            if has_code1 and has_code2:
+                feature_val = feature_dict.get(feature, False)
+                if feature_val:
+                    codes_to_remove.add(code2)
+                else:
+                    codes_to_remove.add(code1)
+        
+        # Handle base codes without party suffix
+        base_8894 = any(c.startswith('8894') for c in predicted_codes)
+        base_8896 = any(c.startswith('8896') for c in predicted_codes)
+        
+        if base_8894 and base_8896:
+            is_intl = any(feature_dict.get(f'{p}_is_international', False) 
+                         for p in ['cdt', 'bnf', 'dbt', 'orig'])
+            
+            if is_intl:
+                codes_to_remove.update(c for c in predicted_codes if c.startswith('8896'))
+            else:
+                codes_to_remove.update(c for c in predicted_codes if c.startswith('8894'))
+        
+        # Filter out codes to remove
+        filtered_codes = [c for c in predicted_codes if c not in codes_to_remove]
+        
+        return filtered_codes
+    
+    def _resolve_conflict(self, code1: str, code2: str, resolution: str,
+                          feature_dict: Dict, code_probs: Dict) -> Optional[str]:
+        """
+        Resolve a conflict between two codes using resolution hint.
+        Returns the code to REMOVE, or None if can't resolve.
+        """
+        if not resolution:
+            # No hint - keep higher probability
+            if code_probs.get(code1, 0) >= code_probs.get(code2, 0):
+                return code2
+            return code1
+        
+        # Parse resolution hint
+        # Example: "Use is_international feature: True->8894, False->8896"
+        if 'is_international' in resolution:
+            # Check any party's is_international
+            is_intl = any(feature_dict.get(f'{p}_is_international', False) 
+                         for p in ['cdt', 'bnf', 'dbt', 'orig'])
+            base1 = code1.split('_')[0]
+            base2 = code2.split('_')[0]
+            
+            if is_intl:
+                # International - prefer IBAN errors (8894)
+                if '8896' in base2:
+                    return code2
+                elif '8896' in base1:
+                    return code1
+            else:
+                # Domestic - prefer domestic errors (8896)
+                if '8894' in base2:
+                    return code2
+                elif '8894' in base1:
+                    return code1
+        
+        elif 'bic_length' in resolution:
+            # Check BIC length
+            bic_len = max(
+                feature_dict.get(f'{p}_bic_length', 0) 
+                for p in ['cdt', 'bnf', 'dbt', 'orig']
+            )
+            base1 = code1.split('_')[0]
+            base2 = code2.split('_')[0]
+            
+            if bic_len <= 4:
+                # Short BIC - prefer 8005
+                if '8001' in base2:
+                    return code2
+                elif '8001' in base1:
+                    return code1
+            else:
+                # Full BIC - prefer 8001
+                if '8005' in base2:
+                    return code2
+                elif '8005' in base1:
+                    return code1
+        
+        return None
     
     def predict_batch(self, ifml_jsons: List[dict],
                       threshold: Optional[float] = None) -> List[PredictionResult]:
