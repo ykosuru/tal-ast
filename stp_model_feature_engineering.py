@@ -19,9 +19,8 @@ class IFMLFeatureEngineer:
     """
     
     # Columns that should be one-hot encoded (low cardinality)
-    # NOTE: source_code removed - spurious correlation with error codes
+    # NOTE: source_code, incoming_msg_type, incoming_format removed - spurious correlation
     ONEHOT_COLS = [
-        'incoming_msg_type', 'incoming_format',
         'bank_operation_code'
     ]
     
