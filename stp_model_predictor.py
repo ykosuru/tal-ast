@@ -179,56 +179,6 @@ class ACEPredictor:
                     if prob >= threshold:
                         predicted_codes.append(code)
         
-        # Apply prediction config filters
-        suppressed_codes = set(self.prediction_config.get('suppressed_codes', []))
-        high_threshold_codes = self.prediction_config.get('high_threshold_codes', {})
-        
-        # Filter by suppressed codes list
-        if suppressed_codes:
-            before = len(predicted_codes)
-            predicted_codes = [c for c in predicted_codes 
-                              if c.split('_')[0] not in suppressed_codes]
-            if len(predicted_codes) < before:
-                warnings.append(f"Suppressed {before - len(predicted_codes)} codes from suppressed_codes list")
-        
-        # Filter by high threshold codes (require higher confidence for certain codes)
-        if high_threshold_codes:
-            filtered = []
-            for code in predicted_codes:
-                base_code = code.split('_')[0]
-                required_threshold = high_threshold_codes.get(base_code)
-                if required_threshold and code_probs.get(code, 0) < required_threshold:
-                    warnings.append(f"Suppressed {code} (prob {code_probs.get(code, 0):.2f} < required {required_threshold})")
-                else:
-                    filtered.append(code)
-            predicted_codes = filtered
-        
-        # Strict suppression: code must beat __NO_XXXX__ by margin to be predicted
-        # This eliminates false positives when model is uncertain
-        if no_series_probs:
-            margin = self.prediction_config.get('negative_margin', 0.1)
-            filtered_codes = []
-            
-            for code in predicted_codes:
-                base_code = code.split('_')[0]
-                # Find which series this code belongs to
-                code_series = base_code[0] if base_code and base_code[0].isdigit() else None
-                
-                if code_series and code_series in no_series_probs:
-                    no_error_prob = no_series_probs[code_series]
-                    code_prob = code_probs.get(code, 0)
-                    
-                    # Only keep if code probability beats no-error by margin
-                    if code_prob > no_error_prob + margin:
-                        filtered_codes.append(code)
-                    else:
-                        warnings.append(f"Suppressed {code} (prob {code_prob:.2f} <= __NO_{code_series}XXX__ {no_error_prob:.2f} + {margin})")
-                else:
-                    # No negative class for this series, keep the prediction
-                    filtered_codes.append(code)
-            
-            predicted_codes = filtered_codes
-        
         # Check rare code detectors
         for code, detector in self.rare_detectors.items():
             try:
@@ -248,12 +198,6 @@ class ACEPredictor:
             confidence = np.mean([code_probs.get(c, 0) for c in predicted_codes])
         else:
             confidence = code_probs.get('__NO_ERROR__', 1.0)
-        
-        # Post-filter: Apply mutual exclusivity and semantic rules
-        predicted_codes, semantic_warnings = self._apply_mutual_exclusivity(
-            predicted_codes, code_probs, feature_dict
-        )
-        warnings.extend(semantic_warnings)
         
         # Generate explanations
         explanations = []
@@ -377,10 +321,7 @@ class ACEPredictor:
         # Filter out codes to remove
         filtered_codes = [c for c in predicted_codes if c not in codes_to_remove]
         
-        # Apply semantic validation filters
-        filtered_codes, semantic_warnings = self._apply_semantic_filters(filtered_codes, feature_dict)
-        
-        return filtered_codes, semantic_warnings
+        return filtered_codes, []
     
     def _apply_semantic_filters(self, predicted_codes: List[str], 
                                  feature_dict: Dict[str, Any]) -> Tuple[List[str], List[str]]:
