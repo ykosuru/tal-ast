@@ -438,11 +438,13 @@ def train_model(data_dir: str = None, data_file: str = None,
     print("\n[2/5] Creating dataset...")
     if code_series_filter:
         print(f"   Filtering to code series: {code_series_filter}")
+        print(f"   Including negative cases (transactions without these codes)")
     X_raw, X_transformed, y_multilabel = pipeline.create_dataset(
         filter_severity=filter_severity,
         min_code_samples=min_code_samples,
         use_composite_codes=use_composite_codes,
-        code_series_filter=code_series_filter
+        code_series_filter=code_series_filter,
+        include_negative_cases=True if code_series_filter else False
     )
     
     X = X_transformed.values.astype(np.float32)
