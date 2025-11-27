@@ -343,6 +343,8 @@ class PartyInfo:
     has_iban: bool = False  # Explicit IBAN present
     # Multi-source indicators (for 8026 - NCH inconsistency)
     nch_sources: int = 0  # Count of NCH sources (account, BIC, IBAN)
+    # NCH validation applicability (for 8895)
+    nch_validation_applicable: bool = False  # True only for US domestic payments
 
 
 @dataclass 
@@ -824,6 +826,23 @@ class IFMLParser:
             nch_sources += 1  # Could derive NCH from BIC
         party.nch_sources = nch_sources
         
+        # === NCH Validation Applicability (for 8895) ===
+        # NCH validation only applies to domestic US payments, NOT international
+        # If payment is international (non-US beneficiary), NCH errors shouldn't fire
+        party_country = (
+            party.bic_country or 
+            party.iban_country or 
+            party.country or 
+            party.address_country
+        )
+        
+        # NCH validation is applicable only if:
+        # 1. Party is in US (domestic), OR
+        # 2. No country detected but has US-style routing (FEDABA/CHIPS)
+        is_us_party = party_country and party_country.upper() == 'US'
+        has_us_routing = party.is_fedaba or party.is_chips_aba or party.nch_type in ['FEDABA', 'CHIPS']
+        party.nch_validation_applicable = is_us_party or (not party_country and has_us_routing)
+        
         return party
     
     def _parse_bank_info(self, basic_payment: dict, features: IFMLFeatures):
@@ -935,6 +954,8 @@ class IFMLParser:
                 result[f'{prefix}_needs_iban'] = party.needs_iban
                 # NCH source count (for 8026 - inconsistency)
                 result[f'{prefix}_nch_sources'] = party.nch_sources
+                # NCH validation applicability (for 8895)
+                result[f'{prefix}_nch_validation_applicable'] = party.nch_validation_applicable
             else:
                 result[f'{prefix}_present'] = False
                 result[f'{prefix}_has_id'] = False
@@ -976,6 +997,8 @@ class IFMLParser:
                 result[f'{prefix}_needs_iban'] = False
                 # NCH source count (for 8026 - inconsistency)
                 result[f'{prefix}_nch_sources'] = 0
+                # NCH validation applicability (for 8895)
+                result[f'{prefix}_nch_validation_applicable'] = False
         
         return result
     
