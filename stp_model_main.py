@@ -602,13 +602,14 @@ def predict(model_dir: str, input_path: str = None,
     return predictor.predict(input_json, threshold=threshold)
 
 
-def analyze(model_dir: str, input_path: str) -> Dict[str, Any]:
+def analyze(model_dir: str, input_path: str, code: str = None) -> Dict[str, Any]:
     """
     Comprehensive analysis of an IFML request.
     
     Args:
         model_dir: Directory containing trained models
         input_path: Path to IFML JSON file
+        code: Optional specific code to analyze rules for
     
     Returns:
         Analysis dictionary
@@ -618,7 +619,255 @@ def analyze(model_dir: str, input_path: str) -> Dict[str, Any]:
     with open(input_path, 'r') as f:
         input_json = json.load(f)
     
-    return predictor.analyze_request(input_json)
+    analysis = predictor.analyze_request(input_json)
+    
+    # If specific code requested, add rule analysis
+    if code:
+        analysis['code_rules'] = get_code_rules(code, predictor, input_json)
+    
+    return analysis
+
+
+def get_code_rules(code: str, predictor: ACEPredictor, ifml_json: dict) -> Dict[str, Any]:
+    """
+    Get rules and feature values that trigger a specific code.
+    
+    Args:
+        code: Error code to analyze (e.g., '8895')
+        predictor: ACEPredictor instance
+        ifml_json: IFML request JSON
+    
+    Returns:
+        Dictionary with rule analysis
+    """
+    from ace_codes import ACE_CODES
+    
+    # Parse features
+    features = predictor.parser.parse(ifml_json)
+    feature_dict = predictor.parser.to_dict(features)
+    
+    # Code descriptions and rules
+    code_rules = {
+        '8001': {
+            'description': 'Invalid BIC',
+            'condition': 'BIC present but format invalid',
+            'features': [
+                ('has_bic', ['orig_has_bic', 'send_has_bic', 'dbt_has_bic', 'cdt_has_bic', 'intm_has_bic', 'bnf_has_bic']),
+                ('bic_valid_format', ['orig_bic_valid_format', 'send_bic_valid_format', 'dbt_bic_valid_format', 
+                                       'cdt_bic_valid_format', 'intm_bic_valid_format', 'bnf_bic_valid_format']),
+            ],
+            'rule': 'Fires when: has_bic=True AND bic_valid_format=False for any party'
+        },
+        '8004': {
+            'description': 'IBAN cannot be derived',
+            'condition': 'International payment to IBAN country missing IBAN',
+            'features': [
+                ('needs_iban', ['orig_needs_iban', 'send_needs_iban', 'dbt_needs_iban', 
+                                'cdt_needs_iban', 'intm_needs_iban', 'bnf_needs_iban']),
+                ('has_iban', ['orig_has_iban', 'send_has_iban', 'dbt_has_iban',
+                              'cdt_has_iban', 'intm_has_iban', 'bnf_has_iban']),
+            ],
+            'derived': ['iban_count', 'needs_iban_count', 'missing_required_iban'],
+            'rule': 'Fires when: needs_iban=True AND has_iban=False (missing_required_iban=1)'
+        },
+        '8022': {
+            'description': 'IBAN inconsistent with BIC',
+            'condition': 'BIC country does not match IBAN country',
+            'features': [
+                ('bic_country', ['orig_bic_country', 'send_bic_country', 'dbt_bic_country',
+                                  'cdt_bic_country', 'intm_bic_country', 'bnf_bic_country']),
+                ('iban_country', ['orig_iban_country', 'send_iban_country', 'dbt_iban_country',
+                                   'cdt_iban_country', 'intm_iban_country', 'bnf_iban_country']),
+                ('bic_iban_match', ['orig_bic_iban_match', 'send_bic_iban_match', 'dbt_bic_iban_match',
+                                     'cdt_bic_iban_match', 'intm_bic_iban_match', 'bnf_bic_iban_match']),
+            ],
+            'derived': ['bic_iban_mismatch_count'],
+            'rule': 'Fires when: bic_iban_match=False for any party (bic_iban_mismatch_count > 0)'
+        },
+        '8026': {
+            'description': 'NCH inconsistency',
+            'condition': 'Multiple conflicting clearing codes from different sources',
+            'features': [
+                ('nch_sources', ['orig_nch_sources', 'send_nch_sources', 'dbt_nch_sources',
+                                  'cdt_nch_sources', 'intm_nch_sources', 'bnf_nch_sources']),
+                ('has_nch', ['orig_has_nch', 'send_has_nch', 'dbt_has_nch',
+                              'cdt_has_nch', 'intm_has_nch', 'bnf_has_nch']),
+            ],
+            'derived': ['total_nch_sources', 'has_multiple_nch_sources'],
+            'rule': 'Fires when: nch_sources > 1 for any party OR total_nch_sources > 1'
+        },
+        '8852': {
+            'description': 'Incorrect length of attribute',
+            'condition': 'Field length does not match expected format',
+            'features': [
+                ('account_length', ['orig_account_length', 'send_account_length', 'dbt_account_length',
+                                     'cdt_account_length', 'intm_account_length', 'bnf_account_length']),
+                ('bic_length', ['orig_bic_length', 'send_bic_length', 'dbt_bic_length',
+                                 'cdt_bic_length', 'intm_bic_length', 'bnf_bic_length']),
+            ],
+            'rule': 'Fires when: field length does not match expected (e.g., BIC not 8 or 11, IBAN wrong length)'
+        },
+        '8894': {
+            'description': 'Invalid IBAN',
+            'condition': 'IBAN format or checksum invalid',
+            'features': [
+                ('has_iban', ['orig_has_iban', 'send_has_iban', 'dbt_has_iban',
+                              'cdt_has_iban', 'intm_has_iban', 'bnf_has_iban']),
+                ('iban_valid_format', ['orig_iban_valid_format', 'send_iban_valid_format', 'dbt_iban_valid_format',
+                                        'cdt_iban_valid_format', 'intm_iban_valid_format', 'bnf_iban_valid_format']),
+                ('iban_checksum_valid', ['orig_iban_checksum_valid', 'send_iban_checksum_valid', 'dbt_iban_checksum_valid',
+                                          'cdt_iban_checksum_valid', 'intm_iban_checksum_valid', 'bnf_iban_checksum_valid']),
+            ],
+            'derived': ['iban_count', 'iban_format_valid_count', 'iban_checksum_valid_count', 'has_invalid_iban'],
+            'rule': 'Fires when: has_iban=True AND (iban_valid_format=False OR iban_checksum_valid=False)'
+        },
+        '8895': {
+            'description': 'Invalid NCH code',
+            'condition': 'National clearing house code (FEDABA/CHIPS/SORTCODE) is invalid - DOMESTIC ONLY',
+            'features': [
+                ('has_nch', ['orig_has_nch', 'send_has_nch', 'dbt_has_nch',
+                              'cdt_has_nch', 'intm_has_nch', 'bnf_has_nch']),
+                ('nch_type', ['orig_nch_type', 'send_nch_type', 'dbt_nch_type',
+                               'cdt_nch_type', 'intm_nch_type', 'bnf_nch_type']),
+                ('nch_valid', ['orig_nch_valid', 'send_nch_valid', 'dbt_nch_valid',
+                                'cdt_nch_valid', 'intm_nch_valid', 'bnf_nch_valid']),
+                ('fedaba_checksum_valid', ['orig_fedaba_checksum_valid', 'send_fedaba_checksum_valid', 'dbt_fedaba_checksum_valid',
+                                            'cdt_fedaba_checksum_valid', 'intm_fedaba_checksum_valid', 'bnf_fedaba_checksum_valid']),
+                ('nch_validation_applicable', ['orig_nch_validation_applicable', 'send_nch_validation_applicable', 'dbt_nch_validation_applicable',
+                                                'cdt_nch_validation_applicable', 'intm_nch_validation_applicable', 'bnf_nch_validation_applicable']),
+            ],
+            'derived': ['nch_count', 'nch_valid_count', 'has_invalid_nch', 'nch_validation_applicable', 'is_any_domestic', 'is_any_international'],
+            'rule': 'Fires when: nch_validation_applicable=True AND has_nch=True AND nch_valid=False. Should NOT fire on international payments.'
+        },
+        '8896': {
+            'description': 'Invalid Domestic Account',
+            'condition': 'US routing number or domestic account format invalid',
+            'features': [
+                ('is_fedaba', ['orig_is_fedaba', 'send_is_fedaba', 'dbt_is_fedaba',
+                                'cdt_is_fedaba', 'intm_is_fedaba', 'bnf_is_fedaba']),
+                ('is_domestic', ['orig_is_domestic', 'send_is_domestic', 'dbt_is_domestic',
+                                  'cdt_is_domestic', 'intm_is_domestic', 'bnf_is_domestic']),
+            ],
+            'derived': ['is_any_domestic'],
+            'rule': 'Fires when: is_domestic=True AND domestic account format invalid'
+        },
+    }
+    
+    # Get rule info for requested code
+    base_code = code.split('_')[0]  # Handle 8895_BNFBNK format
+    rule_info = code_rules.get(base_code, {
+        'description': ACE_CODES.get(base_code, 'Unknown code'),
+        'condition': 'No specific rule defined',
+        'features': [],
+        'rule': 'Generic ML prediction'
+    })
+    
+    # Build feature values
+    feature_values = {}
+    for feature_name, feature_cols in rule_info.get('features', []):
+        feature_values[feature_name] = {}
+        for col in feature_cols:
+            val = feature_dict.get(col)
+            if val is not None:
+                feature_values[feature_name][col] = val
+    
+    # Get derived feature values
+    derived_values = {}
+    for col in rule_info.get('derived', []):
+        # Try to compute from feature_dict or note as "computed at transform"
+        derived_values[col] = feature_dict.get(col, 'computed_at_transform')
+    
+    # Get prediction probability for this code
+    prediction = predictor.predict(ifml_json)
+    code_prob = prediction.probabilities.get(code) or prediction.probabilities.get(base_code, 0.0)
+    
+    # Determine if rule conditions are met
+    rule_triggered = _evaluate_rule(base_code, feature_dict)
+    
+    return {
+        'code': code,
+        'description': rule_info['description'],
+        'condition': rule_info['condition'],
+        'rule': rule_info['rule'],
+        'feature_values': feature_values,
+        'derived_values': derived_values,
+        'prediction_probability': code_prob,
+        'rule_triggered': rule_triggered,
+        'predicted': code in prediction.predicted_codes or base_code in [c.split('_')[0] for c in prediction.predicted_codes]
+    }
+
+
+def _evaluate_rule(code: str, feature_dict: dict) -> Dict[str, Any]:
+    """Evaluate if rule conditions are met for a code."""
+    
+    result = {'triggered': False, 'reasons': []}
+    
+    if code == '8895':
+        # NCH validation only applies to domestic
+        parties = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf']
+        for party in parties:
+            has_nch = feature_dict.get(f'{party}_has_nch', False)
+            nch_valid = feature_dict.get(f'{party}_nch_valid', True)
+            nch_applicable = feature_dict.get(f'{party}_nch_validation_applicable', False)
+            
+            if has_nch and not nch_valid and nch_applicable:
+                result['triggered'] = True
+                result['reasons'].append(f'{party}: has_nch={has_nch}, nch_valid={nch_valid}, nch_validation_applicable={nch_applicable}')
+            elif has_nch and not nch_valid and not nch_applicable:
+                result['reasons'].append(f'{party}: has_nch={has_nch}, nch_valid={nch_valid}, BUT nch_validation_applicable=False (international - should NOT trigger)')
+    
+    elif code == '8894':
+        parties = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf']
+        for party in parties:
+            has_iban = feature_dict.get(f'{party}_has_iban', False)
+            iban_format = feature_dict.get(f'{party}_iban_valid_format', True)
+            iban_checksum = feature_dict.get(f'{party}_iban_checksum_valid', True)
+            
+            if has_iban and (not iban_format or not iban_checksum):
+                result['triggered'] = True
+                result['reasons'].append(f'{party}: has_iban={has_iban}, iban_valid_format={iban_format}, iban_checksum_valid={iban_checksum}')
+    
+    elif code == '8004':
+        parties = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf']
+        for party in parties:
+            needs_iban = feature_dict.get(f'{party}_needs_iban', False)
+            has_iban = feature_dict.get(f'{party}_has_iban', False)
+            
+            if needs_iban and not has_iban:
+                result['triggered'] = True
+                result['reasons'].append(f'{party}: needs_iban={needs_iban}, has_iban={has_iban}')
+    
+    elif code == '8022':
+        parties = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf']
+        for party in parties:
+            bic_iban_match = feature_dict.get(f'{party}_bic_iban_match')
+            if bic_iban_match is False:
+                result['triggered'] = True
+                bic_country = feature_dict.get(f'{party}_bic_country')
+                iban_country = feature_dict.get(f'{party}_iban_country')
+                result['reasons'].append(f'{party}: bic_iban_match=False (bic_country={bic_country}, iban_country={iban_country})')
+    
+    elif code == '8026':
+        parties = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf']
+        for party in parties:
+            nch_sources = feature_dict.get(f'{party}_nch_sources', 0)
+            if nch_sources > 1:
+                result['triggered'] = True
+                result['reasons'].append(f'{party}: nch_sources={nch_sources} (multiple sources = inconsistency)')
+    
+    elif code == '8001':
+        parties = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf']
+        for party in parties:
+            has_bic = feature_dict.get(f'{party}_has_bic', False)
+            bic_valid = feature_dict.get(f'{party}_bic_valid_format', True)
+            if has_bic and not bic_valid:
+                result['triggered'] = True
+                result['reasons'].append(f'{party}: has_bic={has_bic}, bic_valid_format={bic_valid}')
+    
+    if not result['reasons']:
+        result['reasons'].append('No rule conditions detected')
+    
+    return result
 
 
 def run_demo():
@@ -968,6 +1217,7 @@ Examples:
     analyze_parser = subparsers.add_parser('analyze', help='Analyze request')
     analyze_parser.add_argument('--model-dir', required=True, help='Model directory')
     analyze_parser.add_argument('--input', required=True, help='Input IFML JSON file')
+    analyze_parser.add_argument('--code', default=None, help='Specific code to analyze (e.g., 8895)')
     
     args = parser.parse_args()
     
@@ -1015,7 +1265,7 @@ Examples:
         }, indent=2))
     
     elif args.command == 'analyze':
-        analysis = analyze(args.model_dir, args.input)
+        analysis = analyze(args.model_dir, args.input, args.code)
         print(json.dumps(analysis, indent=2, default=str))
     
     else:
