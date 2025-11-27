@@ -62,6 +62,8 @@ def main():
     
     success_count = 0
     fail_count = 0
+    total_count = 0
+    fail_examples = []  # Store first few failures for review
     
     for filepath in test_files:
         with open(filepath) as f:
@@ -91,27 +93,38 @@ def main():
                 if args.series:
                     predicted_codes = {c for c in predicted_codes if c.startswith(args.series)}
             except Exception as e:
-                print(f"{filepath.name}, {txn_id}, FAIL (error: {e})")
                 fail_count += 1
+                total_count += 1
+                if len(fail_examples) < 10:
+                    fail_examples.append(f"{txn_id}: ERROR - {e}")
                 continue
             
             # Compare
+            total_count += 1
             if predicted_codes == actual_codes:
-                print(f"{txn_id}, SUCCESS")
                 success_count += 1
             else:
-                print(f"{filepath.name}, {txn_id}, FAIL")
-                print(f"  Predicted: {sorted(predicted_codes)}")
-                print(f"  Actual:    {sorted(actual_codes)}")
                 fail_count += 1
+                if len(fail_examples) < 10:
+                    fail_examples.append(f"{txn_id}: predicted {sorted(predicted_codes)}, actual {sorted(actual_codes)}")
+            
+            # Progress every 1000
+            if total_count % 1000 == 0:
+                pct = success_count / total_count * 100 if total_count > 0 else 0
+                print(f"Progress: {total_count} processed, {success_count} success, {fail_count} fail ({pct:.1f}%)")
     
     # Summary
     print("\n" + "=" * 50)
     print(f"SUCCESS: {success_count}")
     print(f"FAIL: {fail_count}")
-    print(f"Total: {success_count + fail_count}")
-    if success_count + fail_count > 0:
-        print(f"Accuracy: {success_count/(success_count+fail_count)*100:.1f}%")
+    print(f"Total: {total_count}")
+    if total_count > 0:
+        print(f"Accuracy: {success_count/total_count*100:.1f}%")
+    
+    if fail_examples:
+        print("\nFirst failures:")
+        for ex in fail_examples:
+            print(f"  {ex}")
 
 
 if __name__ == '__main__':
