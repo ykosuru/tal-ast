@@ -89,6 +89,9 @@ class IFMLFeatureEngineer:
         'cdt_has_iban', 'intm_has_iban', 'bnf_has_iban',
         'orig_needs_iban', 'send_needs_iban', 'dbt_needs_iban',
         'cdt_needs_iban', 'intm_needs_iban', 'bnf_needs_iban',
+        # NCH validation applicability (for 8895)
+        'orig_nch_validation_applicable', 'send_nch_validation_applicable', 'dbt_nch_validation_applicable',
+        'cdt_nch_validation_applicable', 'intm_nch_validation_applicable', 'bnf_nch_validation_applicable',
     ]
     
     # Numeric columns
@@ -361,6 +364,11 @@ class IFMLFeatureEngineer:
             result_df['is_any_domestic'] = (result_df[domestic_cols].sum(axis=1) > 0).astype(int)
             result_df['is_any_international'] = (result_df[intl_cols].sum(axis=1) > 0).astype(int)
         
+        # NCH validation applicability (for 8895 - only fires on domestic US payments)
+        nch_applicable_cols = [c for c in result_df.columns if c.endswith('_nch_validation_applicable')]
+        if nch_applicable_cols:
+            result_df['nch_validation_applicable'] = (result_df[nch_applicable_cols].sum(axis=1) > 0).astype(int)
+        
         return result_df
     
     def _build_feature_columns(self, df: pd.DataFrame):
@@ -399,7 +407,8 @@ class IFMLFeatureEngineer:
             'nch_count', 'nch_valid_count', 'has_invalid_nch',
             'iban_format_valid_count', 'iban_checksum_valid_count', 'has_invalid_iban',
             'bic_format_valid_count', 'has_invalid_bic',
-            'is_any_domestic', 'is_any_international'
+            'is_any_domestic', 'is_any_international',
+            'nch_validation_applicable'  # For 8895 - only domestic US
         ]
         self.feature_columns.extend(derived)
     
