@@ -388,7 +388,8 @@ def train_model(data_dir: str = None, data_file: str = None,
                 filter_severity: List[str] = None,
                 use_composite_codes: bool = False,
                 min_code_samples: int = 5,
-                code_series_filter: List[str] = None) -> Dict[str, Any]:
+                code_series_filter: List[str] = None,
+                max_negative_ratio: int = 3) -> Dict[str, Any]:
     """
     Train error code prediction model from IFML data.
     
@@ -401,6 +402,7 @@ def train_model(data_dir: str = None, data_file: str = None,
         use_composite_codes: If True, use code+party labels (e.g., '8004_BNPPTY')
         min_code_samples: Minimum samples for a code to have its own class
         code_series_filter: Filter to specific code series (e.g., ['8', '9'] for 8XXX/9XXX)
+        max_negative_ratio: Max ratio of negative to positive samples (default 3:1)
     
     Returns:
         Training results dictionary
@@ -444,7 +446,8 @@ def train_model(data_dir: str = None, data_file: str = None,
         min_code_samples=min_code_samples,
         use_composite_codes=use_composite_codes,
         code_series_filter=code_series_filter,
-        include_negative_cases=True if code_series_filter else False
+        include_negative_cases=True if code_series_filter else False,
+        max_negative_ratio=max_negative_ratio
     )
     
     X = X_transformed.values.astype(np.float32)
@@ -951,6 +954,8 @@ Examples:
                              help='Minimum samples for a code to have its own class (default: 5)')
     train_parser.add_argument('--code-series', nargs='+', default=None,
                              help='Filter to specific code series (e.g., 8 9 for 8XXX and 9XXX only)')
+    train_parser.add_argument('--negative-ratio', type=int, default=3,
+                             help='Max ratio of negative to positive samples (default: 3). Set to 0 to disable downsampling.')
     
     # Predict command
     predict_parser = subparsers.add_parser('predict', help='Predict error codes')
@@ -986,7 +991,8 @@ Examples:
             filter_severity=args.severity,
             use_composite_codes=args.composite,
             min_code_samples=args.min_samples,
-            code_series_filter=args.code_series
+            code_series_filter=args.code_series,
+            max_negative_ratio=args.negative_ratio
         )
         print(json.dumps(results.get('training_info', {}), indent=2))
     
