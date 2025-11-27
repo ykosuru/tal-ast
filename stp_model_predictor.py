@@ -145,6 +145,7 @@ class ACEPredictor:
         # Convert to code probabilities
         code_probs = {}
         predicted_codes = []
+        no_series_probs = {}  # Track __NO_XXXX__ probabilities
         
         if isinstance(probabilities, np.ndarray):
             for i, prob in enumerate(probabilities):
@@ -152,12 +153,35 @@ class ACEPredictor:
                     code = self.model.class_names[i]
                     code_probs[code] = float(prob)
                     
-                    # Skip special internal classes
-                    if code.startswith('__NO_') or code in ['__NO_ERROR__', '__RARE__']:
+                    # Track __NO_XXXX__ class probabilities (e.g., __NO_8XXX__)
+                    if code.startswith('__NO_') and 'XXX__' in code:
+                        # Extract series (e.g., '8' from '__NO_8XXX__')
+                        series = code.replace('__NO_', '').replace('XXX__', '').replace('_', '')
+                        no_series_probs[series] = float(prob)
+                        continue
+                    
+                    # Skip other internal classes
+                    if code.startswith('__'):
                         continue
                     
                     if prob >= threshold:
                         predicted_codes.append(code)
+        
+        # Suppress predictions for series where __NO_XXXX__ has high probability
+        if no_series_probs:
+            suppressed_series = set()
+            for series, no_prob in no_series_probs.items():
+                if no_prob >= threshold:
+                    suppressed_series.add(series)
+            
+            if suppressed_series:
+                before_count = len(predicted_codes)
+                predicted_codes = [
+                    c for c in predicted_codes 
+                    if not any(c.split('_')[0].startswith(s) for s in suppressed_series)
+                ]
+                if len(predicted_codes) < before_count:
+                    warnings.append(f"Suppressed {before_count - len(predicted_codes)} codes (series {suppressed_series} has high no-error probability)")
         
         # Check rare code detectors
         for code, detector in self.rare_detectors.items():
