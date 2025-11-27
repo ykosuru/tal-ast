@@ -20,6 +20,7 @@ Usage:
 import argparse
 import json
 import sys
+import pickle
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -640,7 +641,7 @@ def get_code_rules(code: str, predictor: ACEPredictor, ifml_json: dict) -> Dict[
     Returns:
         Dictionary with rule analysis
     """
-    from ace_codes import ACE_CODES
+    from ace_codes import ALL_CODES
     
     # Parse features
     features = predictor.parser.parse(ifml_json)
@@ -756,7 +757,7 @@ def get_code_rules(code: str, predictor: ACEPredictor, ifml_json: dict) -> Dict[
     # Get rule info for requested code
     base_code = code.split('_')[0]  # Handle 8895_BNFBNK format
     rule_info = code_rules.get(base_code, {
-        'description': ACE_CODES.get(base_code, 'Unknown code'),
+        'description': ALL_CODES.get(base_code, 'Unknown code'),
         'condition': 'No specific rule defined',
         'features': [],
         'rule': 'Generic ML prediction'
@@ -1159,6 +1160,216 @@ def run_demo():
     print("3. Predict: python main.py predict --model-dir ./models --input request.json")
 
 
+def show_feature_importance(model_dir: str, top_n: int = 30, code: str = None, all_codes: bool = False):
+    """
+    Display feature importance from trained model.
+    
+    Args:
+        model_dir: Directory containing trained models
+        top_n: Number of top features to show
+        code: Specific code to analyze (for composite models)
+        all_codes: Show importance per code
+    """
+    model_path = Path(model_dir)
+    
+    # Check for composite model
+    composite_dir = model_path / 'composite_models'
+    is_composite = composite_dir.exists()
+    
+    print("=" * 70)
+    print("FEATURE IMPORTANCE ANALYSIS")
+    print("=" * 70)
+    
+    if is_composite:
+        # Load composite models
+        print(f"\nComposite model detected at {composite_dir}")
+        
+        # Get list of code models
+        code_models = sorted([f.stem.replace('model_', '') for f in composite_dir.glob('model_*.pkl')])
+        print(f"Found {len(code_models)} code models: {', '.join(code_models[:10])}{'...' if len(code_models) > 10 else ''}")
+        
+        # Load feature names
+        feature_engineer_path = model_path / 'feature_engineer.pkl'
+        if feature_engineer_path.exists():
+            with open(feature_engineer_path, 'rb') as f:
+                fe = pickle.load(f)
+            feature_names = getattr(fe, 'feature_columns', [])
+            print(f"Total features: {len(feature_names)}")
+        else:
+            feature_names = []
+        
+        if code:
+            # Show importance for specific code
+            code_model_path = composite_dir / f'model_{code}.pkl'
+            if not code_model_path.exists():
+                print(f"\nERROR: No model found for code {code}")
+                print(f"Available codes: {', '.join(code_models)}")
+                return
+            
+            with open(code_model_path, 'rb') as f:
+                model = pickle.load(f)
+            
+            print(f"\n--- Feature Importance for {code} ---")
+            _print_model_importance(model, feature_names, top_n)
+            
+        elif all_codes:
+            # Show importance for all codes
+            all_importances = {}
+            
+            for code_name in code_models:
+                code_model_path = composite_dir / f'model_{code_name}.pkl'
+                with open(code_model_path, 'rb') as f:
+                    model = pickle.load(f)
+                
+                importances = _get_importance_dict(model, feature_names)
+                if importances:
+                    all_importances[code_name] = importances
+            
+            # Aggregate - find most important features across all codes
+            feature_scores = {}
+            feature_code_map = {}  # feature -> list of codes where it's important
+            
+            for code_name, imp in all_importances.items():
+                for feat, score in imp.items():
+                    if feat not in feature_scores:
+                        feature_scores[feat] = 0
+                        feature_code_map[feat] = []
+                    feature_scores[feat] += score
+                    if score > 0.01:  # Threshold for "important"
+                        feature_code_map[feat].append((code_name, score))
+            
+            # Sort by total importance
+            sorted_features = sorted(feature_scores.items(), key=lambda x: -x[1])[:top_n]
+            
+            print(f"\n--- Top {top_n} Features (aggregated across all codes) ---")
+            print(f"{'Rank':<5} {'Feature':<45} {'Total Score':<12} {'Top Codes'}")
+            print("-" * 100)
+            
+            for rank, (feat, total_score) in enumerate(sorted_features, 1):
+                top_codes = sorted(feature_code_map.get(feat, []), key=lambda x: -x[1])[:3]
+                codes_str = ', '.join([f"{c}({s:.3f})" for c, s in top_codes])
+                print(f"{rank:<5} {feat:<45} {total_score:<12.4f} {codes_str}")
+            
+            # Show per-code breakdown
+            print(f"\n--- Per-Code Top 5 Features ---")
+            for code_name in sorted(code_models)[:15]:  # Limit to first 15 codes
+                if code_name in all_importances:
+                    imp = all_importances[code_name]
+                    top5 = sorted(imp.items(), key=lambda x: -x[1])[:5]
+                    top5_str = ', '.join([f"{f}({s:.3f})" for f, s in top5 if s > 0])
+                    if top5_str:
+                        print(f"  {code_name}: {top5_str}")
+        else:
+            # Show aggregate importance
+            print("\nUse --code <CODE> for specific code or --all-codes for breakdown")
+            print(f"\nAvailable codes: {', '.join(code_models)}")
+            
+            # Quick aggregate
+            all_importances = {}
+            for code_name in code_models:
+                code_model_path = composite_dir / f'model_{code_name}.pkl'
+                with open(code_model_path, 'rb') as f:
+                    model = pickle.load(f)
+                importances = _get_importance_dict(model, feature_names)
+                if importances:
+                    all_importances[code_name] = importances
+            
+            # Aggregate
+            feature_scores = {}
+            for code_name, imp in all_importances.items():
+                for feat, score in imp.items():
+                    feature_scores[feat] = feature_scores.get(feat, 0) + score
+            
+            sorted_features = sorted(feature_scores.items(), key=lambda x: -x[1])[:top_n]
+            
+            print(f"\n--- Top {top_n} Features (aggregated) ---")
+            print(f"{'Rank':<5} {'Feature':<50} {'Score'}")
+            print("-" * 70)
+            for rank, (feat, score) in enumerate(sorted_features, 1):
+                print(f"{rank:<5} {feat:<50} {score:.4f}")
+    
+    else:
+        # Single multi-label model
+        model_path_file = model_path / 'model.pkl'
+        if not model_path_file.exists():
+            print(f"ERROR: No model found at {model_path_file}")
+            return
+        
+        with open(model_path_file, 'rb') as f:
+            model = pickle.load(f)
+        
+        # Load feature names
+        feature_engineer_path = model_path / 'feature_engineer.pkl'
+        if feature_engineer_path.exists():
+            with open(feature_engineer_path, 'rb') as f:
+                fe = pickle.load(f)
+            feature_names = getattr(fe, 'feature_columns', [])
+        else:
+            feature_names = []
+        
+        print(f"\nSingle model loaded from {model_path_file}")
+        _print_model_importance(model, feature_names, top_n)
+    
+    # Print feature categories
+    print("\n--- Feature Categories ---")
+    categories = {
+        'Party presence': [f for f in feature_names if f.endswith('_present')],
+        'BIC features': [f for f in feature_names if 'bic' in f.lower()],
+        'IBAN features': [f for f in feature_names if 'iban' in f.lower()],
+        'NCH features': [f for f in feature_names if 'nch' in f.lower()],
+        'Account features': [f for f in feature_names if 'account' in f.lower()],
+        'Country features': [f for f in feature_names if 'country' in f.lower()],
+        'Domestic/Intl': [f for f in feature_names if 'domestic' in f.lower() or 'international' in f.lower()],
+    }
+    for cat, feats in categories.items():
+        if feats:
+            print(f"  {cat}: {len(feats)} features")
+
+
+def _get_importance_dict(model, feature_names: list) -> dict:
+    """Extract importance as dict from model."""
+    importances = None
+    
+    if hasattr(model, 'feature_importances_'):
+        importances = model.feature_importances_
+    elif hasattr(model, 'model') and hasattr(model.model, 'feature_importances_'):
+        importances = model.model.feature_importances_
+    elif hasattr(model, 'model') and hasattr(model.model, 'estimators_'):
+        # MultiOutput
+        try:
+            importances = np.mean([
+                est.feature_importances_ for est in model.model.estimators_
+                if hasattr(est, 'feature_importances_')
+            ], axis=0)
+        except:
+            pass
+    
+    if importances is None:
+        return {}
+    
+    if len(feature_names) != len(importances):
+        feature_names = [f'f{i}' for i in range(len(importances))]
+    
+    return dict(zip(feature_names, importances))
+
+
+def _print_model_importance(model, feature_names: list, top_n: int):
+    """Print feature importance from a model."""
+    imp_dict = _get_importance_dict(model, feature_names)
+    
+    if not imp_dict:
+        print("  Could not extract feature importance from model")
+        return
+    
+    sorted_imp = sorted(imp_dict.items(), key=lambda x: -x[1])[:top_n]
+    
+    print(f"{'Rank':<5} {'Feature':<50} {'Importance'}")
+    print("-" * 70)
+    for rank, (feat, imp) in enumerate(sorted_imp, 1):
+        bar = '█' * int(imp * 100)
+        print(f"{rank:<5} {feat:<50} {imp:.4f} {bar}")
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -1219,6 +1430,13 @@ Examples:
     analyze_parser.add_argument('--input', required=True, help='Input IFML JSON file')
     analyze_parser.add_argument('--code', default=None, help='Specific code to analyze (e.g., 8895)')
     
+    # Feature importance command
+    importance_parser = subparsers.add_parser('importance', help='Show feature importance')
+    importance_parser.add_argument('--model-dir', required=True, help='Model directory')
+    importance_parser.add_argument('--top', type=int, default=30, help='Number of top features to show')
+    importance_parser.add_argument('--code', default=None, help='Specific code to analyze (for composite models)')
+    importance_parser.add_argument('--all-codes', action='store_true', help='Show importance per code')
+    
     args = parser.parse_args()
     
     if args.command == 'demo':
@@ -1267,6 +1485,9 @@ Examples:
     elif args.command == 'analyze':
         analysis = analyze(args.model_dir, args.input, args.code)
         print(json.dumps(analysis, indent=2, default=str))
+    
+    elif args.command == 'importance':
+        show_feature_importance(args.model_dir, args.top, args.code, args.all_codes)
     
     else:
         parser.print_help()
