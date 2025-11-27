@@ -152,7 +152,11 @@ class ACEPredictor:
                     code = self.model.class_names[i]
                     code_probs[code] = float(prob)
                     
-                    if prob >= threshold and code not in ['__NO_ERROR__', '__RARE__']:
+                    # Skip special internal classes
+                    if code.startswith('__NO_') or code in ['__NO_ERROR__', '__RARE__']:
+                        continue
+                    
+                    if prob >= threshold:
                         predicted_codes.append(code)
         
         # Check rare code detectors
@@ -204,9 +208,9 @@ class ACEPredictor:
                                 key=lambda c: code_probs.get(c, 0), 
                                 reverse=True)
         
-        # Filter probabilities to only codes above threshold
+        # Filter probabilities to only codes above threshold (exclude internal classes)
         filtered_probs = {k: v for k, v in code_probs.items() 
-                        if v >= threshold and k not in ['__NO_ERROR__', '__RARE__']}
+                        if v >= threshold and not k.startswith('__')}
         
         return PredictionResult(
             transaction_id=txn_id,
@@ -391,10 +395,10 @@ class ACEPredictor:
             reverse=True
         )
         
-        # Filter out meta-codes
+        # Filter out internal meta-codes
         filtered = [
             (code, prob) for code, prob in sorted_probs
-            if code not in ['__NO_ERROR__', '__RARE__']
+            if not code.startswith('__')
         ]
         
         return filtered[:top_n]
