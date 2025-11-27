@@ -128,6 +128,39 @@ def validate_iban(iban: str) -> Tuple[bool, bool]:
     return format_valid, checksum_valid
 
 
+def validate_fedaba(aba: str) -> Tuple[bool, bool]:
+    """
+    Validate US ABA routing number (FEDABA).
+    
+    ABA routing numbers are 9 digits with a specific checksum:
+    - Digits weighted: 3, 7, 1, 3, 7, 1, 3, 7, 1
+    - Sum of (digit * weight) mod 10 must equal 0
+    
+    Returns:
+        Tuple of (format_valid, checksum_valid)
+    """
+    if not aba:
+        return False, False
+    
+    aba = aba.strip()
+    
+    # Must be exactly 9 digits
+    if len(aba) != 9 or not aba.isdigit():
+        return False, False
+    
+    format_valid = True
+    
+    # ABA checksum algorithm
+    try:
+        weights = [3, 7, 1, 3, 7, 1, 3, 7, 1]
+        total = sum(int(d) * w for d, w in zip(aba, weights))
+        checksum_valid = (total % 10 == 0)
+    except (ValueError, TypeError):
+        checksum_valid = False
+    
+    return format_valid, checksum_valid
+
+
 def detect_account_type(account: str, account_type: str = None) -> Dict[str, bool]:
     """
     Detect specific account identifier types.
@@ -297,6 +330,19 @@ class PartyInfo:
     address_country: Optional[str] = None  # Country code extracted from address line 3
     is_domestic: bool = False  # True if address country is US
     is_international: bool = False  # True if address country is non-US
+    # NCH/Clearing code features (for 8026, 8895)
+    has_nch: bool = False  # Has any national clearing house code
+    nch_type: Optional[str] = None  # FEDABA, CHIPS, SORTCODE, etc.
+    nch_value: Optional[str] = None  # The actual clearing code
+    nch_valid: bool = False  # Is the NCH code valid format
+    fedaba_checksum_valid: bool = False  # Does FEDABA pass ABA checksum
+    has_adr_bank_id: bool = False  # Has AdrBankID field
+    adr_bank_id_type: Optional[str] = None  # Type of AdrBankID (FEDABA, CHIPS, etc.)
+    # IBAN requirement indicator (for 8004)
+    needs_iban: bool = False  # International payment that should have IBAN
+    has_iban: bool = False  # Explicit IBAN present
+    # Multi-source indicators (for 8026 - NCH inconsistency)
+    nch_sources: int = 0  # Count of NCH sources (account, BIC, IBAN)
 
 
 @dataclass 
@@ -702,6 +748,82 @@ class IFMLParser:
         if party.bic_country and party.country:
             party.bic_party_country_match = (party.bic_country == party.country.upper())
         
+        # === NCH/Clearing Code Features (for 8026, 8895) ===
+        
+        # Check AdrBankID for NCH codes
+        adr_bank_id = basic_info.get('AdrBankID')
+        if adr_bank_id:
+            party.has_adr_bank_id = True
+            if isinstance(adr_bank_id, dict):
+                party.adr_bank_id_type = adr_bank_id.get('@Type') or adr_bank_id.get('Type')
+                adr_value = adr_bank_id.get('#text') or adr_bank_id.get('text')
+                
+                # Check for NCH types
+                if party.adr_bank_id_type in ['FEDABA', 'FW', 'FEDWIRE']:
+                    party.has_nch = True
+                    party.nch_type = 'FEDABA'
+                    party.nch_value = adr_value
+                    if adr_value:
+                        fmt_valid, cksum_valid = validate_fedaba(adr_value)
+                        party.nch_valid = fmt_valid
+                        party.fedaba_checksum_valid = cksum_valid
+                elif party.adr_bank_id_type in ['CHIPS', 'CH', 'CHIPSABA']:
+                    party.has_nch = True
+                    party.nch_type = 'CHIPS'
+                    party.nch_value = adr_value
+                    # CHIPS ABA is 6 digits
+                    party.nch_valid = adr_value and len(adr_value) == 6 and adr_value.isdigit()
+                elif party.adr_bank_id_type in ['SORTCODE', 'SC', 'UKSC']:
+                    party.has_nch = True
+                    party.nch_type = 'SORTCODE'
+                    party.nch_value = adr_value
+                    # UK Sort Code is 6 digits
+                    party.nch_valid = adr_value and len(adr_value.replace('-', '')) == 6
+        
+        # Detect NCH from account number if FEDABA detected
+        if party.is_fedaba and party.account_value:
+            party.has_nch = True
+            party.nch_type = party.nch_type or 'FEDABA'
+            party.nch_value = party.nch_value or party.account_value
+            fmt_valid, cksum_valid = validate_fedaba(party.account_value)
+            party.nch_valid = party.nch_valid or fmt_valid
+            party.fedaba_checksum_valid = party.fedaba_checksum_valid or cksum_valid
+        
+        if party.is_chips_aba and party.account_value:
+            party.has_nch = True
+            party.nch_type = party.nch_type or 'CHIPS'
+        
+        # === IBAN Requirement Features (for 8004) ===
+        # International payments to IBAN countries should have IBAN
+        party.has_iban = (party.account_type == 'IBAN')
+        
+        # IBAN is typically needed for international payments to Europe, etc.
+        iban_countries = {
+            'DE', 'FR', 'GB', 'ES', 'IT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI',
+            'PL', 'PT', 'IE', 'GR', 'CZ', 'HU', 'RO', 'SK', 'LU', 'HR', 'SI', 'BG', 'LT',
+            'LV', 'EE', 'CY', 'MT', 'AE', 'SA', 'QA', 'KW', 'BH', 'IL', 'TR', 'EG', 'MA'
+        }
+        
+        # Determine if this party needs IBAN based on country
+        party_country = (
+            party.bic_country or 
+            party.iban_country or 
+            party.country or 
+            party.address_country
+        )
+        if party_country and party_country.upper() in iban_countries:
+            party.needs_iban = True
+        
+        # Count NCH sources for inconsistency detection (8026)
+        nch_sources = 0
+        if party.is_fedaba or party.is_chips_aba:
+            nch_sources += 1  # From account
+        if party.has_adr_bank_id and party.adr_bank_id_type in ['FEDABA', 'FW', 'FEDWIRE', 'CHIPS', 'CH']:
+            nch_sources += 1  # From AdrBankID
+        if party.bic and party.bic_country == 'US':
+            nch_sources += 1  # Could derive NCH from BIC
+        party.nch_sources = nch_sources
+        
         return party
     
     def _parse_bank_info(self, basic_payment: dict, features: IFMLFeatures):
@@ -801,6 +923,18 @@ class IFMLParser:
                 result[f'{prefix}_address_country'] = party.address_country
                 result[f'{prefix}_is_domestic'] = party.is_domestic
                 result[f'{prefix}_is_international'] = party.is_international
+                # NCH/Clearing code features (for 8026, 8895)
+                result[f'{prefix}_has_nch'] = party.has_nch
+                result[f'{prefix}_nch_type'] = party.nch_type
+                result[f'{prefix}_nch_valid'] = party.nch_valid
+                result[f'{prefix}_fedaba_checksum_valid'] = party.fedaba_checksum_valid
+                result[f'{prefix}_has_adr_bank_id'] = party.has_adr_bank_id
+                result[f'{prefix}_adr_bank_id_type'] = party.adr_bank_id_type
+                # IBAN requirement features (for 8004)
+                result[f'{prefix}_has_iban'] = party.has_iban
+                result[f'{prefix}_needs_iban'] = party.needs_iban
+                # NCH source count (for 8026 - inconsistency)
+                result[f'{prefix}_nch_sources'] = party.nch_sources
             else:
                 result[f'{prefix}_present'] = False
                 result[f'{prefix}_has_id'] = False
@@ -830,6 +964,18 @@ class IFMLParser:
                 result[f'{prefix}_address_country'] = None
                 result[f'{prefix}_is_domestic'] = False
                 result[f'{prefix}_is_international'] = False
+                # NCH/Clearing code features (for 8026, 8895)
+                result[f'{prefix}_has_nch'] = False
+                result[f'{prefix}_nch_type'] = None
+                result[f'{prefix}_nch_valid'] = False
+                result[f'{prefix}_fedaba_checksum_valid'] = False
+                result[f'{prefix}_has_adr_bank_id'] = False
+                result[f'{prefix}_adr_bank_id_type'] = None
+                # IBAN requirement features (for 8004)
+                result[f'{prefix}_has_iban'] = False
+                result[f'{prefix}_needs_iban'] = False
+                # NCH source count (for 8026 - inconsistency)
+                result[f'{prefix}_nch_sources'] = 0
         
         return result
     
