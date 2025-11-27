@@ -295,16 +295,19 @@ class ACEPredictor:
     def _apply_mutual_exclusivity(self, 
                                    predicted_codes: List[str], 
                                    code_probs: Dict[str, float],
-                                   feature_dict: Dict[str, Any]) -> List[str]:
+                                   feature_dict: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         """
         Apply mutual exclusivity rules to filter conflicting predictions.
         
         Uses rules from:
         1. Loaded exclusion_rules.json (data-driven)
         2. Built-in rules (semantic knowledge)
+        
+        Returns:
+            Tuple of (filtered_codes, warnings)
         """
         if not predicted_codes:
-            return predicted_codes
+            return predicted_codes, []
         
         codes_to_remove = set()
         
