@@ -106,7 +106,8 @@ class ACEPredictor:
     
     def predict(self, ifml_json: dict, 
                 threshold: Optional[float] = None,
-                include_explanation: bool = True) -> PredictionResult:
+                include_explanation: bool = True,
+                composite_only: bool = True) -> PredictionResult:
         """
         Predict error codes for a single IFML request.
         
@@ -114,6 +115,8 @@ class ACEPredictor:
             ifml_json: IFML request as JSON dict
             threshold: Probability threshold for positive prediction (default 0.5)
             include_explanation: Whether to include feature explanations
+            composite_only: If True, only return composite codes (e.g., 8895_BNFBNK). 
+                           If False, also include base codes (e.g., 8895)
         
         Returns:
             PredictionResult with predictions and explanations
@@ -176,7 +179,16 @@ class ACEPredictor:
                     if code.startswith('__'):
                         continue
                     
-                    if prob >= threshold:
+                    # Get per-code threshold (from config or default)
+                    high_threshold_codes = self.prediction_config.get('high_threshold_codes', {})
+                    code_threshold = high_threshold_codes.get(code, threshold)
+                    
+                    # Also check base code (e.g., if 8895_BNFBNK not in config, check 8895)
+                    if code_threshold == threshold and '_' in code:
+                        base_code = code.split('_')[0]
+                        code_threshold = high_threshold_codes.get(base_code, threshold)
+                    
+                    if prob >= code_threshold:
                         predicted_codes.append(code)
         
         # Check rare code detectors
@@ -187,7 +199,12 @@ class ACEPredictor:
                     rare_prob = detector.predict_proba(X)[0, 1]
                     if code not in code_probs or rare_prob > code_probs[code]:
                         code_probs[code] = float(rare_prob)
-                        if rare_prob >= threshold and code not in predicted_codes:
+                        
+                        # Get per-code threshold
+                        high_threshold_codes = self.prediction_config.get('high_threshold_codes', {})
+                        code_threshold = high_threshold_codes.get(code, threshold)
+                        
+                        if rare_prob >= code_threshold and code not in predicted_codes:
                             predicted_codes.append(code)
                             warnings.append(f"Rare code {code} detected by anomaly model")
             except Exception as e:
@@ -218,14 +235,33 @@ class ACEPredictor:
             except Exception as e:
                 warnings.append(f"Explanation generation failed: {str(e)}")
         
+        # Filter out base codes - only keep party-specific codes (e.g., 8895_BNFBNK not 8895)
+        # ACE Pelican always returns codes with party info
+        # Pattern: code_PARTY where code is digits and PARTY is letters
+        def is_composite_code(code):
+            if not code or code.startswith('__'):
+                return False
+            parts = code.split('_')
+            return len(parts) >= 2 and parts[0].isdigit()
+        
+        if composite_only:
+            predicted_codes = [c for c in predicted_codes if is_composite_code(c)]
+        else:
+            # Remove internal classes like __NO_8XXX__
+            predicted_codes = [c for c in predicted_codes if not c.startswith('__')]
+        
         # Sort predicted codes by probability
         predicted_codes = sorted(predicted_codes, 
                                 key=lambda c: code_probs.get(c, 0), 
                                 reverse=True)
         
         # Filter probabilities to only codes above threshold (exclude internal classes)
-        filtered_probs = {k: v for k, v in code_probs.items() 
-                        if v >= threshold and not k.startswith('__')}
+        if composite_only:
+            filtered_probs = {k: v for k, v in code_probs.items() 
+                            if v >= threshold and is_composite_code(k)}
+        else:
+            filtered_probs = {k: v for k, v in code_probs.items() 
+                            if v >= threshold and not k.startswith('__')}
         
         return PredictionResult(
             transaction_id=txn_id,
