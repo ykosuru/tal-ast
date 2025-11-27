@@ -1298,14 +1298,17 @@ def show_feature_importance(model_dir: str, top_n: int = 30, code: str = None, a
         with open(model_path_file, 'rb') as f:
             model = pickle.load(f)
         
-        # Load feature names
-        feature_engineer_path = model_path / 'feature_engineer.pkl'
-        if feature_engineer_path.exists():
-            with open(feature_engineer_path, 'rb') as f:
-                fe = pickle.load(f)
-            feature_names = getattr(fe, 'feature_columns', [])
+        # Load feature names - prefer from model itself, fallback to feature_engineer
+        feature_names = []
+        if hasattr(model, 'feature_names') and model.feature_names:
+            feature_names = model.feature_names
+            print(f"  Using feature names from model: {len(feature_names)} features")
         else:
-            feature_names = []
+            feature_engineer_path = model_path / 'feature_engineer.pkl'
+            if feature_engineer_path.exists():
+                with open(feature_engineer_path, 'rb') as f:
+                    fe = pickle.load(f)
+                feature_names = getattr(fe, 'feature_columns', [])
         
         print(f"\nSingle model loaded from {model_path_file}")
         _print_model_importance(model, feature_names, top_n)
@@ -1330,31 +1333,49 @@ def _get_importance_dict(model, feature_names: list) -> dict:
     """Extract importance as dict from model."""
     importances = None
     
-    if hasattr(model, 'feature_importances_'):
-        importances = model.feature_importances_
-    elif hasattr(model, 'model') and hasattr(model.model, 'feature_importances_'):
-        importances = model.model.feature_importances_
-    elif hasattr(model, 'model') and hasattr(model.model, 'estimators_'):
-        # MultiOutput
+    # Handle ACEErrorCodeModel wrapper
+    actual_model = model
+    actual_feature_names = feature_names
+    
+    # Check if it's ACEErrorCodeModel (has model attribute and feature_names)
+    if hasattr(model, 'model') and hasattr(model, 'feature_names'):
+        actual_model = model.model
+        if model.feature_names:
+            actual_feature_names = model.feature_names
+    
+    # Now extract from actual_model
+    if hasattr(actual_model, 'feature_importances_'):
+        importances = actual_model.feature_importances_
+    elif hasattr(actual_model, 'estimators_'):
+        # MultiOutputClassifier - average across estimators
         try:
-            importances = np.mean([
-                est.feature_importances_ for est in model.model.estimators_
-                if hasattr(est, 'feature_importances_')
-            ], axis=0)
-        except:
-            pass
+            est_importances = []
+            for est in actual_model.estimators_:
+                if hasattr(est, 'feature_importances_'):
+                    est_importances.append(est.feature_importances_)
+            if est_importances:
+                importances = np.mean(est_importances, axis=0)
+        except Exception as e:
+            print(f"  Error extracting from estimators: {e}")
     
     if importances is None:
         return {}
     
-    if len(feature_names) != len(importances):
-        feature_names = [f'f{i}' for i in range(len(importances))]
+    if len(actual_feature_names) != len(importances):
+        actual_feature_names = [f'f{i}' for i in range(len(importances))]
     
-    return dict(zip(feature_names, importances))
+    return dict(zip(actual_feature_names, importances))
 
 
 def _print_model_importance(model, feature_names: list, top_n: int):
     """Print feature importance from a model."""
+    # Debug info
+    print(f"  Model type: {type(model).__name__}")
+    if hasattr(model, 'model'):
+        print(f"  Inner model type: {type(model.model).__name__}")
+        if hasattr(model.model, 'estimators_'):
+            print(f"  Num estimators: {len(model.model.estimators_)}")
+    
     imp_dict = _get_importance_dict(model, feature_names)
     
     if not imp_dict:
@@ -1363,7 +1384,7 @@ def _print_model_importance(model, feature_names: list, top_n: int):
     
     sorted_imp = sorted(imp_dict.items(), key=lambda x: -x[1])[:top_n]
     
-    print(f"{'Rank':<5} {'Feature':<50} {'Importance'}")
+    print(f"\n{'Rank':<5} {'Feature':<50} {'Importance'}")
     print("-" * 70)
     for rank, (feat, imp) in enumerate(sorted_imp, 1):
         bar = '█' * int(imp * 100)
