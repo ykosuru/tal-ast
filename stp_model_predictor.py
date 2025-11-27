@@ -49,6 +49,11 @@ class ACEPredictor:
         self.threshold: float = 0.5
         self.loaded = False
         self.exclusion_rules: Dict = {}  # Loaded from exclusion_rules.json
+        self.prediction_config: Dict = {  # Defaults, can be overridden by prediction_config.json
+            'negative_margin': 0.1,  # Code must beat __NO_XXXX__ by this margin
+            'suppressed_codes': [],  # Codes to always suppress
+            'high_threshold_codes': {},  # code -> threshold for codes needing higher confidence
+        }
         
         self._load_models()
     
@@ -89,6 +94,13 @@ class ACEPredictor:
         if rules_path.exists():
             with open(rules_path, 'r') as f:
                 self.exclusion_rules = json.load(f)
+        
+        # Load prediction config if present (allows tuning without code changes)
+        config_path = self.model_dir / 'prediction_config.json'
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                loaded_config = json.load(f)
+                self.prediction_config.update(loaded_config)
         
         self.loaded = True
     
@@ -167,21 +179,55 @@ class ACEPredictor:
                     if prob >= threshold:
                         predicted_codes.append(code)
         
-        # Suppress predictions for series where __NO_XXXX__ has high probability
+        # Apply prediction config filters
+        suppressed_codes = set(self.prediction_config.get('suppressed_codes', []))
+        high_threshold_codes = self.prediction_config.get('high_threshold_codes', {})
+        
+        # Filter by suppressed codes list
+        if suppressed_codes:
+            before = len(predicted_codes)
+            predicted_codes = [c for c in predicted_codes 
+                              if c.split('_')[0] not in suppressed_codes]
+            if len(predicted_codes) < before:
+                warnings.append(f"Suppressed {before - len(predicted_codes)} codes from suppressed_codes list")
+        
+        # Filter by high threshold codes (require higher confidence for certain codes)
+        if high_threshold_codes:
+            filtered = []
+            for code in predicted_codes:
+                base_code = code.split('_')[0]
+                required_threshold = high_threshold_codes.get(base_code)
+                if required_threshold and code_probs.get(code, 0) < required_threshold:
+                    warnings.append(f"Suppressed {code} (prob {code_probs.get(code, 0):.2f} < required {required_threshold})")
+                else:
+                    filtered.append(code)
+            predicted_codes = filtered
+        
+        # Strict suppression: code must beat __NO_XXXX__ by margin to be predicted
+        # This eliminates false positives when model is uncertain
         if no_series_probs:
-            suppressed_series = set()
-            for series, no_prob in no_series_probs.items():
-                if no_prob >= threshold:
-                    suppressed_series.add(series)
+            margin = self.prediction_config.get('negative_margin', 0.1)
+            filtered_codes = []
             
-            if suppressed_series:
-                before_count = len(predicted_codes)
-                predicted_codes = [
-                    c for c in predicted_codes 
-                    if not any(c.split('_')[0].startswith(s) for s in suppressed_series)
-                ]
-                if len(predicted_codes) < before_count:
-                    warnings.append(f"Suppressed {before_count - len(predicted_codes)} codes (series {suppressed_series} has high no-error probability)")
+            for code in predicted_codes:
+                base_code = code.split('_')[0]
+                # Find which series this code belongs to
+                code_series = base_code[0] if base_code and base_code[0].isdigit() else None
+                
+                if code_series and code_series in no_series_probs:
+                    no_error_prob = no_series_probs[code_series]
+                    code_prob = code_probs.get(code, 0)
+                    
+                    # Only keep if code probability beats no-error by margin
+                    if code_prob > no_error_prob + margin:
+                        filtered_codes.append(code)
+                    else:
+                        warnings.append(f"Suppressed {code} (prob {code_prob:.2f} <= __NO_{code_series}XXX__ {no_error_prob:.2f} + {margin})")
+                else:
+                    # No negative class for this series, keep the prediction
+                    filtered_codes.append(code)
+            
+            predicted_codes = filtered_codes
         
         # Check rare code detectors
         for code, detector in self.rare_detectors.items():
@@ -203,10 +249,11 @@ class ACEPredictor:
         else:
             confidence = code_probs.get('__NO_ERROR__', 1.0)
         
-        # Post-filter: Apply mutual exclusivity rules
-        predicted_codes = self._apply_mutual_exclusivity(
+        # Post-filter: Apply mutual exclusivity and semantic rules
+        predicted_codes, semantic_warnings = self._apply_mutual_exclusivity(
             predicted_codes, code_probs, feature_dict
         )
+        warnings.extend(semantic_warnings)
         
         # Generate explanations
         explanations = []
@@ -327,7 +374,86 @@ class ACEPredictor:
         # Filter out codes to remove
         filtered_codes = [c for c in predicted_codes if c not in codes_to_remove]
         
-        return filtered_codes
+        # Apply semantic validation filters
+        filtered_codes, semantic_warnings = self._apply_semantic_filters(filtered_codes, feature_dict)
+        
+        return filtered_codes, semantic_warnings
+    
+    def _apply_semantic_filters(self, predicted_codes: List[str], 
+                                 feature_dict: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+        """
+        Filter predictions based on semantic validation rules.
+        
+        Each code has specific conditions under which it makes sense.
+        If conditions aren't met, the prediction is likely a false positive.
+        
+        Returns:
+            Tuple of (filtered_codes, warnings)
+        """
+        if not predicted_codes:
+            return predicted_codes, []
+        
+        warnings = []
+        
+        # Determine payment characteristics from all parties
+        parties = ['cdt', 'bnf', 'dbt', 'orig', 'send', 'intm']
+        
+        is_domestic = any(feature_dict.get(f'{p}_is_domestic', False) for p in parties)
+        is_international = any(feature_dict.get(f'{p}_is_international', False) for p in parties)
+        
+        # If no address country detected, we can't filter semantically
+        has_address_info = is_domestic or is_international
+        
+        # Check if IBAN exists anywhere
+        has_iban = any(
+            feature_dict.get(f'{p}_account_type') == 'IBAN' or
+            feature_dict.get(f'{p}_iban_country') is not None
+            for p in parties
+        )
+        
+        # Check if BIC exists anywhere
+        has_bic = any(feature_dict.get(f'{p}_has_bic', False) for p in parties)
+        
+        # Define semantic rules
+        # IBAN-related codes should NOT fire for purely domestic (US-only) payments
+        iban_codes = {'8004', '8022', '8894'}  # IBAN cannot be derived, IBAN/BIC mismatch, Invalid IBAN
+        
+        # Domestic-related codes should NOT fire for international payments
+        domestic_codes = {'8895', '8896'}  # Invalid NCH, Invalid Domestic Account
+        
+        # BIC-related codes need BIC to be present
+        bic_codes = {'8001', '8005', '8006'}
+        
+        filtered_codes = []
+        for code in predicted_codes:
+            base_code = code.split('_')[0]
+            keep = True
+            reason = None
+            
+            # Check IBAN codes - suppress if domestic-only and no IBAN present
+            if base_code in iban_codes:
+                if has_address_info and is_domestic and not is_international and not has_iban:
+                    keep = False
+                    reason = f"domestic payment without IBAN"
+            
+            # Check domestic codes - suppress if international
+            elif base_code in domestic_codes:
+                if has_address_info and is_international and not is_domestic:
+                    keep = False
+                    reason = f"international payment"
+            
+            # Check BIC codes - suppress if no BIC present
+            elif base_code in bic_codes:
+                if not has_bic:
+                    keep = False
+                    reason = f"no BIC present"
+            
+            if keep:
+                filtered_codes.append(code)
+            else:
+                warnings.append(f"Semantic filter: {code} suppressed ({reason})")
+        
+        return filtered_codes, warnings
     
     def _resolve_conflict(self, code1: str, code2: str, resolution: str,
                           feature_dict: Dict, code_probs: Dict) -> Optional[str]:
