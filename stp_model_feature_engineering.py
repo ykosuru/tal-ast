@@ -19,14 +19,16 @@ class IFMLFeatureEngineer:
     """
     
     # Columns that should be one-hot encoded (low cardinality)
+    # NOTE: source_code removed - spurious correlation with error codes
     ONEHOT_COLS = [
-        'source_code', 'incoming_msg_type', 'incoming_format',
+        'incoming_msg_type', 'incoming_format',
         'bank_operation_code'
     ]
     
     # Columns that should be target/frequency encoded (high cardinality)
+    # NOTE: primary_currency removed - spurious correlation with error codes
     FREQUENCY_COLS = [
-        'primary_currency', 'originator_country', 'beneficiary_country',
+        'originator_country', 'beneficiary_country',
         'cdt_country', 'bnf_country', 'dbt_country', 'intm_country',
         # BIC country codes
         'orig_bic_country', 'send_bic_country', 'dbt_bic_country',
