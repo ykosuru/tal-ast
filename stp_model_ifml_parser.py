@@ -345,6 +345,36 @@ class PartyInfo:
     nch_sources: int = 0  # Count of NCH sources (account, BIC, IBAN)
     # NCH validation applicability (for 8895)
     nch_validation_applicable: bool = False  # True only for US domestic payments
+    
+    # === REPAIR DETECTION FEATURES (for 9XXX codes) ===
+    # 9002, 9009, 9014, 9015, 9019, 9020: Cleaning features
+    account_has_dirty_chars: bool = False  # Non-alphanumeric in account number
+    name_has_dirty_chars: bool = False  # Non-alphanumeric in name (beyond normal punctuation)
+    account_has_spaces: bool = False  # Spaces in account (needs cleaning)
+    account_has_special_chars: bool = False  # Special chars like -/. in account
+    
+    # 9004, 9007, 9018: IBAN derivation features
+    is_iban_derivable: bool = False  # Has country + account, could derive IBAN
+    has_bban_in_iban_country: bool = False  # Has BBAN but in IBAN-required country
+    
+    # 9005, 9008: BIC derivation features  
+    is_bic_derivable: bool = False  # Has NCH or IBAN, could derive BIC
+    has_nch_no_bic: bool = False  # Has NCH but no BIC (BIC derivable from NCH)
+    has_iban_no_bic: bool = False  # Has IBAN but no BIC (BIC derivable from IBAN)
+    
+    # 9000, 9021, 9028: NCH repair features
+    nch_has_dirty_chars: bool = False  # NCH needs cleaning
+    nch_needs_formatting: bool = False  # NCH wrong length/format but fixable
+    
+    # 9017, 9018: Duplicate/multiple party features
+    has_multiple_ids: bool = False  # Multiple ID values present
+    has_duplicate_info: bool = False  # Duplicate information detected
+    
+    # 9022: Account formatting features
+    account_needs_length_fix: bool = False  # Account too short/long for type
+    
+    # 9006, 9012: IBAN formatting features
+    iban_needs_formatting: bool = False  # IBAN present but needs cleanup/formatting
 
 
 @dataclass 
@@ -843,6 +873,84 @@ class IFMLParser:
         has_us_routing = party.is_fedaba or party.is_chips_aba or party.nch_type in ['FEDABA', 'CHIPS']
         party.nch_validation_applicable = is_us_party or (not party_country and has_us_routing)
         
+        # === REPAIR DETECTION FEATURES (for 9XXX codes) ===
+        
+        # 9002, 9009, 9014, 9015: Account cleaning detection
+        if party.account_value:
+            acct = party.account_value
+            # Check for dirty chars (non-alphanumeric)
+            has_non_alnum = bool(re.search(r'[^a-zA-Z0-9]', acct))
+            party.account_has_dirty_chars = has_non_alnum
+            party.account_has_spaces = ' ' in acct
+            party.account_has_special_chars = bool(re.search(r'[-/.\\]', acct))
+        
+        # Name cleaning detection (beyond normal punctuation)
+        if hasattr(party, 'has_name') and party.has_name:
+            # Name has dirty chars if it contains unusual characters
+            # Note: names commonly have spaces, periods, commas - so we look for unusual ones
+            name_val = basic_info.get('Name', '') or ''
+            if isinstance(name_val, dict):
+                name_val = name_val.get('#text', '') or name_val.get('text', '')
+            if name_val:
+                # Unusual chars in names: digits, @, #, $, %, etc.
+                party.name_has_dirty_chars = bool(re.search(r'[@#$%^*=+\[\]{}|\\<>]', str(name_val)))
+        
+        # 9004, 9007: IBAN derivation detection
+        # Can derive IBAN if: has country + has account number + in IBAN country + no IBAN yet
+        if party_country and party.has_account and not party.has_iban:
+            if party_country.upper() in iban_countries:
+                party.is_iban_derivable = True
+                party.has_bban_in_iban_country = (party.account_type in ['BBAN', 'D', 'DDA', None])
+        
+        # 9005, 9008: BIC derivation detection
+        # Can derive BIC if: has NCH (US) or has IBAN, but no BIC
+        if not party.has_bic:
+            if party.has_nch or party.is_fedaba or party.is_chips_aba:
+                party.is_bic_derivable = True
+                party.has_nch_no_bic = True
+            if party.has_iban:
+                party.is_bic_derivable = True
+                party.has_iban_no_bic = True
+        
+        # 9000, 9021, 9028: NCH repair detection
+        if party.nch_value:
+            nch = party.nch_value
+            # NCH has dirty chars
+            party.nch_has_dirty_chars = bool(re.search(r'[^0-9]', nch))
+            # NCH needs formatting (wrong length for type)
+            if party.nch_type == 'FEDABA' and len(nch.replace('-', '').replace(' ', '')) != 9:
+                party.nch_needs_formatting = True
+            elif party.nch_type == 'CHIPS' and len(nch.replace('-', '').replace(' ', '')) != 6:
+                party.nch_needs_formatting = True
+        
+        # 9017, 9018: Multiple/duplicate info detection
+        # Check if multiple IDs present
+        id_info = basic_info.get('ID', {})
+        if isinstance(id_info, list) and len(id_info) > 1:
+            party.has_multiple_ids = True
+            party.has_duplicate_info = True
+        
+        # 9022: Account length issues
+        if party.account_value and party.account_type:
+            acct_len = len(party.account_value.replace(' ', '').replace('-', ''))
+            # Expected lengths by type
+            expected_lengths = {
+                'IBAN': (15, 34),  # Range
+                'CLABE': (18, 18),
+                'FEDABA': (9, 9),
+            }
+            if party.account_type in expected_lengths:
+                min_len, max_len = expected_lengths[party.account_type]
+                if acct_len < min_len or acct_len > max_len:
+                    party.account_needs_length_fix = True
+        
+        # 9006, 9012: IBAN formatting detection
+        if party.has_iban and party.account_value:
+            iban = party.account_value
+            # IBAN needs formatting if: has spaces, lowercase, or wrong structure
+            if ' ' in iban or iban != iban.upper() or not iban[:2].isalpha():
+                party.iban_needs_formatting = True
+        
         return party
     
     def _parse_bank_info(self, basic_payment: dict, features: IFMLFeatures):
@@ -956,6 +1064,29 @@ class IFMLParser:
                 result[f'{prefix}_nch_sources'] = party.nch_sources
                 # NCH validation applicability (for 8895)
                 result[f'{prefix}_nch_validation_applicable'] = party.nch_validation_applicable
+                # === REPAIR DETECTION FEATURES (for 9XXX) ===
+                # Cleaning features (9002, 9009, 9014, 9015)
+                result[f'{prefix}_account_has_dirty_chars'] = party.account_has_dirty_chars
+                result[f'{prefix}_name_has_dirty_chars'] = party.name_has_dirty_chars
+                result[f'{prefix}_account_has_spaces'] = party.account_has_spaces
+                result[f'{prefix}_account_has_special_chars'] = party.account_has_special_chars
+                # IBAN derivation (9004, 9007)
+                result[f'{prefix}_is_iban_derivable'] = party.is_iban_derivable
+                result[f'{prefix}_has_bban_in_iban_country'] = party.has_bban_in_iban_country
+                # BIC derivation (9005, 9008)
+                result[f'{prefix}_is_bic_derivable'] = party.is_bic_derivable
+                result[f'{prefix}_has_nch_no_bic'] = party.has_nch_no_bic
+                result[f'{prefix}_has_iban_no_bic'] = party.has_iban_no_bic
+                # NCH repair (9000, 9021, 9028)
+                result[f'{prefix}_nch_has_dirty_chars'] = party.nch_has_dirty_chars
+                result[f'{prefix}_nch_needs_formatting'] = party.nch_needs_formatting
+                # Multiple/duplicate (9017, 9018)
+                result[f'{prefix}_has_multiple_ids'] = party.has_multiple_ids
+                result[f'{prefix}_has_duplicate_info'] = party.has_duplicate_info
+                # Account formatting (9022)
+                result[f'{prefix}_account_needs_length_fix'] = party.account_needs_length_fix
+                # IBAN formatting (9006, 9012)
+                result[f'{prefix}_iban_needs_formatting'] = party.iban_needs_formatting
             else:
                 result[f'{prefix}_present'] = False
                 result[f'{prefix}_has_id'] = False
@@ -999,6 +1130,29 @@ class IFMLParser:
                 result[f'{prefix}_nch_sources'] = 0
                 # NCH validation applicability (for 8895)
                 result[f'{prefix}_nch_validation_applicable'] = False
+                # === REPAIR DETECTION FEATURES (for 9XXX) ===
+                # Cleaning features (9002, 9009, 9014, 9015)
+                result[f'{prefix}_account_has_dirty_chars'] = False
+                result[f'{prefix}_name_has_dirty_chars'] = False
+                result[f'{prefix}_account_has_spaces'] = False
+                result[f'{prefix}_account_has_special_chars'] = False
+                # IBAN derivation (9004, 9007)
+                result[f'{prefix}_is_iban_derivable'] = False
+                result[f'{prefix}_has_bban_in_iban_country'] = False
+                # BIC derivation (9005, 9008)
+                result[f'{prefix}_is_bic_derivable'] = False
+                result[f'{prefix}_has_nch_no_bic'] = False
+                result[f'{prefix}_has_iban_no_bic'] = False
+                # NCH repair (9000, 9021, 9028)
+                result[f'{prefix}_nch_has_dirty_chars'] = False
+                result[f'{prefix}_nch_needs_formatting'] = False
+                # Multiple/duplicate (9017, 9018)
+                result[f'{prefix}_has_multiple_ids'] = False
+                result[f'{prefix}_has_duplicate_info'] = False
+                # Account formatting (9022)
+                result[f'{prefix}_account_needs_length_fix'] = False
+                # IBAN formatting (9006, 9012)
+                result[f'{prefix}_iban_needs_formatting'] = False
         
         return result
     
