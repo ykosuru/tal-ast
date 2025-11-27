@@ -75,6 +75,20 @@ class IFMLFeatureEngineer:
         'cdt_is_domestic', 'intm_is_domestic', 'bnf_is_domestic',
         'orig_is_international', 'send_is_international', 'dbt_is_international',
         'cdt_is_international', 'intm_is_international', 'bnf_is_international',
+        # NCH/Clearing code flags (for 8026, 8895)
+        'orig_has_nch', 'send_has_nch', 'dbt_has_nch',
+        'cdt_has_nch', 'intm_has_nch', 'bnf_has_nch',
+        'orig_nch_valid', 'send_nch_valid', 'dbt_nch_valid',
+        'cdt_nch_valid', 'intm_nch_valid', 'bnf_nch_valid',
+        'orig_fedaba_checksum_valid', 'send_fedaba_checksum_valid', 'dbt_fedaba_checksum_valid',
+        'cdt_fedaba_checksum_valid', 'intm_fedaba_checksum_valid', 'bnf_fedaba_checksum_valid',
+        'orig_has_adr_bank_id', 'send_has_adr_bank_id', 'dbt_has_adr_bank_id',
+        'cdt_has_adr_bank_id', 'intm_has_adr_bank_id', 'bnf_has_adr_bank_id',
+        # IBAN requirement flags (for 8004)
+        'orig_has_iban', 'send_has_iban', 'dbt_has_iban',
+        'cdt_has_iban', 'intm_has_iban', 'bnf_has_iban',
+        'orig_needs_iban', 'send_needs_iban', 'dbt_needs_iban',
+        'cdt_needs_iban', 'intm_needs_iban', 'bnf_needs_iban',
     ]
     
     # Numeric columns
@@ -88,11 +102,22 @@ class IFMLFeatureEngineer:
         # Account lengths
         'orig_account_length', 'send_account_length', 'dbt_account_length',
         'cdt_account_length', 'intm_account_length', 'bnf_account_length',
+        # NCH source count (for 8026 - inconsistency detection)
+        'orig_nch_sources', 'send_nch_sources', 'dbt_nch_sources',
+        'cdt_nch_sources', 'intm_nch_sources', 'bnf_nch_sources',
     ]
     
     # Account type columns (categorical)
     ACCOUNT_TYPE_COLS = [
         'cdt_account_type', 'dbt_account_type', 'bnf_account_type'
+    ]
+    
+    # NCH type columns (categorical) - FEDABA, CHIPS, SORTCODE, etc.
+    NCH_TYPE_COLS = [
+        'orig_nch_type', 'send_nch_type', 'dbt_nch_type',
+        'cdt_nch_type', 'intm_nch_type', 'bnf_nch_type',
+        'orig_adr_bank_id_type', 'send_adr_bank_id_type', 'dbt_adr_bank_id_type',
+        'cdt_adr_bank_id_type', 'intm_adr_bank_id_type', 'bnf_adr_bank_id_type',
     ]
     
     def __init__(self):
@@ -126,6 +151,14 @@ class IFMLFeatureEngineer:
         
         # Fit account type encoding
         for col in self.ACCOUNT_TYPE_COLS:
+            if col in df.columns:
+                le = LabelEncoder()
+                values = df[col].fillna('__missing__').astype(str).tolist() + ['__unknown__']
+                le.fit(values)
+                self.label_encoders[col] = le
+        
+        # Fit NCH type encoding
+        for col in self.NCH_TYPE_COLS:
             if col in df.columns:
                 le = LabelEncoder()
                 values = df[col].fillna('__missing__').astype(str).tolist() + ['__unknown__']
@@ -181,6 +214,14 @@ class IFMLFeatureEngineer:
         
         # Account type encoding
         for col in self.ACCOUNT_TYPE_COLS:
+            if col in df.columns and col in self.label_encoders:
+                le = self.label_encoders[col]
+                values = df[col].fillna('__missing__').astype(str)
+                values = values.apply(lambda x: x if x in le.classes_ else '__unknown__')
+                result[f'{col}_encoded'] = le.transform(values)
+        
+        # NCH type encoding
+        for col in self.NCH_TYPE_COLS:
             if col in df.columns and col in self.label_encoders:
                 le = self.label_encoders[col]
                 values = df[col].fillna('__missing__').astype(str)
@@ -250,6 +291,76 @@ class IFMLFeatureEngineer:
             (result_df.get('bnf_has_bic', 0) == 0)
         ).astype(int)
         
+        # === 8XXX Code Specific Features ===
+        
+        # 8004: IBAN cannot be derived - needs IBAN but doesn't have it
+        iban_cols = [c for c in result_df.columns if c.endswith('_has_iban')]
+        needs_iban_cols = [c for c in result_df.columns if c.endswith('_needs_iban')]
+        if iban_cols and needs_iban_cols:
+            result_df['iban_count'] = result_df[iban_cols].sum(axis=1)
+            result_df['needs_iban_count'] = result_df[needs_iban_cols].sum(axis=1)
+            # Missing IBAN when needed
+            result_df['missing_required_iban'] = (
+                (result_df['needs_iban_count'] > 0) & 
+                (result_df['iban_count'] == 0)
+            ).astype(int)
+        
+        # 8022: IBAN/BIC country mismatch - count mismatches
+        bic_iban_match_cols = [c for c in result_df.columns if c.endswith('_bic_iban_match')]
+        if bic_iban_match_cols:
+            # Count explicit mismatches (where both exist and don't match)
+            result_df['bic_iban_mismatch_count'] = (
+                result_df[bic_iban_match_cols].eq(False).sum(axis=1)
+            )
+        
+        # 8026: NCH inconsistency - multiple NCH sources
+        nch_sources_cols = [c for c in result_df.columns if c.endswith('_nch_sources')]
+        if nch_sources_cols:
+            result_df['total_nch_sources'] = result_df[nch_sources_cols].sum(axis=1)
+            result_df['has_multiple_nch_sources'] = (result_df['total_nch_sources'] > 1).astype(int)
+        
+        # 8895: Invalid NCH - has NCH but not valid
+        nch_cols = [c for c in result_df.columns if c.endswith('_has_nch')]
+        nch_valid_cols = [c for c in result_df.columns if c.endswith('_nch_valid')]
+        if nch_cols and nch_valid_cols:
+            result_df['nch_count'] = result_df[nch_cols].sum(axis=1)
+            result_df['nch_valid_count'] = result_df[nch_valid_cols].sum(axis=1)
+            result_df['has_invalid_nch'] = (
+                (result_df['nch_count'] > 0) & 
+                (result_df['nch_valid_count'] < result_df['nch_count'])
+            ).astype(int)
+        
+        # 8894: Invalid IBAN - has IBAN but format/checksum invalid
+        iban_format_cols = [c for c in result_df.columns if c.endswith('_iban_valid_format')]
+        iban_checksum_cols = [c for c in result_df.columns if c.endswith('_iban_checksum_valid')]
+        if iban_format_cols and iban_checksum_cols:
+            result_df['iban_format_valid_count'] = result_df[iban_format_cols].sum(axis=1)
+            result_df['iban_checksum_valid_count'] = result_df[iban_checksum_cols].sum(axis=1)
+            # Has IBAN but invalid
+            if 'iban_count' in result_df.columns:
+                result_df['has_invalid_iban'] = (
+                    (result_df['iban_count'] > 0) & 
+                    ((result_df['iban_format_valid_count'] < result_df['iban_count']) |
+                     (result_df['iban_checksum_valid_count'] < result_df['iban_count']))
+                ).astype(int)
+        
+        # 8001: Invalid BIC - has BIC but format invalid
+        bic_format_cols = [c for c in result_df.columns if c.endswith('_bic_valid_format')]
+        if bic_format_cols:
+            result_df['bic_format_valid_count'] = result_df[bic_format_cols].sum(axis=1)
+            if 'bic_count' in result_df.columns:
+                result_df['has_invalid_bic'] = (
+                    (result_df['bic_count'] > 0) & 
+                    (result_df['bic_format_valid_count'] < result_df['bic_count'])
+                ).astype(int)
+        
+        # Domestic vs International payment indicator
+        domestic_cols = [c for c in result_df.columns if c.endswith('_is_domestic')]
+        intl_cols = [c for c in result_df.columns if c.endswith('_is_international')]
+        if domestic_cols and intl_cols:
+            result_df['is_any_domestic'] = (result_df[domestic_cols].sum(axis=1) > 0).astype(int)
+            result_df['is_any_international'] = (result_df[intl_cols].sum(axis=1) > 0).astype(int)
+        
         return result_df
     
     def _build_feature_columns(self, df: pd.DataFrame):
@@ -272,12 +383,23 @@ class IFMLFeatureEngineer:
         for col in self.ACCOUNT_TYPE_COLS:
             self.feature_columns.append(f'{col}_encoded')
         
+        for col in self.NCH_TYPE_COLS:
+            self.feature_columns.append(f'{col}_encoded')
+        
         # Derived columns
         derived = [
             'party_count', 'bic_count', 'account_count',
             'total_address_lines', 'avg_address_lines', 'amount_bucket',
             'cdt_bnf_country_match', 'has_bban',
-            'missing_cdt_account', 'missing_bnf_bic'
+            'missing_cdt_account', 'missing_bnf_bic',
+            # 8XXX specific derived features
+            'iban_count', 'needs_iban_count', 'missing_required_iban',
+            'bic_iban_mismatch_count',
+            'total_nch_sources', 'has_multiple_nch_sources',
+            'nch_count', 'nch_valid_count', 'has_invalid_nch',
+            'iban_format_valid_count', 'iban_checksum_valid_count', 'has_invalid_iban',
+            'bic_format_valid_count', 'has_invalid_bic',
+            'is_any_domestic', 'is_any_international'
         ]
         self.feature_columns.extend(derived)
     
