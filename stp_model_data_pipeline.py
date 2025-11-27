@@ -449,7 +449,8 @@ class IFMLDataPipeline:
                        use_composite_codes: bool = False,
                        only_with_codes: bool = True,
                        code_series_filter: Optional[List[str]] = None,
-                       include_negative_cases: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                       include_negative_cases: bool = True,
+                       max_negative_ratio: int = 3) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Create ML-ready dataset from loaded records.
         
@@ -466,6 +467,8 @@ class IFMLDataPipeline:
             include_negative_cases: If True and code_series_filter is set, include transactions
                                    that have NO codes from the filtered series as negative examples.
                                    These get labeled as '__NO_XXXX__' (e.g., '__NO_8XXX__').
+            max_negative_ratio: Maximum ratio of negative to positive samples (default 3:1).
+                               Set to 0 or None to disable downsampling.
         
         Returns:
             Tuple of (X_raw, X_transformed, y_multilabel)
@@ -527,9 +530,26 @@ class IFMLDataPipeline:
         # Report positive/negative distribution when using series filter
         if code_series_filter and include_negative_cases:
             series_label = f"__NO_{'_'.join(code_series_filter)}XXX__"
-            positive = sum(1 for codes in code_lists if series_label not in codes)
-            negative = sum(1 for codes in code_lists if series_label in codes)
-            print(f"   Series {code_series_filter} distribution: {positive} positive, {negative} negative cases")
+            positive_idx = [i for i, codes in enumerate(code_lists) if series_label not in codes]
+            negative_idx = [i for i, codes in enumerate(code_lists) if series_label in codes]
+            
+            print(f"   Series {code_series_filter} distribution: {len(positive_idx)} positive, {len(negative_idx)} negative cases")
+            
+            # Balance negatives: limit to max_negative_ratio * positives
+            if max_negative_ratio and max_negative_ratio > 0:
+                max_negatives = len(positive_idx) * max_negative_ratio
+                
+                if len(negative_idx) > max_negatives:
+                    import random
+                    random.seed(42)  # Reproducible sampling
+                    negative_idx = random.sample(negative_idx, max_negatives)
+                    print(f"   Downsampled negatives to {len(negative_idx)} (ratio {max_negative_ratio}:1)")
+            
+            # Combine and keep balanced dataset
+            balanced_idx = positive_idx + negative_idx
+            raw_features = [raw_features[i] for i in balanced_idx]
+            code_lists = [code_lists[i] for i in balanced_idx]
+            print(f"   Balanced dataset: {len(raw_features)} total samples")
         
         # Create DataFrames
         X_raw = pd.DataFrame(raw_features)
