@@ -448,7 +448,8 @@ class IFMLDataPipeline:
                        min_code_samples: int = 5,
                        use_composite_codes: bool = False,
                        only_with_codes: bool = True,
-                       code_series_filter: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                       code_series_filter: Optional[List[str]] = None,
+                       include_negative_cases: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Create ML-ready dataset from loaded records.
         
@@ -459,8 +460,12 @@ class IFMLDataPipeline:
             use_composite_codes: If True, use code+party labels (e.g., '8004_BNPPTY')
                                 instead of just codes ('8004').
             only_with_codes: If True, filter to only records that have at least one code.
+                            Ignored if code_series_filter is set and include_negative_cases is True.
             code_series_filter: If provided, only include codes starting with these prefixes.
                                E.g., ['8', '9'] for 8XXX and 9XXX series only.
+            include_negative_cases: If True and code_series_filter is set, include transactions
+                                   that have NO codes from the filtered series as negative examples.
+                                   These get labeled as '__NO_XXXX__' (e.g., '__NO_8XXX__').
         
         Returns:
             Tuple of (X_raw, X_transformed, y_multilabel)
@@ -502,16 +507,29 @@ class IFMLDataPipeline:
                     if any(base_code.startswith(prefix) for prefix in code_series_filter):
                         filtered_codes.append(code)
                 codes = filtered_codes
+                
+                # Add negative case label if no codes from this series
+                if include_negative_cases and not codes:
+                    # Create label like '__NO_8XXX__' for transactions without any 8XXX codes
+                    series_label = f"__NO_{'_'.join(code_series_filter)}XXX__"
+                    codes = [series_label]
             
             code_lists.append(codes)
         
-        # Filter to only records with codes
-        if only_with_codes:
+        # Filter to only records with codes (skip if we're including negative cases for series)
+        if only_with_codes and not (code_series_filter and include_negative_cases):
             total_before = len(raw_features)
             indices = [i for i, codes in enumerate(code_lists) if codes]
             raw_features = [raw_features[i] for i in indices]
             code_lists = [code_lists[i] for i in indices]
             print(f"   Filtered to {len(indices)} records with codes (from {total_before} total)")
+        
+        # Report positive/negative distribution when using series filter
+        if code_series_filter and include_negative_cases:
+            series_label = f"__NO_{'_'.join(code_series_filter)}XXX__"
+            positive = sum(1 for codes in code_lists if series_label not in codes)
+            negative = sum(1 for codes in code_lists if series_label in codes)
+            print(f"   Series {code_series_filter} distribution: {positive} positive, {negative} negative cases")
         
         # Create DataFrames
         X_raw = pd.DataFrame(raw_features)
