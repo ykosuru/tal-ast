@@ -1332,16 +1332,23 @@ def show_feature_importance(model_dir: str, top_n: int = 30, code: str = None, a
 def _get_importance_dict(model, feature_names: list) -> dict:
     """Extract importance as dict from model."""
     importances = None
-    
-    # Handle ACEErrorCodeModel wrapper
-    actual_model = model
     actual_feature_names = feature_names
     
-    # Check if it's ACEErrorCodeModel (has model attribute and feature_names)
-    if hasattr(model, 'model') and hasattr(model, 'feature_names'):
+    # Handle dict-based model storage (from ACEErrorCodeModel.save())
+    if isinstance(model, dict):
+        actual_model = model.get('model')
+        if model.get('feature_names'):
+            actual_feature_names = model['feature_names']
+    # Handle ACEErrorCodeModel wrapper
+    elif hasattr(model, 'model') and hasattr(model, 'feature_names'):
         actual_model = model.model
         if model.feature_names:
             actual_feature_names = model.feature_names
+    else:
+        actual_model = model
+    
+    if actual_model is None:
+        return {}
     
     # Now extract from actual_model
     if hasattr(actual_model, 'feature_importances_'):
@@ -1371,7 +1378,15 @@ def _print_model_importance(model, feature_names: list, top_n: int):
     """Print feature importance from a model."""
     # Debug info
     print(f"  Model type: {type(model).__name__}")
-    if hasattr(model, 'model'):
+    if isinstance(model, dict):
+        actual_model = model.get('model')
+        print(f"  Inner model type: {type(actual_model).__name__ if actual_model else 'None'}")
+        if actual_model and hasattr(actual_model, 'estimators_'):
+            print(f"  Num estimators: {len(actual_model.estimators_)}")
+        if model.get('feature_names'):
+            print(f"  Feature names from model: {len(model['feature_names'])} features")
+            feature_names = model['feature_names']  # Use model's feature names
+    elif hasattr(model, 'model'):
         print(f"  Inner model type: {type(model.model).__name__}")
         if hasattr(model.model, 'estimators_'):
             print(f"  Num estimators: {len(model.model.estimators_)}")
