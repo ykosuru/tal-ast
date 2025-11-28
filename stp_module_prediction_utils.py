@@ -150,65 +150,65 @@ CODE_TRIGGERS = {
     
     # --- Account/Name Cleaning ---
     '9002': {
-        'require_true': ['has_account'],
-        'require_false': [],  # Triggered by dirty chars, spaces, special chars
+        'require_true': ['present', 'has_account'],
+        'require_false': [],
         'description': 'Account cleaned - removed dirty chars/spaces/special chars'
     },
     '9015': {
-        'require_true': ['has_name'],
-        'require_false': [],  # Triggered by dirty chars in name
+        'require_true': ['present', 'has_name'],
+        'require_false': [],
         'description': 'Name cleaned - removed dirty characters'
     },
     
-    # --- IBAN Derivation (requires directory lookup) ---
+    # --- IBAN Derivation ---
     '9004': {
-        'require_true': ['needs_iban', 'is_iban_derivable'],
+        'require_true': ['present', 'needs_iban'],
         'require_false': ['has_iban'],
-        'description': 'IBAN derived for credit party - derived from account + country'
+        'description': 'IBAN derived for credit party - party present, needs IBAN, doesnt have one'
     },
     '9007': {
-        'require_true': ['needs_iban', 'is_iban_derivable'],
+        'require_true': ['present', 'needs_iban'],
         'require_false': ['has_iban'],
-        'description': 'IBAN derived for beneficiary - derived from account + country'
+        'description': 'IBAN derived for beneficiary - party present, needs IBAN, doesnt have one'
     },
     
-    # --- BIC Derivation (requires directory lookup) ---
+    # --- BIC Derivation ---
     '9005': {
-        'require_true': ['has_nch', 'is_bic_derivable'],
+        'require_true': ['present', 'has_nch'],
         'require_false': ['has_bic'],
-        'description': 'BIC derived from NCH - looked up routing number in directory'
+        'description': 'BIC derived from NCH - party present with NCH but no BIC'
     },
     '9008': {
-        'require_true': ['has_iban', 'is_bic_derivable'],
+        'require_true': ['present', 'has_iban'],
         'require_false': ['has_bic'],
-        'description': 'BIC derived from IBAN - extracted bank code from IBAN'
+        'description': 'BIC derived from IBAN - party present with IBAN but no BIC'
     },
     
     # --- Formatting Fixes ---
     '9006': {
-        'require_true': ['has_iban'],
-        'require_false': [],  # Triggered by iban_needs_formatting
+        'require_true': ['present', 'has_iban'],
+        'require_false': [],
         'description': 'IBAN formatted - standardized IBAN format'
     },
     '9021': {
-        'require_true': ['has_nch'],
-        'require_false': [],  # Triggered by nch_needs_formatting
+        'require_true': ['present', 'has_nch'],
+        'require_false': [],
         'description': 'NCH formatted - standardized routing number format'
     },
     '9025': {
-        'require_true': ['has_account'],
-        'require_false': [],  # Triggered by account_needs_length_fix
+        'require_true': ['present', 'has_account'],
+        'require_false': [],
         'description': 'Account length fixed - padded or trimmed account number'
     },
     
     # --- Duplicate/Inconsistency Resolution ---
     '9017': {
-        'require_true': ['has_duplicate_info'],
+        'require_true': ['present'],
         'require_false': [],
         'description': 'Duplicate info resolved for credit party'
     },
     '9018': {
-        'require_true': ['has_duplicate_info'],
+        'require_true': ['present'],
         'require_false': [],
         'description': 'Duplicate info resolved for intermediary'
     },
@@ -218,26 +218,26 @@ CODE_TRIGGERS = {
         'description': 'Party information consolidated'
     },
     
-    # --- Intermediary/Routing (requires directory lookup) ---
+    # --- Intermediary/Routing ---
     '9024': {
-        'require_true': ['has_bic'],  # Need beneficiary BIC to find correspondent
+        'require_true': ['present', 'has_bic'],
         'require_false': ['has_intermediary'],
-        'description': 'Intermediary bank added - correspondent bank derived'
+        'description': 'Intermediary bank added - beneficiary present with BIC, no intermediary'
     },
     
-    # --- BIC Enrichment (requires directory lookup) ---
+    # --- BIC Enrichment ---
     '9477': {
-        'require_true': ['has_bic'],
-        'require_false': [],  # 8-char BIC expanded to 11-char
+        'require_true': ['present', 'has_bic'],
+        'require_false': [],
         'description': 'BIC enriched from 8 to 11 characters'
     },
     '9479': {
-        'require_true': ['has_bic'],
-        'require_false': [],  # Missing name or address enriched from BIC directory
+        'require_true': ['present', 'has_bic'],
+        'require_false': [],
         'description': 'Party enriched - bank name/address added from BIC directory'
     },
     '9480': {
-        'require_true': ['has_bic'],
+        'require_true': ['present', 'has_bic'],
         'require_false': [],
         'description': 'Credit party enriched from BIC directory'
     },
