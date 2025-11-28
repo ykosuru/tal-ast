@@ -468,10 +468,11 @@ class ACEPredictor:
         Filter predictions based on precondition rules from precondition_rules.json.
         
         Each code can have:
-        - require_true: features that must be True for code to be valid
-        - require_false: features that must be False for code to be valid
+        - require_true: features that must be True for code to be valid (e.g., has_iban)
+        - require_false: features where at least ONE must be False for error to fire
+          (e.g., if all validity checks pass, the error shouldn't fire)
         
-        This catches logically impossible predictions (e.g., 8022 when no IBAN exists).
+        This catches logically impossible predictions (e.g., 8894 when IBAN is valid).
         
         Returns:
             Tuple of (filtered_codes, warnings)
@@ -496,8 +497,9 @@ class ACEPredictor:
             # Get precondition rules for this code
             code_rules = self.precondition_rules.get(base_code, {})
             require_true = code_rules.get('require_true', [])
+            require_false = code_rules.get('require_false', [])
             
-            if not require_true:
+            if not require_true and not require_false:
                 # No preconditions defined, keep the prediction
                 filtered_codes.append(code)
                 continue
@@ -509,43 +511,69 @@ class ACEPredictor:
             else:
                 prefixes_to_check = all_prefixes
             
-            # Check if ALL require_true conditions are met for at least one party
+            # Check conditions for at least one party
             passes = False
-            failed_conditions = []
+            failed_reason = None
             
             for prefix in prefixes_to_check:
-                all_met = True
-                prefix_failures = []
+                # === Check require_true: ALL must be True ===
+                require_true_met = True
+                true_failures = []
                 
                 for feat_base in require_true:
                     feat_name = f'{prefix}_{feat_base}'
-                    if feat_name in feature_dict:
-                        value = feature_dict[feat_name]
-                        if not (isinstance(value, bool) and value):
-                            all_met = False
-                            prefix_failures.append(f"{feat_name}={value}")
-                    else:
-                        # Check without prefix
-                        if feat_base in feature_dict:
-                            value = feature_dict[feat_base]
-                            if not (isinstance(value, bool) and value):
-                                all_met = False
-                                prefix_failures.append(f"{feat_base}={value}")
-                        else:
-                            all_met = False
-                            prefix_failures.append(f"{feat_name} missing")
+                    value = feature_dict.get(feat_name)
+                    
+                    if value is None:
+                        value = feature_dict.get(feat_base)
+                        feat_name = feat_base
+                    
+                    if not (isinstance(value, bool) and value):
+                        require_true_met = False
+                        true_failures.append(f"{feat_name}={value}")
                 
-                if all_met:
-                    passes = True
-                    break
-                else:
-                    failed_conditions = prefix_failures
+                if not require_true_met:
+                    failed_reason = f"requires {require_true}, got {true_failures}"
+                    continue  # Try next party
+                
+                # === Check require_false: At least ONE must be False ===
+                if require_false:
+                    any_false = False
+                    all_true_fields = []
+                    
+                    for feat_base in require_false:
+                        feat_name = f'{prefix}_{feat_base}'
+                        value = feature_dict.get(feat_name)
+                        
+                        if value is None:
+                            value = feature_dict.get(feat_base)
+                            feat_name = feat_base
+                        
+                        if isinstance(value, bool):
+                            if not value:
+                                any_false = True
+                                break
+                            else:
+                                all_true_fields.append(feat_name)
+                        elif value is None:
+                            # Not present - treat as potentially invalid
+                            any_false = True
+                            break
+                    
+                    if not any_false and all_true_fields:
+                        # All validity checks passed - error shouldn't fire
+                        failed_reason = f"all validity checks passed: {all_true_fields}"
+                        continue  # Try next party
+                
+                # All conditions met
+                passes = True
+                break
             
             if passes:
                 filtered_codes.append(code)
             else:
                 warnings.append(
-                    f"Precondition filter: {code} suppressed (requires {require_true}, got {failed_conditions})"
+                    f"Precondition filter: {code} suppressed ({failed_reason})"
                 )
         
         return filtered_codes, warnings
