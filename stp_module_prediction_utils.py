@@ -13,13 +13,8 @@ Usage as filter:
 Usage as explainer:
     python prediction_utils.py --model-dir ./models_8x --data-dir ./raw_data --output explanations.md
 
-    python prediction_utils.py --model-dir ./models_9x --data-dir ./raw_data --output explanations_9xxx.md --series 9
-
 Usage for single payment:
     python prediction_utils.py --model-dir ./models_8x --payment ./test.json
-
-    python prediction_utils.py --model-dir ./models_9x --payment ./test.json --series 9
-
 """
 
 import argparse
@@ -300,6 +295,11 @@ def filter_predictions(predicted_codes: List[str], features: Dict) -> Tuple[List
     """
     Filter out predictions that don't meet ACE preconditions.
     
+    Checks two conditions:
+    1. require_true: Fields that MUST be True (e.g., has_iban for IBAN errors)
+    2. require_false: Fields where at least ONE must be False (e.g., iban_valid for Invalid IBAN)
+       - If ALL require_false fields are True, the error shouldn't fire (data is valid)
+    
     Args:
         predicted_codes: List of predicted error codes (e.g., ['8022_BNFBNK', '8004_BNPPTY'])
         features: Dict of input features from IFML parser
@@ -310,11 +310,11 @@ def filter_predictions(predicted_codes: List[str], features: Dict) -> Tuple[List
         - filtered_out: List of {code, reason} for codes that were removed
         
     Example:
-        >>> features = {'bnf_has_iban': False, 'bnf_has_bic': True, 'bnf_needs_iban': True}
-        >>> predicted = ['8022_BNFBNK', '8004_BNPPTY']
+        >>> features = {'bnf_has_iban': True, 'bnf_iban_valid_format': True, 'bnf_iban_checksum_valid': True}
+        >>> predicted = ['8894_BNFBNK']  # Invalid IBAN
         >>> filtered, removed = filter_predictions(predicted, features)
         >>> filtered
-        ['8004_BNPPTY']
+        []  # Filtered out because IBAN is valid
     """
     filtered_codes = []
     filtered_out = []
@@ -326,8 +326,9 @@ def filter_predictions(predicted_codes: List[str], features: Dict) -> Tuple[List
         # Get trigger definition
         trigger_def = CODE_TRIGGERS.get(base_code, {})
         require_true = trigger_def.get('require_true', [])
+        require_false = trigger_def.get('require_false', [])
         
-        if not require_true:
+        if not require_true and not require_false:
             # No preconditions defined, keep the prediction
             filtered_codes.append(code)
             continue
@@ -339,44 +340,74 @@ def filter_predictions(predicted_codes: List[str], features: Dict) -> Tuple[List
         else:
             prefixes_to_check = PARTY_PREFIXES
         
-        # Check if ALL require_true conditions are met for at least one party
+        # Check conditions for at least one party
         passes = False
-        failed_conditions = []
+        failed_reason = None
         
         for prefix in prefixes_to_check:
-            all_met = True
-            prefix_failures = []
+            # === Check require_true: ALL must be True ===
+            require_true_met = True
+            true_failures = []
             
             for feat_base in require_true:
                 feat_name = f'{prefix}_{feat_base}'
-                if feat_name in features:
-                    value = features[feat_name]
-                    if not (isinstance(value, bool) and value):
-                        all_met = False
-                        prefix_failures.append(f"{feat_name}={value}")
-                else:
-                    # Feature not found, check without prefix
-                    if feat_base in features:
-                        value = features[feat_base]
-                        if not (isinstance(value, bool) and value):
-                            all_met = False
-                            prefix_failures.append(f"{feat_base}={value}")
-                    else:
-                        all_met = False
-                        prefix_failures.append(f"{feat_name} not found")
+                value = features.get(feat_name)
+                
+                # Also check without prefix
+                if value is None:
+                    value = features.get(feat_base)
+                    feat_name = feat_base
+                
+                if not (isinstance(value, bool) and value):
+                    require_true_met = False
+                    true_failures.append(f"{feat_name}={value}")
             
-            if all_met:
-                passes = True
-                break
-            else:
-                failed_conditions = prefix_failures
+            if not require_true_met:
+                failed_reason = f"requires {require_true}, got {true_failures}"
+                continue  # Try next party
+            
+            # === Check require_false: At least ONE must be False ===
+            # (Error fires when validation fails, so at least one validity check must be False)
+            if require_false:
+                any_false = False
+                all_true_fields = []
+                
+                for feat_base in require_false:
+                    feat_name = f'{prefix}_{feat_base}'
+                    value = features.get(feat_name)
+                    
+                    # Also check without prefix
+                    if value is None:
+                        value = features.get(feat_base)
+                        feat_name = feat_base
+                    
+                    if isinstance(value, bool):
+                        if not value:
+                            any_false = True  # Found an invalid/failed check
+                            break
+                        else:
+                            all_true_fields.append(feat_name)
+                    elif value is None:
+                        # Field not present - could mean validation wasn't done
+                        # Be conservative: treat as potentially invalid
+                        any_false = True
+                        break
+                
+                if not any_false and all_true_fields:
+                    # All validity checks passed - this error shouldn't fire
+                    failed_reason = f"all validity checks passed: {all_true_fields}"
+                    continue  # Try next party
+            
+            # All conditions met for this party
+            passes = True
+            break
         
         if passes:
             filtered_codes.append(code)
         else:
             filtered_out.append({
                 'code': code,
-                'reason': f"Precondition failed: requires {require_true}, got {failed_conditions}"
+                'reason': f"Precondition failed: {failed_reason}"
             })
     
     return filtered_codes, filtered_out
