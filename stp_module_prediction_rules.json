@@ -1,0 +1,113 @@
+{
+  "_comment": "Precondition rules for ACE Pelican error codes. Auto-generate with: generate_precondition_rules()",
+  
+  "_section": "8XXX VALIDATION ERRORS",
+  
+  "8001": {
+    "require_true": ["has_bic"],
+    "description": "Invalid BIC - requires BIC to be present"
+  },
+  "8004": {
+    "require_true": ["needs_iban"],
+    "description": "IBAN cannot be derived - requires country that needs IBAN"
+  },
+  "8022": {
+    "require_true": ["has_iban", "has_bic"],
+    "description": "IBAN inconsistent with BIC - requires both IBAN and BIC present"
+  },
+  "8023": {
+    "require_true": ["has_iban"],
+    "description": "IBAN inconsistency - requires IBAN present"
+  },
+  "8026": {
+    "require_true": ["has_nch"],
+    "description": "NCH inconsistency - requires NCH/routing number present"
+  },
+  "8030": {
+    "require_true": ["needs_iban"],
+    "description": "IBAN derivation not supported - requires IBAN country"
+  },
+  "8852": {
+    "require_true": ["has_account"],
+    "description": "Incorrect length of attribute - requires account present"
+  },
+  "8892": {
+    "require_true": ["has_account"],
+    "description": "Invalid account number - requires account present"
+  },
+  "8894": {
+    "require_true": ["has_iban"],
+    "description": "Invalid IBAN - requires IBAN present"
+  },
+  "8895": {
+    "require_true": ["has_nch"],
+    "description": "Invalid NCH code - requires NCH present"
+  },
+  "8896": {
+    "require_true": ["has_account"],
+    "description": "Invalid domestic account - requires account present"
+  },
+  "8897": {
+    "require_true": ["has_account"],
+    "description": "Invalid BBAN - requires account present"
+  },
+  "8898": {
+    "require_true": ["has_iban"],
+    "description": "IBAN check digit failed - requires IBAN present"
+  },
+
+  "_section_9xxx": "9XXX REPAIR/ENRICHMENT CODES",
+
+  "9002": {
+    "require_true": ["has_account"],
+    "description": "Account cleaned - requires account present"
+  },
+  "9004": {
+    "require_true": ["needs_iban"],
+    "description": "IBAN derived for credit party - requires IBAN country"
+  },
+  "9005": {
+    "require_true": ["has_nch"],
+    "description": "BIC derived from NCH - requires NCH present"
+  },
+  "9006": {
+    "require_true": ["has_iban"],
+    "description": "IBAN formatted - requires IBAN present"
+  },
+  "9007": {
+    "require_true": ["needs_iban"],
+    "description": "IBAN derived for beneficiary - requires IBAN country"
+  },
+  "9008": {
+    "require_true": ["has_iban"],
+    "description": "BIC derived from IBAN - requires IBAN present"
+  },
+  "9015": {
+    "require_true": ["has_name"],
+    "description": "Name cleaned - requires name present"
+  },
+  "9021": {
+    "require_true": ["has_nch"],
+    "description": "NCH formatted - requires NCH present"
+  },
+  "9024": {
+    "require_true": ["has_bic"],
+    "description": "Intermediary added - requires beneficiary BIC"
+  },
+  "9025": {
+    "require_true": ["has_account"],
+    "description": "Account length fixed - requires account present"
+  },
+  "9477": {
+    "require_true": ["has_bic"],
+    "description": "BIC enriched 8->11 chars - requires BIC present"
+  },
+  "9479": {
+    "require_true": ["has_bic"],
+    "description": "Party enriched from BIC directory - requires BIC"
+  },
+  "9480": {
+    "require_true": ["has_bic"],
+    "description": "Credit party enriched - requires BIC"
+  }
+}
