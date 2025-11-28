@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-Explain 8XXX predictions - show which input fields triggered each code.
+ACE Pelican Prediction Utilities
 
-Usage:
-    python explain_predictions.py --model-dir ./models_8x --data-dir ./raw_data --output explanations.md --limit 100
+Combined module for:
+1. Filtering false positive predictions based on ACE preconditions
+2. Explaining predictions with human-readable trigger conditions
+
+Usage as filter:
+    from prediction_utils import filter_predictions
+    filtered, removed = filter_predictions(predicted_codes, features)
+
+Usage as explainer:
+    python prediction_utils.py --model-dir ./models_8x --data-dir ./raw_data --output explanations.md
+
+Usage for single payment:
+    python prediction_utils.py --model-dir ./models_8x --payment ./test.json
 """
 
 import argparse
@@ -11,9 +22,13 @@ import json
 import pickle
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 
+
+# =============================================================================
+# ACE PELICAN CODE DEFINITIONS
+# =============================================================================
 
 # Feature to human-readable explanation mapping
 FEATURE_EXPLANATIONS = {
@@ -56,86 +71,95 @@ FEATURE_EXPLANATIONS = {
     'is_cross_border': 'Cross-border payment',
 }
 
-# Code to relevant features mapping - based on ACE Pelican definitions
-# Key: (features_that_must_be_true, features_that_must_be_false)
+# ACE Pelican code trigger definitions
+# require_true: features that MUST be True for the code to be valid
+# require_false: features that MUST be False for the code to be valid
 CODE_TRIGGERS = {
-    '8001': {  # Invalid BIC
+    '8001': {
         'require_true': ['has_bic'],
         'require_false': ['bic_valid_format', 'bic_valid_country'],
-        'description': 'BIC present but format/country invalid'
+        'description': 'Invalid BIC - BIC present but format/country invalid'
     },
-    '8004': {  # IBAN cannot be derived
+    '8004': {
         'require_true': ['needs_iban'],
         'require_false': ['has_iban'],
-        'description': 'IBAN required but missing and cannot be derived'
+        'description': 'IBAN cannot be derived - IBAN required but missing'
     },
-    '8022': {  # IBAN inconsistent with Account With Institution BIC
+    '8022': {
         'require_true': ['has_iban', 'has_bic'],
         'require_false': ['bic_iban_match'],
-        'description': 'IBAN and BIC countries do not match'
+        'description': 'IBAN inconsistent with BIC - countries do not match'
     },
-    '8026': {  # NCH inconsistency found in message
+    '8023': {
+        'require_true': ['has_iban'],
+        'require_false': [],
+        'description': 'IBAN inconsistency found in message'
+    },
+    '8026': {
         'require_true': ['has_nch'],
-        'require_false': [],  # Inconsistency between multiple NCH values
-        'check_field': 'nch_sources',  # Multiple sources with different values
-        'description': 'Multiple NCH values that are inconsistent'
+        'require_false': [],
+        'description': 'NCH inconsistency - multiple NCH values that are inconsistent'
     },
-    '8030': {  # IBAN derivation not supported for the country
+    '8030': {
         'require_true': ['needs_iban'],
         'require_false': ['has_iban'],
-        'description': 'Country does not support IBAN derivation'
+        'description': 'IBAN derivation not supported for the country'
     },
-    '8852': {  # Incorrect length of attribute
+    '8852': {
         'require_true': ['has_account'],
         'require_false': [],
-        'description': 'Field length is incorrect'
+        'description': 'Incorrect length of attribute'
     },
-    '8892': {  # Invalid Account number
+    '8892': {
         'require_true': ['has_account'],
-        'require_false': ['account_numeric'],  # or other validation
-        'description': 'Account number format is invalid'
+        'require_false': [],
+        'description': 'Invalid account number format'
     },
-    '8894': {  # Invalid IBAN
+    '8894': {
         'require_true': ['has_iban'],
         'require_false': ['iban_valid_format', 'iban_checksum_valid'],
-        'description': 'IBAN present but format or checksum invalid'
+        'description': 'Invalid IBAN - format or checksum invalid'
     },
-    '8895': {  # Invalid NCH code
+    '8895': {
         'require_true': ['has_nch'],
         'require_false': ['nch_valid', 'fedaba_checksum_valid'],
-        'description': 'NCH/routing number present but invalid'
+        'description': 'Invalid NCH code - routing number invalid'
     },
-    '8896': {  # Invalid Domestic Account Number
+    '8896': {
         'require_true': ['has_account', 'is_domestic'],
         'require_false': [],
-        'description': 'Domestic account number format invalid'
+        'description': 'Invalid domestic account number format'
     },
-    '8898': {  # IBAN Check Digit calculation/validation failed
+    '8897': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'Invalid BBAN'
+    },
+    '8898': {
         'require_true': ['has_iban'],
         'require_false': ['iban_checksum_valid'],
-        'description': 'IBAN checksum validation failed'
+        'description': 'IBAN check digit validation failed'
     },
 }
 
-# Legacy mapping for backward compatibility
-CODE_RELEVANT_FEATURES = {
-    '8004': ['needs_iban', 'has_iban', 'missing_required_iban', 'is_international'],
-    '8022': ['has_iban', 'has_bic', 'bic_iban_match', 'iban_valid_format'],
-    '8026': ['has_nch', 'nch_valid', 'has_adr_bank_id', 'nch_sources'],
-    '8001': ['has_bic', 'bic_valid_format', 'bic_valid_country'],
-    '8852': ['has_account', 'account_length'],
-    '8894': ['has_iban', 'iban_valid_format', 'iban_checksum_valid'],
-    '8895': ['has_nch', 'nch_valid', 'fedaba_checksum_valid', 'nch_validation_applicable', 'is_domestic'],
-    '8896': ['has_nch', 'is_domestic', 'nch_validation_applicable'],
-    '8898': ['has_iban', 'iban_checksum_valid'],
+# Party suffix to feature prefix mapping
+SUFFIX_TO_PREFIX = {
+    'ORGPTY': 'orig',
+    'SNDBNK': 'send',
+    'DBTPTY': 'dbt',
+    'CDTPTY': 'cdt',
+    'INTBNK': 'intm',
+    'BNFBNK': 'bnf',
+    'BNPPTY': 'bnf',
 }
 
-# Party prefixes
+# All possible party prefixes
 PARTY_PREFIXES = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'ordi', 'acwi']
 
+# Party prefix to human-readable name
 PARTY_NAMES = {
     'orig': 'Originator',
-    'send': 'Sending Bank', 
+    'send': 'Sending Bank',
     'dbt': 'Debit Party',
     'cdt': 'Credit Party',
     'intm': 'Intermediary Bank',
@@ -145,9 +169,124 @@ PARTY_NAMES = {
 }
 
 
+# =============================================================================
+# PREDICTION FILTER
+# =============================================================================
+
+def filter_predictions(predicted_codes: List[str], features: Dict) -> Tuple[List[str], List[dict]]:
+    """
+    Filter out predictions that don't meet ACE preconditions.
+    
+    Args:
+        predicted_codes: List of predicted error codes (e.g., ['8022_BNFBNK', '8004_BNPPTY'])
+        features: Dict of input features from IFML parser
+        
+    Returns:
+        Tuple of:
+        - filtered_codes: Predictions that pass precondition checks
+        - filtered_out: List of {code, reason} for codes that were removed
+        
+    Example:
+        >>> features = {'bnf_has_iban': False, 'bnf_has_bic': True, 'bnf_needs_iban': True}
+        >>> predicted = ['8022_BNFBNK', '8004_BNPPTY']
+        >>> filtered, removed = filter_predictions(predicted, features)
+        >>> filtered
+        ['8004_BNPPTY']
+    """
+    filtered_codes = []
+    filtered_out = []
+    
+    for code in predicted_codes:
+        base_code = code.split('_')[0]
+        party_suffix = code.split('_')[1] if '_' in code else None
+        
+        # Get trigger definition
+        trigger_def = CODE_TRIGGERS.get(base_code, {})
+        require_true = trigger_def.get('require_true', [])
+        
+        if not require_true:
+            # No preconditions defined, keep the prediction
+            filtered_codes.append(code)
+            continue
+        
+        # Determine which party prefix to check
+        if party_suffix:
+            party_prefix = SUFFIX_TO_PREFIX.get(party_suffix)
+            prefixes_to_check = [party_prefix] if party_prefix else PARTY_PREFIXES
+        else:
+            prefixes_to_check = PARTY_PREFIXES
+        
+        # Check if ALL require_true conditions are met for at least one party
+        passes = False
+        failed_conditions = []
+        
+        for prefix in prefixes_to_check:
+            all_met = True
+            prefix_failures = []
+            
+            for feat_base in require_true:
+                feat_name = f'{prefix}_{feat_base}'
+                if feat_name in features:
+                    value = features[feat_name]
+                    if not (isinstance(value, bool) and value):
+                        all_met = False
+                        prefix_failures.append(f"{feat_name}={value}")
+                else:
+                    # Feature not found, check without prefix
+                    if feat_base in features:
+                        value = features[feat_base]
+                        if not (isinstance(value, bool) and value):
+                            all_met = False
+                            prefix_failures.append(f"{feat_base}={value}")
+                    else:
+                        all_met = False
+                        prefix_failures.append(f"{feat_name} not found")
+            
+            if all_met:
+                passes = True
+                break
+            else:
+                failed_conditions = prefix_failures
+        
+        if passes:
+            filtered_codes.append(code)
+        else:
+            filtered_out.append({
+                'code': code,
+                'reason': f"Precondition failed: requires {require_true}, got {failed_conditions}"
+            })
+    
+    return filtered_codes, filtered_out
+
+
+# Alias for backward compatibility
+filter_false_positives = filter_predictions
+
+
+def get_code_description(code: str) -> Optional[str]:
+    """Get ACE description for a code."""
+    base_code = code.split('_')[0]
+    trigger_def = CODE_TRIGGERS.get(base_code, {})
+    return trigger_def.get('description')
+
+
+def get_code_preconditions(code: str) -> dict:
+    """Get preconditions for a code."""
+    base_code = code.split('_')[0]
+    return CODE_TRIGGERS.get(base_code, {})
+
+
+# =============================================================================
+# PREDICTION EXPLANATION
+# =============================================================================
+
+def _suffix_to_prefix(suffix: str) -> Optional[str]:
+    """Convert party suffix to feature prefix."""
+    return SUFFIX_TO_PREFIX.get(suffix)
+
+
 def get_feature_explanation(feature_name: str) -> str:
     """Get human-readable explanation for a feature."""
-    # Strip prefix
     for prefix in PARTY_PREFIXES:
         if feature_name.startswith(f'{prefix}_'):
             base_name = feature_name[len(prefix)+1:]
@@ -159,7 +298,7 @@ def get_feature_explanation(feature_name: str) -> str:
 
 
 def explain_prediction(features: Dict, predicted_codes: List[str], 
-                       feature_importance: Optional[Dict] = None) -> Dict[str, List[dict]]:
+                       feature_importance: Optional[Dict] = None) -> Dict[str, Any]:
     """
     Explain why each code was predicted using ACE Pelican trigger logic.
     
@@ -193,8 +332,8 @@ def explain_prediction(features: Dict, predicted_codes: List[str],
         # Track if trigger conditions are met
         true_conditions_met = []
         true_conditions_failed = []
-        false_conditions_met = []  # Should be False, and is False
-        false_conditions_failed = []  # Should be False, but is True
+        false_conditions_met = []
+        false_conditions_failed = []
         
         for prefix in prefixes_to_check:
             # Check require_true features (must be True for valid trigger)
@@ -234,10 +373,8 @@ def explain_prediction(features: Dict, predicted_codes: List[str],
         
         # Detect potential false positive
         if require_true and not true_conditions_met:
-            # Required condition not present
             warning = f"⚠️ POSSIBLE FALSE POSITIVE: {base_code} requires {require_true} but none found"
         elif true_conditions_failed and require_true:
-            # e.g., 8022 requires has_iban=True but has_iban=False
             warning = f"⚠️ POSSIBLE FALSE POSITIVE: Expected {true_conditions_failed} = True but got False"
         
         # Sort by importance if available
@@ -253,22 +390,9 @@ def explain_prediction(features: Dict, predicted_codes: List[str],
     return explanations
 
 
-def _suffix_to_prefix(suffix: str) -> Optional[str]:
-    """Convert party suffix to feature prefix."""
-    mapping = {
-        'ORGPTY': 'orig',
-        'SNDBNK': 'send',
-        'DBTPTY': 'dbt',
-        'CDTPTY': 'cdt',
-        'INTBNK': 'intm',
-        'BNFBNK': 'bnf',
-        'BNPPTY': 'bnf',  # Beneficiary party often maps to bnf
-    }
-    return mapping.get(suffix)
-
-
 def format_explanation(txn_id: str, features: Dict, predicted_codes: List[str], 
-                       actual_codes: List[str], explanations: Dict) -> List[str]:
+                       actual_codes: List[str], explanations: Dict,
+                       filtered_out: List[dict] = None) -> List[str]:
     """Format explanation as markdown."""
     lines = []
     lines.append(f"### Transaction: {txn_id}")
@@ -284,6 +408,12 @@ def format_explanation(txn_id: str, features: Dict, predicted_codes: List[str],
     lines.append(f"**Predicted:** {pred_str}")
     lines.append(f"**Actual:** {actual_str}")
     lines.append(f"**Status:** {status}")
+    
+    # Show filtered out codes
+    if filtered_out:
+        filtered_codes = [f['code'] for f in filtered_out]
+        lines.append(f"**Filtered out (false positives):** {', '.join(filtered_codes)}")
+    
     lines.append("")
     
     # Show explanations for each predicted code
@@ -351,6 +481,10 @@ def format_explanation(txn_id: str, features: Dict, predicted_codes: List[str],
     return lines
 
 
+# =============================================================================
+# MODEL LOADING AND PREDICTION
+# =============================================================================
+
 def load_feature_importance(model_dir: str) -> Dict[str, float]:
     """Load feature importance from model."""
     importance = {}
@@ -396,7 +530,6 @@ def load_model_components(model_dir: str):
         try:
             from feature_engineering import IFMLFeatureEngineer
             fe_obj = IFMLFeatureEngineer()
-            # Restore fitted state from dict
             if 'label_encoders' in feature_engineer:
                 fe_obj.label_encoders = feature_engineer['label_encoders']
             if 'frequency_maps' in feature_engineer:
@@ -420,7 +553,7 @@ def load_model_components(model_dir: str):
 
 
 def transform_features(features: Dict, feature_engineer, feature_columns: List[str]):
-    """Transform features dict to model input, handling dict or object feature_engineer."""
+    """Transform features dict to model input."""
     import pandas as pd
     
     # If feature_engineer is an object with transform method, use it
@@ -430,50 +563,38 @@ def transform_features(features: Dict, feature_engineer, feature_columns: List[s
     
     # If feature_engineer is a dict, manually build feature vector
     if isinstance(feature_engineer, dict):
-        # Get label encoders if present
         label_encoders = feature_engineer.get('label_encoders', {})
         frequency_maps = feature_engineer.get('frequency_maps', {})
         columns = feature_engineer.get('feature_columns', feature_columns)
         
         if not columns:
-            raise ValueError("No feature_columns found in feature_engineer or training_info")
+            raise ValueError("No feature_columns found")
         
-        # Build feature vector
         row = {}
         for col in columns:
             if col in features:
                 val = features[col]
                 
-                # Handle encoded columns
                 if col in label_encoders:
                     le = label_encoders[col]
                     if hasattr(le, 'transform'):
                         try:
                             val = le.transform([str(val)])[0]
                         except:
-                            val = 0  # Unknown value
+                            val = 0
                     elif isinstance(le, dict):
                         val = le.get(str(val), 0)
-                
-                # Handle frequency encoded columns
                 elif col in frequency_maps:
                     freq_map = frequency_maps[col]
                     val = freq_map.get(str(val), 0.0)
-                
-                # Handle booleans
                 elif isinstance(val, bool):
                     val = 1 if val else 0
                 
                 row[col] = val
             else:
-                # Default values
-                if '_encoded' in col or '_freq' in col:
-                    row[col] = 0
-                else:
-                    row[col] = 0
+                row[col] = 0
         
         df = pd.DataFrame([row])
-        # Ensure column order matches training
         for col in columns:
             if col not in df.columns:
                 df[col] = 0
@@ -488,18 +609,12 @@ def predict_from_features(features: Dict, model, feature_engineer,
                           class_names: List[str], threshold: float = 0.5,
                           series: str = '8', feature_columns: List[str] = None) -> List[str]:
     """Run prediction directly from features dict."""
-    import pandas as pd
-    
-    # Transform features
     X = transform_features(features, feature_engineer, feature_columns or [])
     
-    # Get probabilities
     if hasattr(model, 'predict_proba'):
         probas = model.predict_proba(X)
         
-        # Handle different probability formats
         if isinstance(probas, list):
-            # MultiOutput: list of arrays
             predicted = []
             for idx, proba in enumerate(probas):
                 if idx < len(class_names):
@@ -513,7 +628,6 @@ def predict_from_features(features: Dict, model, feature_engineer,
                             predicted.append(code)
             return predicted
         else:
-            # Single output
             predicted = []
             for idx, prob in enumerate(probas[0]):
                 if idx < len(class_names):
@@ -522,7 +636,6 @@ def predict_from_features(features: Dict, model, feature_engineer,
                         predicted.append(code)
             return predicted
     else:
-        # No probabilities, use predict
         preds = model.predict(X)
         predicted = []
         for idx, pred in enumerate(preds[0]):
@@ -533,19 +646,19 @@ def predict_from_features(features: Dict, model, feature_engineer,
         return predicted
 
 
+# =============================================================================
+# CLI FUNCTIONS
+# =============================================================================
+
 def run_explanations(model_dir: str, data_dir: str, output_file: str, 
                      limit: int = 100, series: str = '8'):
     """Run predictions and generate explanations."""
     from data_pipeline import IFMLDataPipeline
     
-    # Load model components
     print(f"Loading model from {model_dir}...")
     model, feature_engineer, class_names, threshold, feature_columns = load_model_components(model_dir)
-    
-    # Load feature importance
     importance = load_feature_importance(model_dir)
     
-    # Load data
     print(f"Loading data from {data_dir}...")
     pipeline = IFMLDataPipeline()
     pipeline.load_combined_files(data_dir, '*.json')
@@ -563,54 +676,61 @@ def run_explanations(model_dir: str, data_dir: str, output_file: str,
         ""
     ]
     
-    # Process records
     count = 0
+    total_filtered = 0
+    
     for rec in pipeline.records:
         if count >= limit:
             break
         
         features = rec.request_features
-        # Use composite_codes if available, otherwise error_codes_only
+        
         if hasattr(rec, 'composite_codes') and rec.composite_codes:
             actual = [c for c in rec.composite_codes if c.startswith(series)]
         else:
             actual = [c for c in rec.error_codes_only if c.startswith(series)]
         
         if not actual:
-            continue  # Skip records without target codes
+            continue
         
         # Run prediction
-        predicted = predict_from_features(features, model, feature_engineer, 
-                                          class_names, threshold, series, feature_columns)
+        raw_predicted = predict_from_features(features, model, feature_engineer, 
+                                              class_names, threshold, series, feature_columns)
+        
+        # Apply false positive filter
+        predicted, filtered_out = filter_predictions(raw_predicted, features)
+        total_filtered += len(filtered_out)
         
         # Get explanations
         explanations = explain_prediction(features, predicted, importance)
         
         # Format
         txn_id = rec.transaction_id if hasattr(rec, 'transaction_id') else f"record_{count}"
-        formatted = format_explanation(txn_id, features, predicted, actual, explanations)
+        formatted = format_explanation(txn_id, features, predicted, actual, explanations, filtered_out)
         lines.extend(formatted)
         
         count += 1
         if count % 20 == 0:
             print(f"Processed {count} records...")
     
-    # Write output
+    # Add summary
+    lines.insert(7, f"**Post-prediction filter removed {total_filtered} false positives**")
+    lines.insert(8, "")
+    
     with open(output_file, 'w') as f:
         f.write('\n'.join(lines))
     
     print(f"Explanations written to {output_file}")
+    print(f"Filtered out {total_filtered} false positive predictions")
 
 
 def explain_single_payment(model_dir: str, payment_json: str, series: str = '8'):
     """Explain prediction for a single payment."""
     from ifml_parser import IFMLParser
     
-    # Load model components
     model, feature_engineer, class_names, threshold, feature_columns = load_model_components(model_dir)
     importance = load_feature_importance(model_dir)
     
-    # Parse payment
     with open(payment_json) as f:
         data = json.load(f)
     
@@ -618,9 +738,10 @@ def explain_single_payment(model_dir: str, payment_json: str, series: str = '8')
     features_obj = parser.parse(data)
     features = parser.to_dict(features_obj)
     
-    # Predict
-    predicted = predict_from_features(features, model, feature_engineer,
-                                       class_names, threshold, series, feature_columns)
+    # Predict and filter
+    raw_predicted = predict_from_features(features, model, feature_engineer,
+                                          class_names, threshold, series, feature_columns)
+    predicted, filtered_out = filter_predictions(raw_predicted, features)
     
     # Explain
     explanations = explain_prediction(features, predicted, importance)
@@ -628,25 +749,45 @@ def explain_single_payment(model_dir: str, payment_json: str, series: str = '8')
     print("\n" + "="*60)
     print("PREDICTION EXPLANATION")
     print("="*60)
-    print(f"\nPredicted codes: {predicted}")
+    print(f"\nRaw predicted: {raw_predicted}")
+    print(f"After filter: {predicted}")
+    
+    if filtered_out:
+        print(f"\nFiltered out:")
+        for f in filtered_out:
+            print(f"  - {f['code']}: {f['reason']}")
+    
     print("")
     
     for code in predicted:
         print(f"\n--- {code} ---")
-        triggers = explanations.get(code, [])
-        if triggers:
-            print(f"{'Feature':<40} {'Value':<10} {'Reason'}")
-            print("-" * 70)
-            for t in triggers:
-                print(f"{t['feature']:<40} {str(t['value']):<10} {t['explanation']}")
+        code_exp = explanations.get(code, {})
+        
+        if isinstance(code_exp, dict):
+            desc = code_exp.get('description')
+            triggers = code_exp.get('triggers', [])
+            warning = code_exp.get('warning')
+            
+            if desc:
+                print(f"ACE Definition: {desc}")
+            if warning:
+                print(f"{warning}")
+            
+            if triggers:
+                print(f"{'Feature':<40} {'Value':<10} {'Explanation'}")
+                print("-" * 70)
+                for t in triggers:
+                    print(f"{t['feature']:<40} {str(t['value']):<10} {t['explanation']}")
+            else:
+                print("No specific triggers identified")
         else:
-            print("No specific triggers identified")
+            print("No explanation available")
     
     print("\n" + "="*60)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Explain 8XXX predictions')
+    parser = argparse.ArgumentParser(description='ACE Prediction Filter & Explainer')
     parser.add_argument('--model-dir', required=True, help='Model directory')
     parser.add_argument('--data-dir', default=None, help='Raw data directory')
     parser.add_argument('--payment', default=None, help='Single payment JSON file')
@@ -662,6 +803,12 @@ def main():
         run_explanations(args.model_dir, args.data_dir, args.output, args.limit, args.series)
     else:
         print("Error: Either --data-dir or --payment required")
+        print("\nUsage examples:")
+        print("  python prediction_utils.py --model-dir ./models_8x --data-dir ./raw_data --output explanations.md")
+        print("  python prediction_utils.py --model-dir ./models_8x --payment ./test.json")
+        print("\nAs a module:")
+        print("  from prediction_utils import filter_predictions, explain_prediction")
+        print("  filtered, removed = filter_predictions(predicted_codes, features)")
 
 
 if __name__ == '__main__':
