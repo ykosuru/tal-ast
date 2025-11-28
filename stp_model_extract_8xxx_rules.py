@@ -271,15 +271,87 @@ def load_feature_importance(model_dir: str) -> Dict[str, float]:
     return importance
 
 
+def load_model_components(model_dir: str):
+    """Load model, feature engineer, and class names."""
+    import pandas as pd
+    
+    model_path = Path(model_dir) / 'model.pkl'
+    fe_path = Path(model_dir) / 'feature_engineer.pkl'
+    info_path = Path(model_dir) / 'training_info.json'
+    
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    
+    with open(fe_path, 'rb') as f:
+        feature_engineer = pickle.load(f)
+    
+    with open(info_path) as f:
+        info = json.load(f)
+    
+    class_names = info.get('class_names', [])
+    threshold = info.get('threshold', 0.5)
+    
+    return model, feature_engineer, class_names, threshold
+
+
+def predict_from_features(features: Dict, model, feature_engineer, 
+                          class_names: List[str], threshold: float = 0.5,
+                          series: str = '8') -> List[str]:
+    """Run prediction directly from features dict."""
+    import pandas as pd
+    
+    # Transform features
+    df = pd.DataFrame([features])
+    X = feature_engineer.transform(df)
+    
+    # Get probabilities
+    if hasattr(model, 'predict_proba'):
+        probas = model.predict_proba(X)
+        
+        # Handle different probability formats
+        if isinstance(probas, list):
+            # MultiOutput: list of arrays
+            predicted = []
+            for idx, proba in enumerate(probas):
+                if idx < len(class_names):
+                    code = class_names[idx]
+                    if code.startswith(series):
+                        if len(proba.shape) > 1 and proba.shape[1] >= 2:
+                            prob = proba[0, 1]
+                        else:
+                            prob = proba[0]
+                        if prob >= threshold:
+                            predicted.append(code)
+            return predicted
+        else:
+            # Single output
+            predicted = []
+            for idx, prob in enumerate(probas[0]):
+                if idx < len(class_names):
+                    code = class_names[idx]
+                    if code.startswith(series) and prob >= threshold:
+                        predicted.append(code)
+            return predicted
+    else:
+        # No probabilities, use predict
+        preds = model.predict(X)
+        predicted = []
+        for idx, pred in enumerate(preds[0]):
+            if pred == 1 and idx < len(class_names):
+                code = class_names[idx]
+                if code.startswith(series):
+                    predicted.append(code)
+        return predicted
+
+
 def run_explanations(model_dir: str, data_dir: str, output_file: str, 
                      limit: int = 100, series: str = '8'):
     """Run predictions and generate explanations."""
     from data_pipeline import IFMLDataPipeline
-    from predictor import ACEPredictor
     
-    # Load model
+    # Load model components
     print(f"Loading model from {model_dir}...")
-    predictor = ACEPredictor(model_dir)
+    model, feature_engineer, class_names, threshold = load_model_components(model_dir)
     
     # Load feature importance
     importance = load_feature_importance(model_dir)
@@ -309,14 +381,18 @@ def run_explanations(model_dir: str, data_dir: str, output_file: str,
             break
         
         features = rec.request_features
-        actual = [c for c in rec.error_codes_only if c.startswith(series)]
+        # Use composite_codes if available, otherwise error_codes_only
+        if hasattr(rec, 'composite_codes') and rec.composite_codes:
+            actual = [c for c in rec.composite_codes if c.startswith(series)]
+        else:
+            actual = [c for c in rec.error_codes_only if c.startswith(series)]
         
         if not actual:
             continue  # Skip records without target codes
         
         # Run prediction
-        result = predictor.predict_from_features(features)
-        predicted = [c for c in result.predicted_codes if c.startswith(series)]
+        predicted = predict_from_features(features, model, feature_engineer, 
+                                          class_names, threshold, series)
         
         # Get explanations
         explanations = explain_prediction(features, predicted, importance)
@@ -340,10 +416,9 @@ def run_explanations(model_dir: str, data_dir: str, output_file: str,
 def explain_single_payment(model_dir: str, payment_json: str, series: str = '8'):
     """Explain prediction for a single payment."""
     from ifml_parser import IFMLParser
-    from predictor import ACEPredictor
     
-    # Load model
-    predictor = ACEPredictor(model_dir)
+    # Load model components
+    model, feature_engineer, class_names, threshold = load_model_components(model_dir)
     importance = load_feature_importance(model_dir)
     
     # Parse payment
@@ -355,8 +430,8 @@ def explain_single_payment(model_dir: str, payment_json: str, series: str = '8')
     features = parser.to_dict(features_obj)
     
     # Predict
-    result = predictor.predict_from_features(features)
-    predicted = [c for c in result.predicted_codes if c.startswith(series)]
+    predicted = predict_from_features(features, model, feature_engineer,
+                                       class_names, threshold, series)
     
     # Explain
     explanations = explain_prediction(features, predicted, importance)
