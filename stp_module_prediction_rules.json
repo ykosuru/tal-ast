@@ -73,68 +73,68 @@
   "_section_9xxx": "9XXX REPAIR/ENRICHMENT CODES",
 
   "9002": {
-    "require_true": ["has_account"],
+    "require_true": ["present", "has_account"],
     "require_false": [],
     "description": "Account cleaned"
   },
   "9004": {
-    "require_true": ["needs_iban"],
+    "require_true": ["present", "needs_iban"],
     "require_false": ["has_iban"],
-    "description": "IBAN derived for credit party"
+    "description": "IBAN derived for credit party - party present, needs IBAN, doesn't have one"
   },
   "9005": {
-    "require_true": ["has_nch"],
+    "require_true": ["present", "has_nch"],
     "require_false": ["has_bic"],
-    "description": "BIC derived from NCH"
+    "description": "BIC derived from NCH - party present with NCH but no BIC"
   },
   "9006": {
-    "require_true": ["has_iban"],
+    "require_true": ["present", "has_iban"],
     "require_false": [],
-    "description": "IBAN formatted"
+    "description": "IBAN formatted - party present with IBAN"
   },
   "9007": {
-    "require_true": ["needs_iban"],
+    "require_true": ["present", "needs_iban"],
     "require_false": ["has_iban"],
-    "description": "IBAN derived for beneficiary"
+    "description": "IBAN derived for beneficiary - party present, needs IBAN, doesn't have one"
   },
   "9008": {
-    "require_true": ["has_iban"],
+    "require_true": ["present", "has_iban"],
     "require_false": ["has_bic"],
-    "description": "BIC derived from IBAN"
+    "description": "BIC derived from IBAN - party present with IBAN but no BIC"
   },
   "9015": {
-    "require_true": ["has_name"],
+    "require_true": ["present", "has_name"],
     "require_false": [],
-    "description": "Name cleaned"
+    "description": "Name cleaned - party present with name"
   },
   "9021": {
-    "require_true": ["has_nch"],
+    "require_true": ["present", "has_nch"],
     "require_false": [],
-    "description": "NCH formatted"
+    "description": "NCH formatted - party present with NCH"
   },
   "9024": {
-    "require_true": ["has_bic"],
+    "require_true": ["present", "has_bic"],
     "require_false": ["has_intermediary"],
-    "description": "Intermediary added"
+    "description": "Intermediary added - beneficiary present with BIC, no intermediary yet"
   },
   "9025": {
-    "require_true": ["has_account"],
+    "require_true": ["present", "has_account"],
     "require_false": [],
-    "description": "Account length fixed"
+    "description": "Account length fixed - party present with account"
   },
   "9477": {
-    "require_true": ["has_bic"],
+    "require_true": ["present", "has_bic"],
     "require_false": [],
-    "description": "BIC enriched 8->11 chars"
+    "description": "BIC enriched 8->11 chars - party present with BIC"
   },
   "9479": {
-    "require_true": ["has_bic"],
+    "require_true": ["present", "has_bic"],
     "require_false": [],
-    "description": "Party enriched from BIC directory"
+    "description": "Party enriched from BIC directory - party present with BIC"
   },
   "9480": {
-    "require_true": ["has_bic"],
+    "require_true": ["present", "has_bic"],
     "require_false": [],
-    "description": "Credit party enriched"
+    "description": "Credit party enriched - party present with BIC"
   }
 }
