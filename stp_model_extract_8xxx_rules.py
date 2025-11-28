@@ -280,7 +280,15 @@ def load_model_components(model_dir: str):
     info_path = Path(model_dir) / 'training_info.json'
     
     with open(model_path, 'rb') as f:
-        model = pickle.load(f)
+        model_data = pickle.load(f)
+    
+    # Handle model as dict
+    if isinstance(model_data, dict):
+        model = model_data.get('model')
+        print(f"Extracted model from dict, type: {type(model).__name__}")
+    else:
+        model = model_data
+        print(f"Model type: {type(model).__name__}")
     
     with open(fe_path, 'rb') as f:
         feature_engineer = pickle.load(f)
