@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Extract human-readable rules for 8XXX error codes.
+Explain 8XXX predictions - show which input fields triggered each code.
 
 Usage:
-    python extract_rules.py --model-dir ./models_8x_dt --data-dir ./raw_data --output rules_8xxx.md
+    python explain_predictions.py --model-dir ./models_8x --data-dir ./raw_data --output explanations.md --limit 100
 """
 
 import argparse
@@ -11,627 +11,393 @@ import json
 import pickle
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-# Try to import sklearn for decision tree extraction
-try:
-    from sklearn.tree import _tree
-    HAS_SKLEARN = True
-except ImportError:
-    HAS_SKLEARN = False
 
-
-def extract_dt_rules(model, feature_names: List[str], class_names: List[str], 
-                     max_depth: int = 5) -> Dict[str, List[str]]:
-    """Extract rules from Decision Tree model."""
-    rules_by_code = defaultdict(list)
+# Feature to human-readable explanation mapping
+FEATURE_EXPLANATIONS = {
+    # IBAN related
+    'needs_iban': 'Party is in IBAN-required country',
+    'has_iban': 'IBAN is provided',
+    'iban_valid_format': 'IBAN format is valid',
+    'iban_checksum_valid': 'IBAN checksum passes',
+    'missing_required_iban': 'Required IBAN is missing',
     
-    if not HAS_SKLEARN:
-        return rules_by_code
+    # BIC related
+    'has_bic': 'BIC is provided',
+    'bic_valid_format': 'BIC format is valid (8 or 11 chars)',
+    'bic_valid_country': 'BIC country code is valid',
+    'bic_iban_match': 'BIC and IBAN countries match',
+    'bic_party_country_match': 'BIC matches party country',
     
-    # Handle MultiOutputClassifier
-    if hasattr(model, 'estimators_'):
-        for idx, estimator in enumerate(model.estimators_):
-            if idx < len(class_names):
-                code = class_names[idx]
-                if code.startswith('8'):
-                    tree_rules = _extract_tree_rules(estimator, feature_names, max_depth)
-                    rules_by_code[code].extend(tree_rules)
-    elif hasattr(model, 'tree_'):
-        tree_rules = _extract_tree_rules(model, feature_names, max_depth)
-        # Assign to first class
-        if class_names:
-            rules_by_code[class_names[0]].extend(tree_rules)
+    # NCH/Routing related
+    'has_nch': 'NCH/routing number is provided',
+    'nch_valid': 'NCH format is valid',
+    'fedaba_checksum_valid': 'FEDABA checksum passes',
+    'nch_validation_applicable': 'NCH validation applies to this payment',
+    'has_adr_bank_id': 'Bank ID in address block',
     
-    return rules_by_code
+    # Account related
+    'has_account': 'Account number is provided',
+    'account_numeric': 'Account is numeric only',
+    'is_iban': 'Account is IBAN format',
+    'is_clabe': 'Account is CLABE format (Mexico)',
+    'is_fedaba': 'Account is FEDABA format',
+    
+    # Party presence
+    'present': 'Party is present in message',
+    'has_id': 'Party has ID',
+    'has_name': 'Party has name',
+    
+    # Payment type
+    'is_domestic': 'Domestic payment',
+    'is_international': 'International payment',
+    'is_cross_border': 'Cross-border payment',
+}
+
+# Code to relevant features mapping
+CODE_RELEVANT_FEATURES = {
+    '8004': ['needs_iban', 'has_iban', 'missing_required_iban', 'is_international'],
+    '8022': ['has_iban', 'iban_valid_format', 'iban_checksum_valid'],
+    '8026': ['has_nch', 'nch_valid', 'has_adr_bank_id', 'nch_sources'],
+    '8001': ['has_bic', 'bic_valid_format', 'bic_valid_country'],
+    '8852': ['has_account', 'present'],
+    '8894': ['has_iban', 'iban_checksum_valid', 'iban_valid_format'],
+    '8895': ['has_nch', 'nch_valid', 'fedaba_checksum_valid', 'nch_validation_applicable', 'is_domestic'],
+    '8896': ['has_nch', 'is_domestic', 'nch_validation_applicable'],
+}
+
+# Party prefixes
+PARTY_PREFIXES = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'ordi', 'acwi']
+
+PARTY_NAMES = {
+    'orig': 'Originator',
+    'send': 'Sending Bank', 
+    'dbt': 'Debit Party',
+    'cdt': 'Credit Party',
+    'intm': 'Intermediary Bank',
+    'bnf': 'Beneficiary Bank',
+    'ordi': 'Originator (alt)',
+    'acwi': 'Credit Party (alt)',
+}
 
 
-def extract_rf_rules(model_dir: str, max_depth: int = 4, min_samples: int = 50) -> Dict[str, List[dict]]:
+def get_feature_explanation(feature_name: str) -> str:
+    """Get human-readable explanation for a feature."""
+    # Strip prefix
+    for prefix in PARTY_PREFIXES:
+        if feature_name.startswith(f'{prefix}_'):
+            base_name = feature_name[len(prefix)+1:]
+            party_name = PARTY_NAMES.get(prefix, prefix)
+            base_explanation = FEATURE_EXPLANATIONS.get(base_name, base_name)
+            return f"{party_name}: {base_explanation}"
+    
+    return FEATURE_EXPLANATIONS.get(feature_name, feature_name)
+
+
+def explain_prediction(features: Dict, predicted_codes: List[str], 
+                       feature_importance: Optional[Dict] = None) -> Dict[str, List[dict]]:
     """
-    Extract rules from Random Forest model.
+    Explain why each code was predicted.
     
-    Random Forest = many decision trees. We extract top rules from each tree
-    and find consensus rules that appear across multiple trees.
+    Returns dict mapping code -> list of triggering conditions
     """
-    from collections import Counter
+    explanations = {}
+    
+    for code in predicted_codes:
+        base_code = code.split('_')[0]
+        party_suffix = code.split('_')[1] if '_' in code else None
+        
+        triggers = []
+        
+        # Get relevant features for this code
+        relevant = CODE_RELEVANT_FEATURES.get(base_code, [])
+        
+        # Determine which party to check
+        if party_suffix:
+            party_prefix = _suffix_to_prefix(party_suffix)
+            prefixes_to_check = [party_prefix] if party_prefix else PARTY_PREFIXES
+        else:
+            prefixes_to_check = PARTY_PREFIXES
+        
+        # Check each relevant feature
+        for prefix in prefixes_to_check:
+            for feat_base in relevant:
+                feat_name = f'{prefix}_{feat_base}'
+                
+                if feat_name in features:
+                    value = features[feat_name]
+                    
+                    # Determine if this is a triggering condition
+                    is_trigger = False
+                    trigger_type = None
+                    
+                    if isinstance(value, bool):
+                        # For "has_*" features, False is usually the problem
+                        if feat_base.startswith('has_') or feat_base.endswith('_valid') or feat_base.endswith('_match'):
+                            if not value:
+                                is_trigger = True
+                                trigger_type = 'missing'
+                        # For "needs_*" or "is_*", True may indicate requirement
+                        elif feat_base.startswith('needs_') or feat_base.startswith('is_') or feat_base.startswith('missing_'):
+                            if value:
+                                is_trigger = True
+                                trigger_type = 'required'
+                    
+                    if is_trigger:
+                        explanation = get_feature_explanation(feat_name)
+                        triggers.append({
+                            'feature': feat_name,
+                            'value': value,
+                            'explanation': explanation,
+                            'trigger_type': trigger_type
+                        })
+        
+        # Also check global features
+        global_features = ['is_cross_border', 'is_domestic', 'missing_required_iban', 
+                          'has_intermediary', 'has_beneficiary_bank']
+        for feat in global_features:
+            if feat in features and feat in relevant:
+                value = features[feat]
+                if isinstance(value, bool) and value:
+                    triggers.append({
+                        'feature': feat,
+                        'value': value,
+                        'explanation': get_feature_explanation(feat),
+                        'trigger_type': 'condition'
+                    })
+        
+        # Sort by importance if available
+        if feature_importance:
+            triggers.sort(key=lambda x: -feature_importance.get(x['feature'], 0))
+        
+        explanations[code] = triggers
+    
+    return explanations
+
+
+def _suffix_to_prefix(suffix: str) -> Optional[str]:
+    """Convert party suffix to feature prefix."""
+    mapping = {
+        'ORGPTY': 'orig',
+        'SNDBNK': 'send',
+        'DBTPTY': 'dbt',
+        'CDTPTY': 'cdt',
+        'INTBNK': 'intm',
+        'BNFBNK': 'bnf',
+        'BNPPTY': 'bnf',  # Beneficiary party often maps to bnf
+    }
+    return mapping.get(suffix)
+
+
+def format_explanation(txn_id: str, features: Dict, predicted_codes: List[str], 
+                       actual_codes: List[str], explanations: Dict) -> List[str]:
+    """Format explanation as markdown."""
+    lines = []
+    lines.append(f"### Transaction: {txn_id}")
+    lines.append("")
+    
+    # Show prediction vs actual
+    pred_str = ', '.join(predicted_codes) if predicted_codes else 'None'
+    actual_str = ', '.join(actual_codes) if actual_codes else 'None'
+    
+    match = set(predicted_codes) == set(actual_codes)
+    status = "✓ MATCH" if match else "✗ MISMATCH"
+    
+    lines.append(f"**Predicted:** {pred_str}")
+    lines.append(f"**Actual:** {actual_str}")
+    lines.append(f"**Status:** {status}")
+    lines.append("")
+    
+    # Show explanations for each predicted code
+    for code in predicted_codes:
+        lines.append(f"#### Why {code}?")
+        lines.append("")
+        
+        triggers = explanations.get(code, [])
+        if triggers:
+            lines.append("| Field | Value | Explanation |")
+            lines.append("|-------|-------|-------------|")
+            for t in triggers[:5]:  # Top 5 triggers
+                feat = t['feature']
+                val = t['value']
+                expl = t['explanation']
+                lines.append(f"| `{feat}` | {val} | {expl} |")
+            lines.append("")
+        else:
+            lines.append("*No specific triggers identified (may be pattern-based)*")
+            lines.append("")
+    
+    # Show key input values
+    lines.append("#### Key Input Fields")
+    lines.append("")
+    lines.append("```")
+    
+    key_fields = [
+        'primary_currency', 'is_cross_border',
+        'bnf_has_iban', 'bnf_needs_iban', 'bnf_has_bic', 'bnf_has_nch',
+        'cdt_has_iban', 'cdt_needs_iban', 'cdt_has_account',
+        'intm_present', 'intm_has_bic',
+    ]
+    
+    for field in key_fields:
+        if field in features:
+            lines.append(f"{field}: {features[field]}")
+    
+    lines.append("```")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    
+    return lines
+
+
+def load_feature_importance(model_dir: str) -> Dict[str, float]:
+    """Load feature importance from model."""
+    importance = {}
+    
+    try:
+        info_path = Path(model_dir) / 'training_info.json'
+        if info_path.exists():
+            with open(info_path) as f:
+                info = json.load(f)
+                if 'feature_importance' in info:
+                    for item in info['feature_importance']:
+                        importance[item['feature']] = item['importance']
+    except Exception as e:
+        print(f"Warning: Could not load feature importance: {e}")
+    
+    return importance
+
+
+def run_explanations(model_dir: str, data_dir: str, output_file: str, 
+                     limit: int = 100, series: str = '8'):
+    """Run predictions and generate explanations."""
+    from data_pipeline import IFMLDataPipeline
+    from predictor import ACEPredictor
     
     # Load model
-    model_path = Path(model_dir) / 'model.pkl'
-    with open(model_path, 'rb') as f:
-        model_data = pickle.load(f)
-    
-    # Handle dict-wrapped model
-    if isinstance(model_data, dict):
-        model = model_data.get('model')
-        feature_names = model_data.get('feature_names', [])
-        class_names = model_data.get('class_names', [])
-    else:
-        model = model_data
-        feature_names = []
-        class_names = []
-    
-    # Load class names from label encoder if needed
-    if not class_names:
-        label_path = Path(model_dir) / 'label_encoder.pkl'
-        if label_path.exists():
-            with open(label_path, 'rb') as f:
-                label_data = pickle.load(f)
-                class_names = label_data.get('code_to_idx', {}).keys()
-                class_names = list(class_names)
-    
-    print(f"Model type: {type(model).__name__}")
-    print(f"Features: {len(feature_names)}")
-    print(f"Classes: {len(class_names)}")
-    
-    rules_by_code = defaultdict(list)
-    
-    # MultiOutputClassifier wraps one classifier per output
-    if hasattr(model, 'estimators_'):
-        for idx, estimator in enumerate(model.estimators_):
-            if idx >= len(class_names):
-                continue
-            
-            code = class_names[idx]
-            if not code.startswith('8'):
-                continue
-            
-            # Random Forest has multiple trees
-            if hasattr(estimator, 'estimators_'):
-                # This is a RandomForest/GradientBoosting
-                all_rules = []
-                for tree in estimator.estimators_[:20]:  # Sample first 20 trees
-                    tree_rules = _extract_tree_paths(tree, feature_names, max_depth)
-                    all_rules.extend(tree_rules)
-                
-                # Find consensus rules (appear in multiple trees)
-                rule_counts = Counter([r['condition'] for r in all_rules])
-                for condition, count in rule_counts.most_common(5):
-                    if count >= 2:  # Appears in at least 2 trees
-                        rules_by_code[code].append({
-                            'condition': condition,
-                            'tree_count': count,
-                            'confidence': 'high' if count >= 5 else 'medium'
-                        })
-            
-            elif hasattr(estimator, 'tree_'):
-                # Single decision tree
-                tree_rules = _extract_tree_paths(estimator, feature_names, max_depth)
-                for r in tree_rules[:5]:
-                    rules_by_code[code].append(r)
-    
-    return rules_by_code
-
-
-def _extract_tree_paths(tree_model, feature_names: List[str], max_depth: int) -> List[dict]:
-    """Extract decision paths from a single tree that lead to positive predictions."""
-    if not HAS_SKLEARN:
-        return []
-    
-    tree_ = tree_model.tree_
-    
-    if len(feature_names) == 0:
-        feature_names = [f'f{i}' for i in range(tree_.n_features)]
-    
-    rules = []
-    
-    def recurse(node, depth, conditions):
-        if depth > max_depth:
-            return
-        
-        # Leaf node
-        if tree_.feature[node] == _tree.TREE_UNDEFINED:
-            value = tree_.value[node]
-            n_samples = sum(value[0])
-            
-            if len(value[0]) >= 2:
-                pos_rate = value[0][1] / n_samples if n_samples > 0 else 0
-                
-                # Only keep high-confidence positive predictions
-                if pos_rate > 0.7 and n_samples >= 10 and conditions:
-                    # Simplify conditions - keep only important ones
-                    simplified = _simplify_conditions(conditions)
-                    if simplified:
-                        rules.append({
-                            'condition': simplified,
-                            'confidence': pos_rate,
-                            'samples': int(n_samples)
-                        })
-            return
-        
-        feat_idx = tree_.feature[node]
-        if feat_idx >= len(feature_names):
-            return
-            
-        name = feature_names[feat_idx]
-        threshold = tree_.threshold[node]
-        
-        # Skip non-informative features
-        skip_features = ['amount', 'count', 'length', 'freq', 'encoded']
-        if any(s in name.lower() for s in skip_features):
-            # Still recurse but don't add condition
-            recurse(tree_.children_left[node], depth + 1, conditions)
-            recurse(tree_.children_right[node], depth + 1, conditions)
-            return
-        
-        # For boolean features (threshold ~0.5)
-        if 0.4 < threshold < 0.6:
-            # Left = False, Right = True
-            recurse(tree_.children_left[node], depth + 1, 
-                   conditions + [(name, '=', 'False')])
-            recurse(tree_.children_right[node], depth + 1, 
-                   conditions + [(name, '=', 'True')])
-        else:
-            recurse(tree_.children_left[node], depth + 1, 
-                   conditions + [(name, '<=', f'{threshold:.2f}')])
-            recurse(tree_.children_right[node], depth + 1, 
-                   conditions + [(name, '>', f'{threshold:.2f}')])
-    
-    recurse(0, 0, [])
-    return rules
-
-
-def _simplify_conditions(conditions: List[tuple]) -> str:
-    """Simplify and format conditions."""
-    # Keep only boolean conditions set to True
-    true_conditions = [c[0] for c in conditions if c[1] == '=' and c[2] == 'True']
-    false_conditions = [c[0] for c in conditions if c[1] == '=' and c[2] == 'False']
-    
-    parts = []
-    for feat in true_conditions[:4]:  # Max 4 conditions
-        parts.append(f"{feat} = True")
-    for feat in false_conditions[:2]:  # Max 2 negative conditions
-        parts.append(f"{feat} = False")
-    
-    if parts:
-        return " AND ".join(parts)
-    return None
-
-
-def extract_rules_from_model(model_dir: str, output_file: str):
-    """Extract rules from Random Forest model and format as markdown."""
     print(f"Loading model from {model_dir}...")
+    predictor = ACEPredictor(model_dir)
     
-    rules_by_code = extract_rf_rules(model_dir)
+    # Load feature importance
+    importance = load_feature_importance(model_dir)
     
-    if not rules_by_code:
-        print("No rules extracted. Try --detailed mode with data analysis instead.")
-        return
-    
-    descriptions = get_code_descriptions()
-    
-    lines = [
-        "# 8XXX Validation Rules - Extracted from Random Forest Model",
-        "",
-        "## Overview",
-        "",
-        "These rules were extracted by analyzing decision paths in the Random Forest model.",
-        "Rules that appear across multiple trees are marked as high confidence.",
-        "",
-        "---",
-        ""
-    ]
-    
-    for code in sorted(rules_by_code.keys()):
-        rules = rules_by_code[code]
-        base_code = code.split('_')[0]
-        desc = descriptions.get(base_code, 'Unknown')
-        
-        lines.append(f"## {code}")
-        lines.append("")
-        lines.append(f"**Description:** {desc}")
-        lines.append("")
-        lines.append("**Discovered Rules:**")
-        lines.append("")
-        
-        for i, rule in enumerate(rules, 1):
-            cond = rule.get('condition', '')
-            conf = rule.get('confidence', 'medium')
-            trees = rule.get('tree_count', 1)
-            
-            if isinstance(conf, float):
-                conf_str = f"{conf*100:.0f}%"
-            else:
-                conf_str = conf
-            
-            lines.append(f"**Rule {i}** (confidence: {conf_str}, trees: {trees})")
-            lines.append("```")
-            lines.append(f"IF {cond}")
-            lines.append(f"THEN predict {code}")
-            lines.append("```")
-            lines.append("")
-        
-        lines.append("---")
-        lines.append("")
-    
-    with open(output_file, 'w') as f:
-        f.write('\n'.join(lines))
-    
-    print(f"Rules written to {output_file}")
-
-
-def _extract_tree_rules(tree_model, feature_names: List[str], max_depth: int) -> List[str]:
-    """Extract rules from a single decision tree."""
-    rules = []
-    tree_ = tree_model.tree_
-    feature_name = [
-        feature_names[i] if i != _tree.TREE_UNDEFINED else "undefined!"
-        for i in tree_.feature
-    ]
-    
-    def recurse(node, depth, conditions):
-        if depth > max_depth:
-            return
-        
-        # Leaf node
-        if tree_.feature[node] == _tree.TREE_UNDEFINED:
-            # Check if this leaf predicts positive class
-            value = tree_.value[node]
-            if len(value[0]) >= 2 and value[0][1] > value[0][0]:
-                # Positive prediction
-                confidence = value[0][1] / sum(value[0])
-                if confidence > 0.6 and conditions:
-                    rule = " AND ".join(conditions)
-                    rules.append(f"IF {rule} THEN predict (conf: {confidence:.2f})")
-            return
-        
-        name = feature_name[node]
-        threshold = tree_.threshold[node]
-        
-        # Left child (<=)
-        if tree_.children_left[node] != _tree.TREE_LEAF:
-            left_cond = conditions + [f"{name} <= {threshold:.4f}"]
-            recurse(tree_.children_left[node], depth + 1, left_cond)
-        
-        # Right child (>)
-        if tree_.children_right[node] != _tree.TREE_LEAF:
-            right_cond = conditions + [f"{name} > {threshold:.4f}"]
-            recurse(tree_.children_right[node], depth + 1, right_cond)
-    
-    recurse(0, 0, [])
-    return rules
-
-
-def analyze_data_patterns(data_dir: str, code_series: str = '8') -> Dict[str, Dict]:
-    """Analyze raw data to find feature patterns for each code."""
-    from data_pipeline import IFMLDataPipeline
-    
+    # Load data
+    print(f"Loading data from {data_dir}...")
     pipeline = IFMLDataPipeline()
     pipeline.load_combined_files(data_dir, '*.json')
     
     print(f"Loaded {len(pipeline.records)} records")
     
-    # Collect feature values when each code fires
-    code_patterns = defaultdict(lambda: {
-        'count': 0,
-        'feature_values': defaultdict(list),
-        'common_conditions': []
-    })
-    
-    # Track feature presence for each code
-    for rec in pipeline.records:
-        # Get 8XXX codes from this record
-        codes = [c for c in rec.error_codes_only if c.startswith(code_series)]
-        
-        if not codes:
-            continue
-        
-        features = rec.request_features
-        
-        for code in codes:
-            base_code = code.split('_')[0]
-            code_patterns[code]['count'] += 1
-            
-            # Track key feature values
-            for key, value in features.items():
-                if isinstance(value, bool) and value:
-                    code_patterns[code]['feature_values'][key].append(value)
-                elif isinstance(value, (int, float)) and value > 0:
-                    code_patterns[code]['feature_values'][key].append(value)
-    
-    return code_patterns
-
-
-def derive_rules_from_patterns(code_patterns: Dict, min_support: float = 0.7) -> Dict[str, List[str]]:
-    """Derive IF-THEN rules from observed patterns."""
-    rules_by_code = {}
-    
-    for code, data in sorted(code_patterns.items()):
-        count = data['count']
-        if count < 10:
-            continue
-        
-        rules = []
-        conditions = []
-        
-        # Find features that are TRUE in most cases
-        for feature, values in data['feature_values'].items():
-            if len(values) >= count * min_support:
-                # This feature is present in 70%+ of cases
-                if all(isinstance(v, bool) for v in values):
-                    conditions.append(f"{feature} = True")
-                elif all(isinstance(v, (int, float)) for v in values):
-                    avg_val = np.mean(values)
-                    min_val = np.min(values)
-                    if min_val > 0:
-                        conditions.append(f"{feature} > 0")
-        
-        if conditions:
-            # Sort by relevance (validation features first)
-            priority_keywords = ['iban', 'nch', 'bic', 'valid', 'needs', 'missing', 'domestic', 'international']
-            
-            def priority(cond):
-                cond_lower = cond.lower()
-                for i, kw in enumerate(priority_keywords):
-                    if kw in cond_lower:
-                        return i
-                return 100
-            
-            conditions.sort(key=priority)
-            
-            # Take top conditions
-            top_conditions = conditions[:5]
-            rule = f"IF {' AND '.join(top_conditions)} THEN {code}"
-            rules.append(rule)
-        
-        if rules:
-            rules_by_code[code] = rules
-    
-    return rules_by_code
-
-
-def get_code_descriptions() -> Dict[str, str]:
-    """Return descriptions for 8XXX codes."""
-    return {
-        '8001': 'Invalid BIC format',
-        '8004': 'Missing required IBAN for IBAN country',
-        '8022': 'Invalid IBAN format',
-        '8026': 'Inconsistent NCH/routing info',
-        '8852': 'Missing beneficiary account',
-        '8894': 'Invalid IBAN checksum',
-        '8895': 'Invalid NCH/ABA routing number',
-        '8896': 'Missing NCH for domestic payment',
-    }
-
-
-def format_rules_markdown(rules_by_code: Dict[str, List[str]], 
-                          code_patterns: Dict,
-                          output_file: str):
-    """Format rules as markdown documentation."""
-    descriptions = get_code_descriptions()
-    
     lines = [
-        "# 8XXX Validation Error Codes - Discovered Rules",
+        f"# {series}XXX Prediction Explanations",
         "",
         "## Overview",
         "",
-        "These rules were extracted from analyzing payment data patterns.",
-        "Each rule shows conditions that commonly trigger the error code.",
+        f"This document shows what input fields triggered each {series}XXX prediction.",
         "",
         "---",
         ""
     ]
     
-    # Sort by code
-    for code in sorted(rules_by_code.keys()):
-        rules = rules_by_code[code]
-        base_code = code.split('_')[0]
-        desc = descriptions.get(base_code, 'Unknown')
-        count = code_patterns.get(code, {}).get('count', 0)
-        
-        lines.append(f"## {code}")
-        lines.append("")
-        lines.append(f"**Description:** {desc}")
-        lines.append(f"**Occurrences in data:** {count}")
-        lines.append("")
-        lines.append("**Rules:**")
-        lines.append("```")
-        for rule in rules:
-            lines.append(rule)
-        lines.append("```")
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-    
-    # Write file
-    with open(output_file, 'w') as f:
-        f.write('\n'.join(lines))
-    
-    print(f"Rules written to {output_file}")
-
-
-def extract_detailed_rules(data_dir: str, output_file: str):
-    """Extract detailed rules by analyzing feature correlations."""
-    from data_pipeline import IFMLDataPipeline
-    
-    pipeline = IFMLDataPipeline()
-    pipeline.load_combined_files(data_dir, '*.json')
-    
-    print(f"Analyzing {len(pipeline.records)} records...")
-    
-    # Define which features are relevant for each code
-    code_feature_map = {
-        '8004': ['needs_iban', 'has_iban', 'is_international', 'iban_country', 'country'],
-        '8022': ['iban_valid_format', 'has_iban', 'iban_checksum_valid'],
-        '8026': ['nch_sources', 'has_nch', 'nch_valid', 'has_adr_bank_id'],
-        '8852': ['has_account', 'account_length'],
-        '8894': ['iban_checksum_valid', 'iban_valid_format', 'has_iban'],
-        '8895': ['nch_valid', 'fedaba_checksum_valid', 'nch_validation_applicable', 'is_domestic', 'has_nch'],
-        '8896': ['has_nch', 'is_domestic', 'nch_validation_applicable'],
-    }
-    
-    # Party prefixes
-    prefixes = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'ordi', 'acwi']
-    
-    # Collect statistics
-    code_stats = defaultdict(lambda: {
-        'total': 0,
-        'feature_when_true': defaultdict(int),
-        'feature_when_false': defaultdict(int),
-    })
-    
+    # Process records
+    count = 0
     for rec in pipeline.records:
+        if count >= limit:
+            break
+        
         features = rec.request_features
-        codes = set(c.split('_')[0] for c in rec.error_codes_only if c.startswith('8'))
+        actual = [c for c in rec.error_codes_only if c.startswith(series)]
         
-        for base_code, relevant_features in code_feature_map.items():
-            has_code = base_code in codes
-            
-            for prefix in prefixes:
-                for feat in relevant_features:
-                    full_feat = f"{prefix}_{feat}"
-                    if full_feat in features:
-                        val = features[full_feat]
-                        if isinstance(val, bool) and val:
-                            if has_code:
-                                code_stats[base_code]['feature_when_true'][full_feat] += 1
-                            else:
-                                code_stats[base_code]['feature_when_false'][full_feat] += 1
-            
-            if has_code:
-                code_stats[base_code]['total'] += 1
+        if not actual:
+            continue  # Skip records without target codes
+        
+        # Run prediction
+        result = predictor.predict_from_features(features)
+        predicted = [c for c in result.predicted_codes if c.startswith(series)]
+        
+        # Get explanations
+        explanations = explain_prediction(features, predicted, importance)
+        
+        # Format
+        txn_id = rec.transaction_id if hasattr(rec, 'transaction_id') else f"record_{count}"
+        formatted = format_explanation(txn_id, features, predicted, actual, explanations)
+        lines.extend(formatted)
+        
+        count += 1
+        if count % 20 == 0:
+            print(f"Processed {count} records...")
     
-    # Generate rules
-    lines = [
-        "# 8XXX Validation Error Codes - Detailed Rules",
-        "",
-        "## Extraction Method",
-        "",
-        "Rules extracted by analyzing feature correlations when codes fire vs don't fire.",
-        "",
-        "---",
-        ""
-    ]
-    
-    descriptions = get_code_descriptions()
-    
-    for base_code in sorted(code_stats.keys()):
-        stats = code_stats[base_code]
-        total = stats['total']
-        
-        if total < 10:
-            continue
-        
-        desc = descriptions.get(base_code, 'Unknown')
-        
-        lines.append(f"## {base_code} - {desc}")
-        lines.append("")
-        lines.append(f"**Total occurrences:** {total}")
-        lines.append("")
-        
-        # Find discriminative features
-        discriminative = []
-        for feat, count_true in stats['feature_when_true'].items():
-            count_false = stats['feature_when_false'].get(feat, 0)
-            
-            # Calculate lift
-            if count_false > 0:
-                ratio = (count_true / total) / (count_false / (len(pipeline.records) - total + 1))
-            else:
-                ratio = float('inf') if count_true > 0 else 0
-            
-            support = count_true / total
-            
-            if support > 0.5 and ratio > 2:
-                discriminative.append((feat, support, ratio))
-        
-        # Sort by support
-        discriminative.sort(key=lambda x: -x[1])
-        
-        if discriminative:
-            lines.append("**Key Conditions (support > 50%, lift > 2):**")
-            lines.append("")
-            lines.append("| Feature | Support | Lift |")
-            lines.append("|---------|---------|------|")
-            for feat, support, ratio in discriminative[:10]:
-                ratio_str = f"{ratio:.1f}" if ratio != float('inf') else "∞"
-                lines.append(f"| `{feat}` | {support*100:.0f}% | {ratio_str}x |")
-            lines.append("")
-            
-            # Generate rule
-            top_features = [f[0] for f in discriminative[:3]]
-            if top_features:
-                rule_parts = [f"{f} = True" for f in top_features]
-                lines.append("**Derived Rule:**")
-                lines.append("```")
-                lines.append(f"IF {' AND '.join(rule_parts)}")
-                lines.append(f"THEN predict {base_code}")
-                lines.append("```")
-                lines.append("")
-        else:
-            lines.append("*No strongly discriminative features found*")
-            lines.append("")
-        
-        lines.append("---")
-        lines.append("")
-    
-    # Write file
+    # Write output
     with open(output_file, 'w') as f:
         f.write('\n'.join(lines))
     
-    print(f"Detailed rules written to {output_file}")
+    print(f"Explanations written to {output_file}")
+
+
+def explain_single_payment(model_dir: str, payment_json: str, series: str = '8'):
+    """Explain prediction for a single payment."""
+    from ifml_parser import IFMLParser
+    from predictor import ACEPredictor
+    
+    # Load model
+    predictor = ACEPredictor(model_dir)
+    importance = load_feature_importance(model_dir)
+    
+    # Parse payment
+    with open(payment_json) as f:
+        data = json.load(f)
+    
+    parser = IFMLParser()
+    features_obj = parser.parse(data)
+    features = parser.to_dict(features_obj)
+    
+    # Predict
+    result = predictor.predict_from_features(features)
+    predicted = [c for c in result.predicted_codes if c.startswith(series)]
+    
+    # Explain
+    explanations = explain_prediction(features, predicted, importance)
+    
+    print("\n" + "="*60)
+    print("PREDICTION EXPLANATION")
+    print("="*60)
+    print(f"\nPredicted codes: {predicted}")
+    print("")
+    
+    for code in predicted:
+        print(f"\n--- {code} ---")
+        triggers = explanations.get(code, [])
+        if triggers:
+            print(f"{'Feature':<40} {'Value':<10} {'Reason'}")
+            print("-" * 70)
+            for t in triggers:
+                print(f"{t['feature']:<40} {str(t['value']):<10} {t['explanation']}")
+        else:
+            print("No specific triggers identified")
+    
+    print("\n" + "="*60)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Extract 8XXX rules')
-    parser.add_argument('--model-dir', default=None, help='Model directory (for RF/DT rules)')
+    parser = argparse.ArgumentParser(description='Explain 8XXX predictions')
+    parser.add_argument('--model-dir', required=True, help='Model directory')
     parser.add_argument('--data-dir', default=None, help='Raw data directory')
-    parser.add_argument('--output', default='rules_8xxx.md', help='Output file')
-    parser.add_argument('--detailed', action='store_true', help='Extract detailed rules with statistics')
-    parser.add_argument('--from-model', action='store_true', help='Extract rules from Random Forest model')
+    parser.add_argument('--payment', default=None, help='Single payment JSON file')
+    parser.add_argument('--output', default='explanations.md', help='Output file')
+    parser.add_argument('--limit', type=int, default=100, help='Max records to process')
+    parser.add_argument('--series', default='8', help='Code series (8 or 9)')
     
     args = parser.parse_args()
     
-    if args.from_model:
-        if not args.model_dir:
-            print("Error: --model-dir required when using --from-model")
-            return
-        extract_rules_from_model(args.model_dir, args.output)
-    
-    elif args.detailed:
-        if not args.data_dir:
-            print("Error: --data-dir required when using --detailed")
-            return
-        extract_detailed_rules(args.data_dir, args.output)
-    
+    if args.payment:
+        explain_single_payment(args.model_dir, args.payment, args.series)
+    elif args.data_dir:
+        run_explanations(args.model_dir, args.data_dir, args.output, args.limit, args.series)
     else:
-        if not args.data_dir:
-            print("Error: --data-dir required")
-            return
-        # Analyze data patterns
-        print("Analyzing data patterns...")
-        code_patterns = analyze_data_patterns(args.data_dir, '8')
-        
-        print(f"Found {len(code_patterns)} unique 8XXX codes")
-        
-        # Derive rules from patterns
-        print("Deriving rules...")
-        rules = derive_rules_from_patterns(code_patterns)
-        
-        print(f"Generated rules for {len(rules)} codes")
-        
-        # Format and save
-        format_rules_markdown(rules, code_patterns, args.output)
+        print("Error: Either --data-dir or --payment required")
 
 
 if __name__ == '__main__':
