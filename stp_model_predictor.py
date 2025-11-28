@@ -95,6 +95,13 @@ class ACEPredictor:
             with open(rules_path, 'r') as f:
                 self.exclusion_rules = json.load(f)
         
+        # Load precondition filter rules if present (for filtering logically impossible predictions)
+        self.precondition_rules: Dict = {}
+        precond_path = self.model_dir / 'precondition_rules.json'
+        if precond_path.exists():
+            with open(precond_path, 'r') as f:
+                self.precondition_rules = json.load(f)
+        
         # Load prediction config if present (allows tuning without code changes)
         config_path = self.model_dir / 'prediction_config.json'
         if config_path.exists():
@@ -254,6 +261,25 @@ class ACEPredictor:
         predicted_codes = sorted(predicted_codes, 
                                 key=lambda c: code_probs.get(c, 0), 
                                 reverse=True)
+        
+        # === Apply filters ===
+        # 1. Precondition filter (from precondition_rules.json)
+        if self.prediction_config.get('apply_precondition_filter', True) and self.precondition_rules:
+            predicted_codes, precond_warnings = self._apply_precondition_filter(
+                predicted_codes, feature_dict)
+            warnings.extend(precond_warnings)
+        
+        # 2. Semantic filter (built-in rules)
+        if self.prediction_config.get('apply_semantic_filter', True):
+            predicted_codes, semantic_warnings = self._apply_semantic_filters(
+                predicted_codes, feature_dict)
+            warnings.extend(semantic_warnings)
+        
+        # 3. Mutual exclusivity filter (from exclusion_rules.json)
+        if self.prediction_config.get('apply_exclusion_filter', True) and self.exclusion_rules:
+            predicted_codes, exclusion_warnings = self._apply_mutual_exclusivity(
+                predicted_codes, code_probs, feature_dict)
+            warnings.extend(exclusion_warnings)
         
         # Filter probabilities to only codes above threshold (exclude internal classes)
         if composite_only:
@@ -432,6 +458,95 @@ class ACEPredictor:
                 filtered_codes.append(code)
             else:
                 warnings.append(f"Semantic filter: {code} suppressed ({reason})")
+        
+        return filtered_codes, warnings
+    
+    def _apply_precondition_filter(self, 
+                                    predicted_codes: List[str],
+                                    feature_dict: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+        """
+        Filter predictions based on precondition rules from precondition_rules.json.
+        
+        Each code can have:
+        - require_true: features that must be True for code to be valid
+        - require_false: features that must be False for code to be valid
+        
+        This catches logically impossible predictions (e.g., 8022 when no IBAN exists).
+        
+        Returns:
+            Tuple of (filtered_codes, warnings)
+        """
+        if not predicted_codes or not self.precondition_rules:
+            return predicted_codes, []
+        
+        warnings = []
+        filtered_codes = []
+        
+        # Party suffix to prefix mapping
+        suffix_to_prefix = {
+            'ORGPTY': 'orig', 'SNDBNK': 'send', 'DBTPTY': 'dbt',
+            'CDTPTY': 'cdt', 'INTBNK': 'intm', 'BNFBNK': 'bnf', 'BNPPTY': 'bnf'
+        }
+        all_prefixes = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'ordi', 'acwi']
+        
+        for code in predicted_codes:
+            base_code = code.split('_')[0]
+            party_suffix = code.split('_')[1] if '_' in code else None
+            
+            # Get precondition rules for this code
+            code_rules = self.precondition_rules.get(base_code, {})
+            require_true = code_rules.get('require_true', [])
+            
+            if not require_true:
+                # No preconditions defined, keep the prediction
+                filtered_codes.append(code)
+                continue
+            
+            # Determine which party prefix to check
+            if party_suffix:
+                prefix = suffix_to_prefix.get(party_suffix)
+                prefixes_to_check = [prefix] if prefix else all_prefixes
+            else:
+                prefixes_to_check = all_prefixes
+            
+            # Check if ALL require_true conditions are met for at least one party
+            passes = False
+            failed_conditions = []
+            
+            for prefix in prefixes_to_check:
+                all_met = True
+                prefix_failures = []
+                
+                for feat_base in require_true:
+                    feat_name = f'{prefix}_{feat_base}'
+                    if feat_name in feature_dict:
+                        value = feature_dict[feat_name]
+                        if not (isinstance(value, bool) and value):
+                            all_met = False
+                            prefix_failures.append(f"{feat_name}={value}")
+                    else:
+                        # Check without prefix
+                        if feat_base in feature_dict:
+                            value = feature_dict[feat_base]
+                            if not (isinstance(value, bool) and value):
+                                all_met = False
+                                prefix_failures.append(f"{feat_base}={value}")
+                        else:
+                            all_met = False
+                            prefix_failures.append(f"{feat_name} missing")
+                
+                if all_met:
+                    passes = True
+                    break
+                else:
+                    failed_conditions = prefix_failures
+            
+            if passes:
+                filtered_codes.append(code)
+            else:
+                warnings.append(
+                    f"Precondition filter: {code} suppressed (requires {require_true}, got {failed_conditions})"
+                )
         
         return filtered_codes, warnings
     
@@ -683,3 +798,111 @@ if __name__ == '__main__':
     print("\nOr use convenience functions:")
     print("  from predictor import predict_from_file")
     print("  result = predict_from_file('/path/to/models', 'request.json')")
+
+
+def generate_precondition_rules(records: List, output_path: str, 
+                                 min_support: float = 0.95,
+                                 target_series: str = '8'):
+    """
+    Learn precondition rules from training data.
+    
+    A precondition is a feature that is ALWAYS (or almost always) True
+    when a particular error code fires.
+    
+    Args:
+        records: List of PaymentRecord objects from data_pipeline
+        output_path: Where to save precondition_rules.json
+        min_support: Minimum % of times feature must be True when code fires (default 95%)
+        target_series: Which code series to analyze ('8' or '9')
+    
+    Example:
+        from data_pipeline import IFMLDataPipeline
+        from predictor import generate_precondition_rules
+        
+        pipeline = IFMLDataPipeline()
+        pipeline.load_combined_files('./raw_data', '*.json')
+        generate_precondition_rules(pipeline.records, './models_8x/precondition_rules.json')
+    """
+    from collections import defaultdict
+    
+    # Candidate features to check as preconditions
+    candidate_features = [
+        'has_iban', 'has_bic', 'has_nch', 'has_account', 'has_name', 'has_id',
+        'needs_iban', 'is_domestic', 'is_international', 
+        'iban_valid_format', 'iban_checksum_valid', 'bic_valid_format',
+        'nch_valid', 'fedaba_checksum_valid', 'present',
+    ]
+    
+    party_prefixes = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf']
+    
+    # Track: when code fires, what % of time is each feature True?
+    code_feature_stats = defaultdict(lambda: defaultdict(lambda: {'true': 0, 'false': 0, 'missing': 0}))
+    code_counts = defaultdict(int)
+    
+    for rec in records:
+        features = rec.request_features
+        
+        # Get codes for target series
+        if hasattr(rec, 'composite_codes') and rec.composite_codes:
+            codes = [c for c in rec.composite_codes if c.startswith(target_series)]
+        else:
+            codes = [c for c in rec.error_codes_only if c.startswith(target_series)]
+        
+        for code in codes:
+            base_code = code.split('_')[0]
+            party_suffix = code.split('_')[1] if '_' in code else None
+            
+            code_counts[base_code] += 1
+            
+            # Check each candidate feature
+            for feat_base in candidate_features:
+                for prefix in party_prefixes:
+                    feat_name = f'{prefix}_{feat_base}'
+                    
+                    if feat_name in features:
+                        value = features[feat_name]
+                        if isinstance(value, bool):
+                            if value:
+                                code_feature_stats[base_code][feat_base]['true'] += 1
+                            else:
+                                code_feature_stats[base_code][feat_base]['false'] += 1
+                        else:
+                            code_feature_stats[base_code][feat_base]['missing'] += 1
+                    else:
+                        code_feature_stats[base_code][feat_base]['missing'] += 1
+    
+    # Build precondition rules
+    preconditions = {}
+    
+    for code, feat_stats in code_feature_stats.items():
+        total = code_counts[code]
+        if total < 10:
+            continue  # Not enough samples
+        
+        require_true = []
+        
+        for feat_base, stats in feat_stats.items():
+            true_count = stats['true']
+            false_count = stats['false']
+            
+            # If feature is True 95%+ of the time when code fires
+            if true_count + false_count > 0:
+                true_rate = true_count / (true_count + false_count)
+                if true_rate >= min_support:
+                    require_true.append(feat_base)
+        
+        if require_true:
+            preconditions[code] = {
+                'require_true': require_true,
+                'sample_count': total,
+                'description': f'Auto-generated: features True in {min_support*100:.0f}%+ of cases'
+            }
+    
+    # Save to file
+    with open(output_path, 'w') as f:
+        json.dump(preconditions, f, indent=2)
+    
+    print(f"Generated precondition rules for {len(preconditions)} codes")
+    print(f"Saved to {output_path}")
+    
+    return preconditions
