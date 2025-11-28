@@ -93,44 +93,60 @@ class IFMLFeatureEngineer:
         # NCH validation applicability (for 8895)
         'orig_nch_validation_applicable', 'send_nch_validation_applicable', 'dbt_nch_validation_applicable',
         'cdt_nch_validation_applicable', 'intm_nch_validation_applicable', 'bnf_nch_validation_applicable',
+        'ordi_nch_validation_applicable', 'acwi_nch_validation_applicable',
         # === REPAIR DETECTION FEATURES (for 9XXX) ===
         # Account cleaning (9002, 9009, 9014, 9015)
         'orig_account_has_dirty_chars', 'send_account_has_dirty_chars', 'dbt_account_has_dirty_chars',
         'cdt_account_has_dirty_chars', 'intm_account_has_dirty_chars', 'bnf_account_has_dirty_chars',
+        'ordi_account_has_dirty_chars', 'acwi_account_has_dirty_chars',
         'orig_name_has_dirty_chars', 'send_name_has_dirty_chars', 'dbt_name_has_dirty_chars',
         'cdt_name_has_dirty_chars', 'intm_name_has_dirty_chars', 'bnf_name_has_dirty_chars',
+        'ordi_name_has_dirty_chars', 'acwi_name_has_dirty_chars',
         'orig_account_has_spaces', 'send_account_has_spaces', 'dbt_account_has_spaces',
         'cdt_account_has_spaces', 'intm_account_has_spaces', 'bnf_account_has_spaces',
+        'ordi_account_has_spaces', 'acwi_account_has_spaces',
         'orig_account_has_special_chars', 'send_account_has_special_chars', 'dbt_account_has_special_chars',
         'cdt_account_has_special_chars', 'intm_account_has_special_chars', 'bnf_account_has_special_chars',
+        'ordi_account_has_special_chars', 'acwi_account_has_special_chars',
         # IBAN derivation (9004, 9007)
         'orig_is_iban_derivable', 'send_is_iban_derivable', 'dbt_is_iban_derivable',
         'cdt_is_iban_derivable', 'intm_is_iban_derivable', 'bnf_is_iban_derivable',
+        'ordi_is_iban_derivable', 'acwi_is_iban_derivable',
         'orig_has_bban_in_iban_country', 'send_has_bban_in_iban_country', 'dbt_has_bban_in_iban_country',
         'cdt_has_bban_in_iban_country', 'intm_has_bban_in_iban_country', 'bnf_has_bban_in_iban_country',
+        'ordi_has_bban_in_iban_country', 'acwi_has_bban_in_iban_country',
         # BIC derivation (9005, 9008)
         'orig_is_bic_derivable', 'send_is_bic_derivable', 'dbt_is_bic_derivable',
         'cdt_is_bic_derivable', 'intm_is_bic_derivable', 'bnf_is_bic_derivable',
+        'ordi_is_bic_derivable', 'acwi_is_bic_derivable',
         'orig_has_nch_no_bic', 'send_has_nch_no_bic', 'dbt_has_nch_no_bic',
         'cdt_has_nch_no_bic', 'intm_has_nch_no_bic', 'bnf_has_nch_no_bic',
+        'ordi_has_nch_no_bic', 'acwi_has_nch_no_bic',
         'orig_has_iban_no_bic', 'send_has_iban_no_bic', 'dbt_has_iban_no_bic',
         'cdt_has_iban_no_bic', 'intm_has_iban_no_bic', 'bnf_has_iban_no_bic',
+        'ordi_has_iban_no_bic', 'acwi_has_iban_no_bic',
         # NCH repair (9000, 9021, 9028)
         'orig_nch_has_dirty_chars', 'send_nch_has_dirty_chars', 'dbt_nch_has_dirty_chars',
         'cdt_nch_has_dirty_chars', 'intm_nch_has_dirty_chars', 'bnf_nch_has_dirty_chars',
+        'ordi_nch_has_dirty_chars', 'acwi_nch_has_dirty_chars',
         'orig_nch_needs_formatting', 'send_nch_needs_formatting', 'dbt_nch_needs_formatting',
         'cdt_nch_needs_formatting', 'intm_nch_needs_formatting', 'bnf_nch_needs_formatting',
+        'ordi_nch_needs_formatting', 'acwi_nch_needs_formatting',
         # Multiple/duplicate (9017, 9018)
         'orig_has_multiple_ids', 'send_has_multiple_ids', 'dbt_has_multiple_ids',
         'cdt_has_multiple_ids', 'intm_has_multiple_ids', 'bnf_has_multiple_ids',
+        'ordi_has_multiple_ids', 'acwi_has_multiple_ids',
         'orig_has_duplicate_info', 'send_has_duplicate_info', 'dbt_has_duplicate_info',
         'cdt_has_duplicate_info', 'intm_has_duplicate_info', 'bnf_has_duplicate_info',
+        'ordi_has_duplicate_info', 'acwi_has_duplicate_info',
         # Account formatting (9022)
         'orig_account_needs_length_fix', 'send_account_needs_length_fix', 'dbt_account_needs_length_fix',
         'cdt_account_needs_length_fix', 'intm_account_needs_length_fix', 'bnf_account_needs_length_fix',
+        'ordi_account_needs_length_fix', 'acwi_account_needs_length_fix',
         # IBAN formatting (9006, 9012)
         'orig_iban_needs_formatting', 'send_iban_needs_formatting', 'dbt_iban_needs_formatting',
         'cdt_iban_needs_formatting', 'intm_iban_needs_formatting', 'bnf_iban_needs_formatting',
+        'ordi_iban_needs_formatting', 'acwi_iban_needs_formatting',
     ]
     
     # Numeric columns
