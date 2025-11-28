@@ -56,16 +56,78 @@ FEATURE_EXPLANATIONS = {
     'is_cross_border': 'Cross-border payment',
 }
 
-# Code to relevant features mapping
+# Code to relevant features mapping - based on ACE Pelican definitions
+# Key: (features_that_must_be_true, features_that_must_be_false)
+CODE_TRIGGERS = {
+    '8001': {  # Invalid BIC
+        'require_true': ['has_bic'],
+        'require_false': ['bic_valid_format', 'bic_valid_country'],
+        'description': 'BIC present but format/country invalid'
+    },
+    '8004': {  # IBAN cannot be derived
+        'require_true': ['needs_iban'],
+        'require_false': ['has_iban'],
+        'description': 'IBAN required but missing and cannot be derived'
+    },
+    '8022': {  # IBAN inconsistent with Account With Institution BIC
+        'require_true': ['has_iban', 'has_bic'],
+        'require_false': ['bic_iban_match'],
+        'description': 'IBAN and BIC countries do not match'
+    },
+    '8026': {  # NCH inconsistency found in message
+        'require_true': ['has_nch'],
+        'require_false': [],  # Inconsistency between multiple NCH values
+        'check_field': 'nch_sources',  # Multiple sources with different values
+        'description': 'Multiple NCH values that are inconsistent'
+    },
+    '8030': {  # IBAN derivation not supported for the country
+        'require_true': ['needs_iban'],
+        'require_false': ['has_iban'],
+        'description': 'Country does not support IBAN derivation'
+    },
+    '8852': {  # Incorrect length of attribute
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'Field length is incorrect'
+    },
+    '8892': {  # Invalid Account number
+        'require_true': ['has_account'],
+        'require_false': ['account_numeric'],  # or other validation
+        'description': 'Account number format is invalid'
+    },
+    '8894': {  # Invalid IBAN
+        'require_true': ['has_iban'],
+        'require_false': ['iban_valid_format', 'iban_checksum_valid'],
+        'description': 'IBAN present but format or checksum invalid'
+    },
+    '8895': {  # Invalid NCH code
+        'require_true': ['has_nch'],
+        'require_false': ['nch_valid', 'fedaba_checksum_valid'],
+        'description': 'NCH/routing number present but invalid'
+    },
+    '8896': {  # Invalid Domestic Account Number
+        'require_true': ['has_account', 'is_domestic'],
+        'require_false': [],
+        'description': 'Domestic account number format invalid'
+    },
+    '8898': {  # IBAN Check Digit calculation/validation failed
+        'require_true': ['has_iban'],
+        'require_false': ['iban_checksum_valid'],
+        'description': 'IBAN checksum validation failed'
+    },
+}
+
+# Legacy mapping for backward compatibility
 CODE_RELEVANT_FEATURES = {
     '8004': ['needs_iban', 'has_iban', 'missing_required_iban', 'is_international'],
-    '8022': ['has_iban', 'iban_valid_format', 'iban_checksum_valid'],
+    '8022': ['has_iban', 'has_bic', 'bic_iban_match', 'iban_valid_format'],
     '8026': ['has_nch', 'nch_valid', 'has_adr_bank_id', 'nch_sources'],
     '8001': ['has_bic', 'bic_valid_format', 'bic_valid_country'],
-    '8852': ['has_account', 'present'],
-    '8894': ['has_iban', 'iban_checksum_valid', 'iban_valid_format'],
+    '8852': ['has_account', 'account_length'],
+    '8894': ['has_iban', 'iban_valid_format', 'iban_checksum_valid'],
     '8895': ['has_nch', 'nch_valid', 'fedaba_checksum_valid', 'nch_validation_applicable', 'is_domestic'],
     '8896': ['has_nch', 'is_domestic', 'nch_validation_applicable'],
+    '8898': ['has_iban', 'iban_checksum_valid'],
 }
 
 # Party prefixes
@@ -99,9 +161,12 @@ def get_feature_explanation(feature_name: str) -> str:
 def explain_prediction(features: Dict, predicted_codes: List[str], 
                        feature_importance: Optional[Dict] = None) -> Dict[str, List[dict]]:
     """
-    Explain why each code was predicted.
+    Explain why each code was predicted using ACE Pelican trigger logic.
     
-    Returns dict mapping code -> list of triggering conditions
+    Returns dict mapping code -> dict with:
+        - triggers: list of triggering conditions
+        - warning: optional warning if prediction may be false positive
+        - description: code description from ACE
     """
     explanations = {}
     
@@ -110,9 +175,13 @@ def explain_prediction(features: Dict, predicted_codes: List[str],
         party_suffix = code.split('_')[1] if '_' in code else None
         
         triggers = []
+        warning = None
         
-        # Get relevant features for this code
-        relevant = CODE_RELEVANT_FEATURES.get(base_code, [])
+        # Get trigger definition for this code
+        trigger_def = CODE_TRIGGERS.get(base_code, {})
+        require_true = trigger_def.get('require_true', [])
+        require_false = trigger_def.get('require_false', [])
+        description = trigger_def.get('description', '')
         
         # Determine which party to check
         if party_suffix:
@@ -121,58 +190,65 @@ def explain_prediction(features: Dict, predicted_codes: List[str],
         else:
             prefixes_to_check = PARTY_PREFIXES
         
-        # Check each relevant feature
+        # Track if trigger conditions are met
+        true_conditions_met = []
+        true_conditions_failed = []
+        false_conditions_met = []  # Should be False, and is False
+        false_conditions_failed = []  # Should be False, but is True
+        
         for prefix in prefixes_to_check:
-            for feat_base in relevant:
+            # Check require_true features (must be True for valid trigger)
+            for feat_base in require_true:
                 feat_name = f'{prefix}_{feat_base}'
-                
                 if feat_name in features:
                     value = features[feat_name]
-                    
-                    # Determine if this is a triggering condition
-                    is_trigger = False
-                    trigger_type = None
-                    
                     if isinstance(value, bool):
-                        # For "has_*" features, False is usually the problem
-                        if feat_base.startswith('has_') or feat_base.endswith('_valid') or feat_base.endswith('_match'):
-                            if not value:
-                                is_trigger = True
-                                trigger_type = 'missing'
-                        # For "needs_*" or "is_*", True may indicate requirement
-                        elif feat_base.startswith('needs_') or feat_base.startswith('is_') or feat_base.startswith('missing_'):
-                            if value:
-                                is_trigger = True
-                                trigger_type = 'required'
-                    
-                    if is_trigger:
-                        explanation = get_feature_explanation(feat_name)
-                        triggers.append({
-                            'feature': feat_name,
-                            'value': value,
-                            'explanation': explanation,
-                            'trigger_type': trigger_type
-                        })
+                        if value:
+                            true_conditions_met.append({
+                                'feature': feat_name,
+                                'value': value,
+                                'explanation': get_feature_explanation(feat_name),
+                                'trigger_type': 'present'
+                            })
+                        else:
+                            true_conditions_failed.append(feat_name)
+            
+            # Check require_false features (must be False for valid trigger)
+            for feat_base in require_false:
+                feat_name = f'{prefix}_{feat_base}'
+                if feat_name in features:
+                    value = features[feat_name]
+                    if isinstance(value, bool):
+                        if not value:
+                            false_conditions_met.append({
+                                'feature': feat_name,
+                                'value': value,
+                                'explanation': get_feature_explanation(feat_name),
+                                'trigger_type': 'invalid/missing'
+                            })
+                        else:
+                            false_conditions_failed.append(feat_name)
         
-        # Also check global features
-        global_features = ['is_cross_border', 'is_domestic', 'missing_required_iban', 
-                          'has_intermediary', 'has_beneficiary_bank']
-        for feat in global_features:
-            if feat in features and feat in relevant:
-                value = features[feat]
-                if isinstance(value, bool) and value:
-                    triggers.append({
-                        'feature': feat,
-                        'value': value,
-                        'explanation': get_feature_explanation(feat),
-                        'trigger_type': 'condition'
-                    })
+        # Build trigger list - show conditions that match expected pattern
+        triggers = true_conditions_met + false_conditions_met
+        
+        # Detect potential false positive
+        if require_true and not true_conditions_met:
+            # Required condition not present
+            warning = f"⚠️ POSSIBLE FALSE POSITIVE: {base_code} requires {require_true} but none found"
+        elif true_conditions_failed and require_true:
+            # e.g., 8022 requires has_iban=True but has_iban=False
+            warning = f"⚠️ POSSIBLE FALSE POSITIVE: Expected {true_conditions_failed} = True but got False"
         
         # Sort by importance if available
         if feature_importance:
             triggers.sort(key=lambda x: -feature_importance.get(x['feature'], 0))
         
-        explanations[code] = triggers
+        explanations[code] = {
+            'triggers': triggers,
+            'warning': warning,
+            'description': description
+        }
     
     return explanations
 
@@ -215,7 +291,28 @@ def format_explanation(txn_id: str, features: Dict, predicted_codes: List[str],
         lines.append(f"#### Why {code}?")
         lines.append("")
         
-        triggers = explanations.get(code, [])
+        code_explanation = explanations.get(code, {})
+        
+        # Handle both old format (list) and new format (dict)
+        if isinstance(code_explanation, list):
+            triggers = code_explanation
+            warning = None
+            description = None
+        else:
+            triggers = code_explanation.get('triggers', [])
+            warning = code_explanation.get('warning')
+            description = code_explanation.get('description')
+        
+        # Show description
+        if description:
+            lines.append(f"**ACE Definition:** {description}")
+            lines.append("")
+        
+        # Show warning if present
+        if warning:
+            lines.append(f"**{warning}**")
+            lines.append("")
+        
         if triggers:
             lines.append("| Field | Value | Explanation |")
             lines.append("|-------|-------|-------------|")
@@ -237,6 +334,7 @@ def format_explanation(txn_id: str, features: Dict, predicted_codes: List[str],
     key_fields = [
         'primary_currency', 'is_cross_border',
         'bnf_has_iban', 'bnf_needs_iban', 'bnf_has_bic', 'bnf_has_nch',
+        'bnf_bic_iban_match', 'bnf_iban_valid_format', 'bnf_iban_checksum_valid',
         'cdt_has_iban', 'cdt_needs_iban', 'cdt_has_account',
         'intm_present', 'intm_has_bic',
     ]
