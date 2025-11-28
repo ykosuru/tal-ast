@@ -1,0 +1,29 @@
+{
+  "_comment": "Prediction configuration - copy to each model directory as prediction_config.json",
+  
+  "negative_margin": 0.1,
+  "suppressed_codes": [],
+  
+  "high_threshold_codes": {
+    "_comment_8xxx": "Validation errors - higher threshold for codes prone to false positives",
+    "8022": 0.70,
+    "8026": 0.70,
+    "8894": 0.70,
+    "8895": 0.70,
+    
+    "_comment_9xxx": "Repair codes - higher threshold for directory-dependent codes",
+    "9004": 0.70,
+    "9005": 0.70,
+    "9007": 0.70,
+    "9008": 0.70,
+    "9024": 0.75,
+    "9477": 0.70,
+    "9479": 0.80,
+    "9480": 0.75,
+    "9999": 0.80
+  },
+  
+  "apply_precondition_filter": true,
+  "apply_semantic_filter": true,
+  "apply_exclusion_filter": true
+}
