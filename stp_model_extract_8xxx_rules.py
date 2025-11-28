@@ -285,24 +285,107 @@ def load_model_components(model_dir: str):
     with open(fe_path, 'rb') as f:
         feature_engineer = pickle.load(f)
     
+    # If feature_engineer is a dict, try to reconstruct from module
+    if isinstance(feature_engineer, dict):
+        try:
+            from feature_engineering import IFMLFeatureEngineer
+            fe_obj = IFMLFeatureEngineer()
+            # Restore fitted state from dict
+            if 'label_encoders' in feature_engineer:
+                fe_obj.label_encoders = feature_engineer['label_encoders']
+            if 'frequency_maps' in feature_engineer:
+                fe_obj.frequency_maps = feature_engineer['frequency_maps']
+            if 'feature_columns' in feature_engineer:
+                fe_obj.feature_columns = feature_engineer['feature_columns']
+            fe_obj.fitted = True
+            feature_engineer = fe_obj
+            print("Reconstructed feature engineer from dict")
+        except ImportError:
+            print("Warning: Could not import IFMLFeatureEngineer, using dict mode")
+    
     with open(info_path) as f:
         info = json.load(f)
     
     class_names = info.get('class_names', [])
     threshold = info.get('threshold', 0.5)
+    feature_columns = info.get('feature_columns', [])
     
-    return model, feature_engineer, class_names, threshold
+    return model, feature_engineer, class_names, threshold, feature_columns
+
+
+def transform_features(features: Dict, feature_engineer, feature_columns: List[str]):
+    """Transform features dict to model input, handling dict or object feature_engineer."""
+    import pandas as pd
+    
+    # If feature_engineer is an object with transform method, use it
+    if hasattr(feature_engineer, 'transform'):
+        df = pd.DataFrame([features])
+        return feature_engineer.transform(df)
+    
+    # If feature_engineer is a dict, manually build feature vector
+    if isinstance(feature_engineer, dict):
+        # Get label encoders if present
+        label_encoders = feature_engineer.get('label_encoders', {})
+        frequency_maps = feature_engineer.get('frequency_maps', {})
+        columns = feature_engineer.get('feature_columns', feature_columns)
+        
+        if not columns:
+            raise ValueError("No feature_columns found in feature_engineer or training_info")
+        
+        # Build feature vector
+        row = {}
+        for col in columns:
+            if col in features:
+                val = features[col]
+                
+                # Handle encoded columns
+                if col in label_encoders:
+                    le = label_encoders[col]
+                    if hasattr(le, 'transform'):
+                        try:
+                            val = le.transform([str(val)])[0]
+                        except:
+                            val = 0  # Unknown value
+                    elif isinstance(le, dict):
+                        val = le.get(str(val), 0)
+                
+                # Handle frequency encoded columns
+                elif col in frequency_maps:
+                    freq_map = frequency_maps[col]
+                    val = freq_map.get(str(val), 0.0)
+                
+                # Handle booleans
+                elif isinstance(val, bool):
+                    val = 1 if val else 0
+                
+                row[col] = val
+            else:
+                # Default values
+                if '_encoded' in col or '_freq' in col:
+                    row[col] = 0
+                else:
+                    row[col] = 0
+        
+        df = pd.DataFrame([row])
+        # Ensure column order matches training
+        for col in columns:
+            if col not in df.columns:
+                df[col] = 0
+        df = df[columns]
+        
+        return df.values
+    
+    raise ValueError(f"Unknown feature_engineer type: {type(feature_engineer)}")
 
 
 def predict_from_features(features: Dict, model, feature_engineer, 
                           class_names: List[str], threshold: float = 0.5,
-                          series: str = '8') -> List[str]:
+                          series: str = '8', feature_columns: List[str] = None) -> List[str]:
     """Run prediction directly from features dict."""
     import pandas as pd
     
     # Transform features
-    df = pd.DataFrame([features])
-    X = feature_engineer.transform(df)
+    X = transform_features(features, feature_engineer, feature_columns or [])
     
     # Get probabilities
     if hasattr(model, 'predict_proba'):
@@ -351,7 +434,7 @@ def run_explanations(model_dir: str, data_dir: str, output_file: str,
     
     # Load model components
     print(f"Loading model from {model_dir}...")
-    model, feature_engineer, class_names, threshold = load_model_components(model_dir)
+    model, feature_engineer, class_names, threshold, feature_columns = load_model_components(model_dir)
     
     # Load feature importance
     importance = load_feature_importance(model_dir)
@@ -392,7 +475,7 @@ def run_explanations(model_dir: str, data_dir: str, output_file: str,
         
         # Run prediction
         predicted = predict_from_features(features, model, feature_engineer, 
-                                          class_names, threshold, series)
+                                          class_names, threshold, series, feature_columns)
         
         # Get explanations
         explanations = explain_prediction(features, predicted, importance)
@@ -418,7 +501,7 @@ def explain_single_payment(model_dir: str, payment_json: str, series: str = '8')
     from ifml_parser import IFMLParser
     
     # Load model components
-    model, feature_engineer, class_names, threshold = load_model_components(model_dir)
+    model, feature_engineer, class_names, threshold, feature_columns = load_model_components(model_dir)
     importance = load_feature_importance(model_dir)
     
     # Parse payment
@@ -431,7 +514,7 @@ def explain_single_payment(model_dir: str, payment_json: str, series: str = '8')
     
     # Predict
     predicted = predict_from_features(features, model, feature_engineer,
-                                       class_names, threshold, series)
+                                       class_names, threshold, series, feature_columns)
     
     # Explain
     explanations = explain_prediction(features, predicted, importance)
