@@ -30,8 +30,8 @@ PARTY_MAPPING = {
     'SendingBankInf': 'send',
     'DebitPartyInf': 'dbt',
     'CreditPartyInf': 'cdt',
-    'BeneficiaryBankInf': 'bnf_bank',
-    'BeneficiaryPartyInf': 'bnf',
+    'BeneficiaryBankInf': 'bnf',
+    'BeneficiaryPartyInf': 'bnf',  # Maps to same as BeneficiaryBankInf per ML parser
     'IntermediaryBankInf': 'intm',
     'AccountWithInf': 'acwi',
 }
@@ -97,13 +97,16 @@ class FeatureExtractor:
         
         # Extract party information
         party_inf = message.get('PartyInf', {})
+        
+        # Track which prefixes we've already processed
+        processed_prefixes = set()
+        
         for ifml_name, prefix in PARTY_MAPPING.items():
             party_data = party_inf.get(ifml_name, {})
             if party_data:
                 # CRITICAL: Check if party is a list (multiple entries = 9017/9018)
                 if isinstance(party_data, list):
                     if len(party_data) > 1:
-                        # Multiple party entries of same type - triggers 9017/9018
                         self.features[f'{prefix}_has_multiple_ids'] = True
                         self.features[f'{prefix}_has_duplicate_info'] = True
                     # Process first entry for features, but mark as present
@@ -111,9 +114,17 @@ class FeatureExtractor:
                     party_data = party_data[0] if party_data else {}
                     self._extract_party(party_data, prefix)
                 else:
-                    self._extract_party(party_data, prefix)
+                    # If this prefix was already processed, merge rather than overwrite
+                    if prefix in processed_prefixes:
+                        # Extract to temp features and merge
+                        self._extract_party_merge(party_data, prefix)
+                    else:
+                        self._extract_party(party_data, prefix)
+                
+                processed_prefixes.add(prefix)
             else:
-                self.features[f'{prefix}_present'] = False
+                if prefix not in processed_prefixes:
+                    self.features[f'{prefix}_present'] = False
         
         # Track intermediary presence for 9024
         self.features['has_intermediary'] = self.features.get('intm_present', False)
@@ -195,6 +206,114 @@ class FeatureExtractor:
         
         # Check for duplicate values (same BIC in ID and AdrBankID)
         self._check_duplicate_values(basic, account, prefix)
+    
+    def _extract_party_merge(self, party_data: Dict, prefix: str):
+        """Extract features and merge with existing (don't overwrite True values)."""
+        # This handles when both BeneficiaryBankInf and BeneficiaryPartyInf exist
+        # We want to merge their features, not overwrite
+        
+        if isinstance(party_data, list):
+            if len(party_data) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            party_data = party_data[0] if party_data else {}
+        
+        basic = party_data.get('BasicPartyInf', {})
+        account = party_data.get('AccountPartyInf', {})
+        if not basic and account:
+            basic = account.get('BasicPartyInf', account)
+        
+        if isinstance(basic, list):
+            if len(basic) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            basic = basic[0] if basic else {}
+        
+        if isinstance(account, list):
+            if len(account) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            account = account[0] if account else {}
+        
+        # Extract identifiers but merge with existing
+        self._extract_identifiers_merge(basic, account, prefix)
+    
+    def _extract_identifiers_merge(self, basic: Dict, account: Dict, prefix: str):
+        """Extract identifiers and merge with existing features."""
+        # Get ID fields
+        id_info = basic.get('ID', {})
+        if isinstance(id_info, list):
+            if len(id_info) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            id_info = id_info[0] if id_info else {}
+        
+        if isinstance(id_info, str):
+            id_info = {'text': id_info}
+        
+        acct_id = {}
+        if account:
+            acct_id_inf = account.get('AcctIDInf', {}) or account.get('AcctIDInfo', {})
+            acct_id = acct_id_inf.get('ID', {})
+            if isinstance(acct_id, list):
+                if len(acct_id) > 1:
+                    self.features[f'{prefix}_has_multiple_ids'] = True
+                    self.features[f'{prefix}_has_duplicate_info'] = True
+                acct_id = acct_id[0] if acct_id else {}
+            if isinstance(acct_id, str):
+                acct_id = {'text': acct_id}
+        
+        id_type = id_info.get('Type') or id_info.get('@Type', '')
+        id_text = id_info.get('text') or id_info.get('#text', '')
+        acct_type = acct_id.get('Type') or acct_id.get('@Type', '')
+        acct_text = acct_id.get('text') or acct_id.get('#text', '')
+        adr_bank_id = basic.get('AdrBankID', '') or (account.get('AdrBankID', '') if account else '')
+        
+        # Extract and merge - only set if we find values and current is False/empty
+        bic, iban, nch, account_num = None, None, None, None
+        
+        if id_type == 'S' and id_text:
+            bic = id_text
+        elif id_type == 'BIC' and id_text:
+            bic = id_text
+        elif id_type in ('P', 'D') and id_text:
+            account_num = id_text
+        elif id_type == 'IBAN' and id_text:
+            iban = id_text
+        elif not id_type and id_text:
+            # No Type specified - auto-detect based on content
+            if self._is_iban(id_text):
+                iban = id_text
+            elif self._is_bic(id_text):
+                bic = id_text
+            elif self._is_nch(id_text):
+                nch = id_text
+            else:
+                account_num = id_text
+        
+        if acct_type == 'S' and acct_text:
+            bic = bic or acct_text
+        elif acct_type == 'BIC' and acct_text:
+            bic = bic or acct_text
+        elif acct_type == 'IBAN' and acct_text:
+            iban = iban or acct_text
+        elif acct_text:
+            account_num = account_num or acct_text
+        
+        # Handle AdrBankID
+        if adr_bank_id:
+            if isinstance(adr_bank_id, str) and adr_bank_id.isdigit() and len(adr_bank_id) in (3, 6, 9):
+                nch = adr_bank_id
+        
+        # Merge with existing - don't overwrite if already True
+        if bic and not self.features.get(f'{prefix}_has_bic', False):
+            self._validate_bic(prefix, bic)
+        if iban and not self.features.get(f'{prefix}_has_iban', False):
+            self._validate_iban(prefix, iban)
+        if nch and not self.features.get(f'{prefix}_has_nch', False):
+            self._validate_nch(prefix, nch)
+        if account_num and not self.features.get(f'{prefix}_has_account', False):
+            self._validate_account(prefix, account_num)
     
     def _check_duplicate_values(self, basic: Dict, account: Dict, prefix: str):
         """Check for duplicate values across different fields (triggers 9018)."""
@@ -301,6 +420,16 @@ class FeatureExtractor:
                 self.features[f'{prefix}_has_domestic_account'] = True
         elif id_type == 'IBAN' and id_text:
             iban = id_text
+        elif not id_type and id_text:
+            # No Type specified - auto-detect based on content
+            if self._is_iban(id_text):
+                iban = id_text
+            elif self._is_bic(id_text):
+                bic = id_text
+            elif self._is_nch(id_text):
+                nch = id_text
+            else:
+                account_num = id_text
         
         if acct_type == 'S' and acct_text:
             bic = acct_text
@@ -633,7 +762,10 @@ class RuleEngine:
         if self.f.get('bban_count', 0) > 1 and not self.f.get('bbans_consistent', True):
             self._emit('8024')
         
-        # 8026: NCH inconsistency
+        # 8026: NCH inconsistency (DETERMINISTIC)
+        # This fires when EXPLICIT NCH values in the message don't match
+        # DERIVATION-DEPENDENT NCH inconsistency is handled in directory_eligible
+        # (e.g., NCH from BIC vs NCH from IBAN vs explicit NCH)
         if self.f.get('nch_count', 0) > 1 and not self.f.get('nchs_consistent', True):
             self._emit('8026')
         
@@ -668,31 +800,33 @@ class RuleEngine:
             self._emit('8006')
         
         # 8022: IBAN/BIC country mismatch OR BIC/NCH inconsistency
-        # Can fire when:
-        # 1. IBAN country != BIC country
-        # 2. BIC country != Party country
-        # 3. BIC present with NCH from different country
-        # Note: Only fire if BIC is valid format (otherwise 8001 fires)
+        # DETERMINISTIC cases (we can check directly):
+        # 1. IBAN country != BIC country (both present)
+        # 2. BIC country != Party country (explicit mismatch)
+        # 3. BIC country != NCH type country (FEDABA=US, BSB=AU)
+        # DERIVATION-DEPENDENT cases (handled in directory_eligible):
+        # - NCH derived from BIC doesn't match existing NCH
+        # - NCH derived from IBAN doesn't match BIC country
+        # Note: Only fire deterministic if BIC is valid format
         if self._get(party, 'has_bic', False) and self._get(party, 'bic_valid_format', False):
             bic_country = self._get(party, 'bic_country', '')
             
-            # Check IBAN vs BIC
+            # Check IBAN vs BIC (deterministic - both values present)
             if self._get(party, 'has_iban', False):
                 if not self._get(party, 'bic_iban_match', True):
                     self._emit('8022')
             
-            # Check BIC vs party country
+            # Check BIC vs explicit party country (deterministic)
             party_country = self._get(party, 'country', '')
             if bic_country and party_country and bic_country != party_country:
                 self._emit('8022')
             
-            # Check BIC vs NCH country (US NCH with non-US BIC, etc.)
+            # Check BIC vs explicit NCH type (deterministic)
+            # FEDABA (9-digit) implies US, BSB (3-digit) implies AU
             if self._get(party, 'has_nch', False):
                 nch_type = self._get(party, 'nch_type', '')
-                # FEDABA implies US
                 if nch_type == 'FEDABA' and bic_country and bic_country != 'US':
                     self._emit('8022')
-                # BSB implies AU
                 if nch_type == 'BSB' and bic_country and bic_country != 'AU':
                     self._emit('8022')
         
@@ -708,7 +842,10 @@ class RuleEngine:
             if not self._get(party, 'account_valid_format', True):
                 self._emit('8892')
         
-        # 8894: Invalid IBAN
+        # 8894: Invalid IBAN (DETERMINISTIC)
+        # This fires when IBAN fails format or checksum validation
+        # DERIVATION-DEPENDENT 8894 is handled in directory_eligible
+        # (e.g., IBAN is valid but NCH extracted from IBAN cannot be validated)
         if self._get(party, 'has_iban', False):
             if not self._get(party, 'iban_valid_format', True):
                 self._emit('8894')
@@ -893,6 +1030,53 @@ class RuleEngine:
         if self._get(party, 'has_nch', False) and self._get(party, 'nch_type') == 'CHIPS_OR_SORT':
             self._emit_eligible('9985', party,
                 f"BIC from CHIPS ABA eligible → IF FOUND: 9985, ELSE: 9999")
+        
+        # 9024: Intermediary added/pushed up
+        # Requires directory lookup for intermediary routing
+        if party == 'bnf':
+            if self._get(party, 'has_bic', False):
+                if not self.f.get('intm_present', False):
+                    self._emit_eligible('9024', party,
+                        f"Intermediary routing eligible (BNF has BIC, no INTM) → IF FOUND: 9024, ELSE: 9999")
+        
+        # =====================================================================
+        # DERIVATION-DEPENDENT CODES
+        # These fire based on derived values from directory lookups
+        # =====================================================================
+        
+        # 8022: IBAN inconsistent with derived values
+        # ACE can derive NCH from BIC, IBAN from account, etc.
+        # If derived values don't match, 8022 fires
+        if self._get(party, 'has_bic', False):
+            # If BIC exists, ACE may derive NCH from BIC directory
+            # If that derived NCH doesn't match existing NCH or IBAN country, 8022 fires
+            self._emit_eligible('8022', party,
+                f"BIC→NCH derivation check → IF DERIVED NCH INCONSISTENT: 8022, ELSE: pass")
+        
+        # 8026: NCH inconsistency from derived values
+        # ACE extracts/derives NCH from: BIC, IBAN, address, etc.
+        # If multiple derived NCHs don't match, 8026 fires
+        if self._get(party, 'has_iban', False) or self._get(party, 'has_bic', False):
+            self._emit_eligible('8026', party,
+                f"NCH derivation check → IF DERIVED NCHs INCONSISTENT: 8026, ELSE: pass")
+        
+        # 8894: Invalid IBAN (derived validation failure)
+        # IBAN may pass checksum but derived NCH fails validation
+        if self._get(party, 'has_iban', False):
+            # Even valid IBANs can trigger 8894 if derived values fail
+            self._emit_eligible('8894', party,
+                f"IBAN→NCH derivation check → IF DERIVED NCH INVALID: 8894, ELSE: pass")
+        
+        # 9017: Multiple party info (can be detected from directory enrichment)
+        # Sometimes directory lookup reveals multiple matches
+        if self._get(party, 'has_bic', False) or self._get(party, 'has_name', False):
+            self._emit_eligible('9017', party,
+                f"Directory lookup → IF MULTIPLE MATCHES: 9017, ELSE: pass")
+        
+        # 9018: Duplicate party info removed (from enrichment)
+        if self._get(party, 'has_bic', False):
+            self._emit_eligible('9018', party,
+                f"Directory enrichment → IF DUPLICATE INFO: 9018, ELSE: pass")
 
 
 # =============================================================================
@@ -1168,8 +1352,13 @@ def print_results(results: List[VerificationResult], verbose: bool = False):
         # Show directory eligibility predictions when --include-directory is enabled
         if INCLUDE_DIRECTORY and result.directory_eligible:
             print(f"\n  📋 Directory Lookup Predictions for {result.trn_id}:")
+            # Deduplicate by (party, condition) - same prediction from different party types
+            seen = set()
             for code, party, condition in result.directory_eligible:
-                print(f"     [{party}] {condition}")
+                key = (party, condition)
+                if key not in seen:
+                    seen.add(key)
+                    print(f"     [{party}] {condition}")
             
             # Match predictions against actual directory codes
             if result.directory_codes:
