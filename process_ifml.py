@@ -706,6 +706,35 @@ class FeatureExtractor:
 
 
 # =============================================================================
+# PRECONDITION RULES (from ML model)
+# =============================================================================
+
+PRECONDITION_RULES = {
+    # 8XXX VALIDATION ERRORS
+    "8001": {"require_true": ["has_bic"], "require_false": ["bic_valid_format", "bic_valid_country"]},
+    "8004": {"require_true": ["needs_iban"], "require_false": ["has_iban"]},
+    "8022": {"require_true": ["has_iban", "has_bic"], "require_false": ["bic_iban_match"]},
+    "8026": {"require_true": ["has_nch"], "require_false": []},
+    "8030": {"require_true": ["needs_iban"], "require_false": ["has_iban"]},
+    "8852": {"require_true": ["has_account"], "require_false": []},
+    "8892": {"require_true": ["has_account"], "require_false": ["account_valid"]},
+    "8894": {"require_true": ["has_iban"], "require_false": ["iban_valid_format", "iban_checksum_valid"]},
+    "8895": {"require_true": ["has_nch"], "require_false": ["nch_valid", "fedaba_checksum_valid"]},
+    "8898": {"require_true": ["has_iban"], "require_false": ["iban_checksum_valid"]},
+    
+    # 9XXX REPAIR/ENRICHMENT CODES
+    "9002": {"require_true": ["present", "has_account"], "require_false": []},
+    "9004": {"require_true": ["present", "needs_iban"], "require_false": ["has_iban"]},
+    "9005": {"require_true": ["present", "has_nch"], "require_false": ["has_bic"]},
+    "9006": {"require_true": ["present", "has_iban"], "require_false": []},
+    "9008": {"require_true": ["present", "has_iban"], "require_false": ["has_bic"]},
+    "9017": {"require_true": ["present"], "require_false": []},
+    "9018": {"require_true": ["present"], "require_false": []},
+    "9021": {"require_true": ["present", "has_nch"], "require_false": []},
+    "9024": {"require_true": ["present", "has_bic"], "require_false": ["has_intermediary"]},
+}
+
+# =============================================================================
 # RULE ENGINE - Deterministic 8XXX and 9XXX Rules
 # =============================================================================
 
@@ -748,6 +777,53 @@ class RuleEngine:
     def _emit_eligible(self, code: str, party: str, condition: str):
         """Record a directory-dependent code eligibility."""
         self.directory_eligible.append((code, party, condition))
+    
+    def _check_precondition(self, code: str, party: str) -> bool:
+        """
+        Check if preconditions are met for a code to fire.
+        Uses ML model's precondition logic:
+        - require_true: ALL must be True
+        - require_false: At least ONE must be False (validation failed)
+        
+        Returns True if code should fire, False otherwise.
+        """
+        rules = PRECONDITION_RULES.get(code, {})
+        require_true = rules.get('require_true', [])
+        require_false = rules.get('require_false', [])
+        
+        if not require_true and not require_false:
+            return True  # No preconditions
+        
+        # Check require_true: ALL must be True
+        for feat_base in require_true:
+            if feat_base == 'present':
+                value = self.f.get(f'{party}_present', False)
+            elif feat_base == 'has_intermediary':
+                value = self.f.get('intm_present', False) or self.f.get('has_intermediary', False)
+            else:
+                value = self.f.get(f'{party}_{feat_base}', False)
+            
+            if not value:
+                return False  # Required feature is not True
+        
+        # Check require_false: At least ONE must be False
+        if require_false:
+            any_false = False
+            for feat_base in require_false:
+                value = self.f.get(f'{party}_{feat_base}', None)
+                if value is None or value == False:
+                    any_false = True
+                    break
+            
+            if not any_false:
+                return False  # All validity checks passed, error shouldn't fire
+        
+        return True
+    
+    def _emit_if_precondition_met(self, code: str, party: str):
+        """Emit code only if preconditions are met."""
+        if self._check_precondition(code, party):
+            self._emit(code)
     
     # =========================================================================
     # MESSAGE-LEVEL CHECKS (8023-8029)
@@ -800,13 +876,11 @@ class RuleEngine:
             self._emit('8006')
         
         # 8022: IBAN/BIC country mismatch OR BIC/NCH inconsistency
+        # Using precondition: requires [has_iban, has_bic], require_false [bic_iban_match]
         # DETERMINISTIC cases (we can check directly):
         # 1. IBAN country != BIC country (both present)
         # 2. BIC country != Party country (explicit mismatch)
         # 3. BIC country != NCH type country (FEDABA=US, BSB=AU)
-        # DERIVATION-DEPENDENT cases (handled in directory_eligible):
-        # - NCH derived from BIC doesn't match existing NCH
-        # - NCH derived from IBAN doesn't match BIC country
         # Note: Only fire deterministic if BIC is valid format
         if self._get(party, 'has_bic', False) and self._get(party, 'bic_valid_format', False):
             bic_country = self._get(party, 'bic_country', '')
@@ -830,6 +904,23 @@ class RuleEngine:
                 if nch_type == 'BSB' and bic_country and bic_country != 'AU':
                     self._emit('8022')
         
+        # 8026: NCH inconsistency (party-level check using precondition)
+        # Precondition: has_nch must be True
+        # We emit if there's NCH and message-level inconsistency or cross-party mismatch
+        if self._get(party, 'has_nch', False):
+            # Already handled at message level for multiple NCHs
+            # But also check if NCH exists and doesn't match BIC country
+            if self._get(party, 'has_bic', False):
+                bic_country = self._get(party, 'bic_country', '')
+                nch_type = self._get(party, 'nch_type', '')
+                # Cross-check: NCH type vs BIC country
+                if nch_type == 'FEDABA' and bic_country and bic_country != 'US':
+                    self._emit('8026')
+                elif nch_type == 'CHIPS_OR_SORT' and bic_country and bic_country not in ('US', 'GB'):
+                    self._emit('8026')
+                elif nch_type == 'BSB' and bic_country and bic_country != 'AU':
+                    self._emit('8026')
+        
         # 8030: IBAN derivation not supported
         if (self._get(party, 'needs_iban', False) and 
             not self._get(party, 'has_iban', False) and
@@ -844,13 +935,64 @@ class RuleEngine:
         
         # 8894: Invalid IBAN (DETERMINISTIC)
         # This fires when IBAN fails format or checksum validation
-        # DERIVATION-DEPENDENT 8894 is handled in directory_eligible
-        # (e.g., IBAN is valid but NCH extracted from IBAN cannot be validated)
+        # Also fires when IBAN bank code doesn't match the explicit NCH
         if self._get(party, 'has_iban', False):
             if not self._get(party, 'iban_valid_format', True):
                 self._emit('8894')
             elif not self._get(party, 'iban_checksum_valid', True):
                 self._emit('8894')
+            else:
+                iban_country = self._get(party, 'iban_country', '')
+                iban = self._get(party, 'iban', '')
+                
+                # Extract IBAN bank code (first digits of BBAN)
+                if iban_country and len(iban) >= 7:
+                    iban_bank_code = iban[4:7]  # First 3 digits of BBAN
+                    
+                    # Check if IBAN bank code matches explicit NCH
+                    # For countries that use 3-digit bank codes (FI, etc.)
+                    if self._get(party, 'has_nch', False):
+                        explicit_nch = str(self._get(party, 'nch', ''))
+                        if len(explicit_nch) == 3 and explicit_nch.isdigit():
+                            # Compare IBAN bank code with explicit NCH
+                            if iban_bank_code != explicit_nch:
+                                # Inconsistency: IBAN bank code doesn't match NCH
+                                self._emit('8894')
+                    
+                    # Also check cross-party: BIC bank vs IBAN bank code mapping
+                    if self._get(party, 'has_bic', False):
+                        bic = self._get(party, 'bic', '')
+                        if bic and len(bic) >= 4:
+                            bic_bank = bic[:4].upper()
+                            
+                            # Finnish bank code to BIC mapping
+                            fi_bank_mapping = {
+                                '1': ['NDEA'],  # Nordea: 100-199
+                                '2': ['NDEA'],  # Nordea: 200-299  
+                                '3': ['DABA'],  # Danske: 300-399
+                                '4': ['OKOK'],  # OP: 400-499
+                                '5': ['OKOK'],  # OP: 500-599
+                                '6': ['AABA'],  # Ålandsbanken
+                                '7': ['HELC'],  # S-Bank
+                                '8': ['DABA'],  # Danske
+                            }
+                            
+                            if iban_country == 'FI' and iban_bank_code:
+                                first_digit = iban_bank_code[0]
+                                expected_bics = fi_bank_mapping.get(first_digit, [])
+                                if expected_bics and bic_bank not in expected_bics:
+                                    self._emit('8894')
+                
+                # Cross-party IBAN/BIC country check
+                if iban_country:
+                    for other_party in PARTY_PREFIXES:
+                        if other_party == party:
+                            continue
+                        if self.f.get(f'{other_party}_present', False):
+                            other_bic_country = self.f.get(f'{other_party}_bic_country', '')
+                            if party == 'bnf' and other_party == 'bnf':
+                                if other_bic_country and iban_country != other_bic_country:
+                                    self._emit('8894')
         
         # 8895: Invalid NCH (US only)
         if self._get(party, 'has_nch', False) and self._get(party, 'nch_validation_applicable', False):
