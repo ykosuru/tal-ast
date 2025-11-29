@@ -412,10 +412,12 @@ class RuleEngine:
     def __init__(self, features: Dict):
         self.f = features
         self.codes = set()
+        self.directory_eligible = []  # List of (code, party, condition) for directory lookups
     
     def predict(self) -> Set[str]:
         """Run all deterministic rules and return predicted codes."""
         self.codes = set()
+        self.directory_eligible = []
         
         # Message-level consistency checks
         self._check_message_level()
@@ -426,14 +428,23 @@ class RuleEngine:
                 continue
             self._check_8xxx(party)
             self._check_9xxx(party)
+            self._check_directory_eligible(party)
         
         return self.codes
+    
+    def get_directory_eligible(self) -> List[Tuple[str, str, str]]:
+        """Return list of directory-dependent codes that are eligible."""
+        return self.directory_eligible
     
     def _get(self, party: str, key: str, default=None):
         return self.f.get(f'{party}_{key}', default)
     
     def _emit(self, code: str):
         self.codes.add(code)
+    
+    def _emit_eligible(self, code: str, party: str, condition: str):
+        """Record a directory-dependent code eligibility."""
+        self.directory_eligible.append((code, party, condition))
     
     # =========================================================================
     # MESSAGE-LEVEL CHECKS (8023-8029)
@@ -573,13 +584,99 @@ class RuleEngine:
         # 9028: NCH code strip off
         if self._get(party, 'has_nch', False) and self._get(party, 'nch_in_wrong_field', False):
             self._emit('9028')
+    
+    # =========================================================================
+    # DIRECTORY-DEPENDENT ELIGIBILITY (for --include-directory mode)
+    # =========================================================================
+    
+    def _check_directory_eligible(self, party: str):
+        """Check eligibility for directory-dependent codes."""
+        
+        # 8004: IBAN cannot be derived (emitted when derivation FAILS)
+        if (self._get(party, 'needs_iban', False) and 
+            not self._get(party, 'has_iban', False) and
+            self._get(party, 'has_account', False)):
+            if self._get(party, 'iban_derivation_supported', True):
+                self._emit_eligible('9004', party, 
+                    f"IBAN derivation eligible (has account, needs IBAN) → IF FOUND: 9004, ELSE: 8004+9999")
+            else:
+                # Country doesn't support derivation - 8030 already emitted deterministically
+                pass
+        
+        # 9005: BIC from NCH
+        if self._get(party, 'has_nch', False) and not self._get(party, 'has_bic', False):
+            self._emit_eligible('9005', party,
+                f"BIC from NCH eligible (has NCH, no BIC) → IF FOUND: 9005, ELSE: 9999")
+        
+        # 9008: BIC from IBAN
+        if self._get(party, 'has_iban', False) and not self._get(party, 'has_bic', False):
+            self._emit_eligible('9008', party,
+                f"BIC from IBAN eligible (has IBAN, no BIC) → IF FOUND: 9008, ELSE: 9999")
+        
+        # 9013: Name/Address repair
+        if (self._get(party, 'has_name', False) and 
+            not self._get(party, 'has_bic', False) and
+            self._get(party, 'address_lines', 0) >= 1):
+            self._emit_eligible('9013', party,
+                f"Name/Address repair eligible → IF FOUND: 9013, ELSE: 9999")
+        
+        # 9477: FED ABA from Name/Address (NOT BIC expansion!)
+        if self._get(party, 'has_fedaba_in_address', False):
+            self._emit_eligible('9477', party,
+                f"FEDABA in address detected → IF FOUND: 9477, ELSE: 9999")
+        
+        # 9476: CHIPS ABA from Name/Address
+        if self._get(party, 'has_chips_in_address', False):
+            self._emit_eligible('9476', party,
+                f"CHIPS ABA in address detected → IF FOUND: 9476, ELSE: 9999")
+        
+        # 9479: Account Number Cleaned (directory enrichment)
+        if self._get(party, 'has_bic', False):
+            self._emit_eligible('9479', party,
+                f"Party enrichment eligible (has BIC) → IF FOUND: 9479, ELSE: 9999")
+        
+        # 9961: BIC from Name/Address (fuzzy)
+        if (self._get(party, 'has_name', False) and 
+            not self._get(party, 'has_bic', False) and
+            self._get(party, 'address_lines', 0) >= 2):
+            self._emit_eligible('9961', party,
+                f"BIC from Name/Address eligible (fuzzy) → IF FOUND: 9961, ELSE: 9999")
+        
+        # 9970: D-A using BIC from Name/Address
+        if self._get(party, 'has_name', False) and not self._get(party, 'has_bic', False):
+            # Check if BIC pattern exists in address
+            pass  # Would need to detect BIC in address text
+        
+        # 9985: BIC from CHIPS ABA
+        if self._get(party, 'has_nch', False) and self._get(party, 'nch_type') == 'CHIPS_OR_SORT':
+            self._emit_eligible('9985', party,
+                f"BIC from CHIPS ABA eligible → IF FOUND: 9985, ELSE: 9999")
 
 
 # =============================================================================
 # RESPONSE CODE EXTRACTOR
 # =============================================================================
 
-def extract_actual_codes(response: Dict) -> Set[str]:
+# Directory-dependent codes - cannot predict deterministically
+# These require external directory lookups to determine success/failure
+DIRECTORY_DEPENDENT_CODES = {
+    # 8XXX that depend on directory lookup outcome
+    '8004',  # IBAN cannot be derived - emitted when derivation FAILS
+    '8036',  # FCDA name matching - requires CIF
+    '8464',  # Target channel not derived
+    '8465',  # Product code not found
+    '8472',  # Fee code not derived
+    
+    # 9XXX that require directory lookups
+    '9004', '9005', '9007', '9008', '9013', '9023', '9029', '9032',
+    '9475', '9476', '9477', '9478', '9479', '9480', '9481', '9482',
+    '9484', '9485', '9486', '9901', '9910', '9917', '9918', '9932',
+    '9935', '9936', '9961', '9970', '9978', '9979', '9980', '9981',
+    '9982', '9983', '9984', '9985', '9986', '9999',
+}
+
+
+def extract_actual_codes(response: Dict, include_directory_dependent: bool = False) -> Set[str]:
     """Extract actual ACE codes from Response, filtering to 8XXX/9XXX only."""
     codes = set()
     
@@ -621,7 +718,13 @@ def extract_actual_codes(response: Dict) -> Set[str]:
     find_codes(response)
     
     # Filter to 8XXX and 9XXX only
-    return {c for c in codes if c.startswith('8') or c.startswith('9')}
+    result = {c for c in codes if c.startswith('8') or c.startswith('9')}
+    
+    # Optionally exclude directory-dependent codes
+    if not include_directory_dependent:
+        result = result - DIRECTORY_DEPENDENT_CODES
+    
+    return result
 
 
 def extract_base_code(code: str) -> Optional[str]:
@@ -640,6 +743,8 @@ class VerificationResult:
     predicted: Set[str]
     actual: Set[str]
     passed: bool = False
+    directory_codes: Set[str] = field(default_factory=set)
+    directory_eligible: List[Tuple[str, str, str]] = field(default_factory=list)
     
     def __post_init__(self):
         self.passed = (self.predicted == self.actual)
@@ -670,7 +775,8 @@ def get_transaction_id(data: Dict) -> str:
     return "UNKNOWN"
 
 
-def process_payment(payment_id: str, request_data: Dict, response_data: Dict) -> VerificationResult:
+def process_payment(payment_id: str, request_data: Dict, response_data: Dict, 
+                    include_directory_dependent: bool = False) -> VerificationResult:
     """Process a single payment: extract features, predict, compare."""
     # Navigate to IFML
     ifml = request_data.get('IFML', request_data)
@@ -682,11 +788,20 @@ def process_payment(payment_id: str, request_data: Dict, response_data: Dict) ->
     # Predict codes
     engine = RuleEngine(features)
     predicted = engine.predict()
+    directory_eligible = engine.get_directory_eligible()
     
-    # Extract actual codes (8XXX/9XXX only)
-    actual = extract_actual_codes(response_data)
+    # Extract actual codes (8XXX/9XXX only, excluding directory-dependent by default)
+    actual = extract_actual_codes(response_data, include_directory_dependent)
     
-    return VerificationResult(trn_id=payment_id, predicted=predicted, actual=actual)
+    # Also get all actual codes for reporting
+    all_actual = extract_actual_codes(response_data, include_directory_dependent=True)
+    directory_codes = all_actual - actual
+    
+    result = VerificationResult(trn_id=payment_id, predicted=predicted, actual=actual)
+    result.directory_codes = directory_codes  # Store for reporting
+    result.directory_eligible = directory_eligible  # Store eligibility predictions
+    
+    return result
 
 
 def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResult]:
@@ -701,7 +816,7 @@ def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResu
         # Check if it's a single payment with Request/Response
         if 'Request' in data and 'Response' in data:
             trn_id = get_transaction_id(data)
-            result = process_payment(trn_id, data['Request'], data['Response'])
+            result = process_payment(trn_id, data['Request'], data['Response'], INCLUDE_DIRECTORY)
             results.append(result)
         
         # Check if it's keyed by payment ID
@@ -709,7 +824,7 @@ def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResu
             for key, value in data.items():
                 if isinstance(value, dict):
                     if 'Request' in value and 'Response' in value:
-                        result = process_payment(key, value['Request'], value['Response'])
+                        result = process_payment(key, value['Request'], value['Response'], INCLUDE_DIRECTORY)
                         results.append(result)
                     elif 'IFML' in value:
                         # Just request, no response to compare
@@ -720,7 +835,7 @@ def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResu
         for i, item in enumerate(data):
             if isinstance(item, dict) and 'Request' in item and 'Response' in item:
                 trn_id = get_transaction_id(item) or f"payment_{i}"
-                result = process_payment(trn_id, item['Request'], item['Response'])
+                result = process_payment(trn_id, item['Request'], item['Response'], INCLUDE_DIRECTORY)
                 results.append(result)
     
     return results
@@ -753,7 +868,11 @@ def print_results(results: List[VerificationResult], verbose: bool = False):
     
     for result in results:
         if result.passed:
-            print(f"{result.trn_id} PASS")
+            if verbose:
+                dir_info = f" [Dir: {sorted(result.directory_codes)}]" if result.directory_codes else ""
+                print(f"{result.trn_id} PASS{dir_info}")
+            else:
+                print(f"{result.trn_id} PASS")
             passed += 1
         else:
             failed += 1
@@ -783,13 +902,40 @@ def print_results(results: List[VerificationResult], verbose: bool = False):
                 print(f"  FP (predicted, not actual): {sorted(only_predicted)}")
             if only_actual:
                 print(f"  FN (actual, not predicted): {sorted(only_actual)}")
+            
+            # Show directory-dependent codes that were excluded
+            if result.directory_codes:
+                print(f"  [Excluded directory-dependent: {sorted(result.directory_codes)}]")
+            print()
+        
+        # Show directory eligibility predictions when --include-directory is enabled
+        if INCLUDE_DIRECTORY and result.directory_eligible:
+            print(f"\n  📋 Directory Lookup Predictions for {result.trn_id}:")
+            for code, party, condition in result.directory_eligible:
+                print(f"     [{party}] {condition}")
+            
+            # Match predictions against actual directory codes
+            if result.directory_codes:
+                print(f"\n  📊 Actual Directory Codes: {sorted(result.directory_codes)}")
+                eligible_codes = {code for code, _, _ in result.directory_eligible}
+                matched = eligible_codes & result.directory_codes
+                if matched:
+                    print(f"     ✓ Correctly predicted eligible: {sorted(matched)}")
+                unmatched_actual = result.directory_codes - eligible_codes - {'9999'}
+                if unmatched_actual:
+                    print(f"     ✗ Actual but not predicted eligible: {sorted(unmatched_actual)}")
             print()
     
     # Summary
     total = len(results)
-    print(f"\n{'='*60}")
-    print(f"SUMMARY: {passed}/{total} passed ({100*passed/total:.1f}%), {failed} failed")
-    print(f"{'='*60}")
+    if total > 0:
+        print(f"\n{'='*60}")
+        print(f"SUMMARY: {passed}/{total} passed ({100*passed/total:.1f}%), {failed} failed")
+        if not INCLUDE_DIRECTORY:
+            print(f"(Directory-dependent codes excluded from comparison)")
+        else:
+            print(f"(Directory-dependent codes INCLUDED in comparison)")
+        print(f"{'='*60}")
 
 
 # =============================================================================
@@ -798,16 +944,23 @@ def print_results(results: List[VerificationResult], verbose: bool = False):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python verify_ifml.py <path> [--verbose]")
+        print("Usage: python verify_ifml.py <path> [--verbose] [--include-directory]")
         print("  <path> can be a JSON file or directory of JSON files")
+        print("  --verbose, -v      Show more details")
+        print("  --include-directory  Include directory-dependent codes in comparison")
         sys.exit(1)
     
     path = Path(sys.argv[1])
     verbose = '--verbose' in sys.argv or '-v' in sys.argv
+    include_directory = '--include-directory' in sys.argv
     
     if not path.exists():
         print(f"Error: {path} does not exist")
         sys.exit(1)
+    
+    # Store flag globally for process functions
+    global INCLUDE_DIRECTORY
+    INCLUDE_DIRECTORY = include_directory
     
     if path.is_file():
         results = process_file(path, verbose)
@@ -819,6 +972,10 @@ def main():
         sys.exit(1)
     
     print_results(results, verbose)
+
+
+# Global flag
+INCLUDE_DIRECTORY = False
 
 
 if __name__ == '__main__':
