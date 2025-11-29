@@ -786,6 +786,10 @@ class RuleEngine:
         # 9017: Multiple party info
         if self._get(party, 'has_multiple_ids', False):
             self._emit('9017')
+        # Also check if multiple address entries (some systems store multiple party info in addresses)
+        if self._get(party, 'address_lines', 0) > 4:
+            # More than 4 address lines might indicate multiple party info merged
+            pass  # Too aggressive - don't emit
         
         # 9018: Duplicate removed
         if self._get(party, 'has_duplicate_info', False):
@@ -983,6 +987,7 @@ class VerificationResult:
     passed: bool = False
     directory_codes: Set[str] = field(default_factory=set)
     directory_eligible: List[Tuple[str, str, str]] = field(default_factory=list)
+    features: Dict = field(default_factory=dict)
     
     def __post_init__(self):
         self.passed = (self.predicted == self.actual)
@@ -1014,7 +1019,8 @@ def get_transaction_id(data: Dict) -> str:
 
 
 def process_payment(payment_id: str, request_data: Dict, response_data: Dict, 
-                    include_directory_dependent: bool = False) -> VerificationResult:
+                    include_directory_dependent: bool = False,
+                    debug: bool = False) -> VerificationResult:
     """Process a single payment: extract features, predict, compare."""
     # Navigate to IFML
     ifml = request_data.get('IFML', request_data)
@@ -1038,11 +1044,24 @@ def process_payment(payment_id: str, request_data: Dict, response_data: Dict,
     result = VerificationResult(trn_id=payment_id, predicted=predicted, actual=actual)
     result.directory_codes = directory_codes  # Store for reporting
     result.directory_eligible = directory_eligible  # Store eligibility predictions
+    result.features = features  # Store for debug output
+    
+    # Debug output for failures
+    if debug and predicted != actual:
+        print(f"\n=== DEBUG: {payment_id} ===")
+        print("Key features:")
+        for key in sorted(features.keys()):
+            val = features[key]
+            if val and val != False and val != 0 and val != '':
+                if 'has_' in key or 'multiple' in key or 'duplicate' in key or 'valid' in key or 'match' in key or 'nch' in key:
+                    print(f"  {key}: {val}")
+        print(f"Predicted: {sorted(predicted)}")
+        print(f"Actual: {sorted(actual)}")
     
     return result
 
 
-def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResult]:
+def process_file(filepath: Path, verbose: bool = False, debug: bool = False) -> List[VerificationResult]:
     """Process a single JSON file containing IFML data."""
     results = []
     
@@ -1054,7 +1073,7 @@ def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResu
         # Check if it's a single payment with Request/Response
         if 'Request' in data and 'Response' in data:
             trn_id = get_transaction_id(data)
-            result = process_payment(trn_id, data['Request'], data['Response'], INCLUDE_DIRECTORY)
+            result = process_payment(trn_id, data['Request'], data['Response'], INCLUDE_DIRECTORY, debug)
             results.append(result)
         
         # Check if it's keyed by payment ID
@@ -1062,7 +1081,7 @@ def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResu
             for key, value in data.items():
                 if isinstance(value, dict):
                     if 'Request' in value and 'Response' in value:
-                        result = process_payment(key, value['Request'], value['Response'], INCLUDE_DIRECTORY)
+                        result = process_payment(key, value['Request'], value['Response'], INCLUDE_DIRECTORY, debug)
                         results.append(result)
                     elif 'IFML' in value:
                         # Just request, no response to compare
@@ -1073,20 +1092,20 @@ def process_file(filepath: Path, verbose: bool = False) -> List[VerificationResu
         for i, item in enumerate(data):
             if isinstance(item, dict) and 'Request' in item and 'Response' in item:
                 trn_id = get_transaction_id(item) or f"payment_{i}"
-                result = process_payment(trn_id, item['Request'], item['Response'], INCLUDE_DIRECTORY)
+                result = process_payment(trn_id, item['Request'], item['Response'], INCLUDE_DIRECTORY, debug)
                 results.append(result)
     
     return results
 
 
-def process_directory(dirpath: Path, verbose: bool = False) -> List[VerificationResult]:
+def process_directory(dirpath: Path, verbose: bool = False, debug: bool = False) -> List[VerificationResult]:
     """Process all JSON files in a directory."""
     results = []
     json_files = sorted(dirpath.glob('*.json'))
     
     for filepath in json_files:
         try:
-            file_results = process_file(filepath, verbose)
+            file_results = process_file(filepath, verbose, debug)
             results.extend(file_results)
         except Exception as e:
             if verbose:
@@ -1182,28 +1201,31 @@ def print_results(results: List[VerificationResult], verbose: bool = False):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python verify_ifml.py <path> [--verbose] [--include-directory]")
+        print("Usage: python verify_ifml.py <path> [--verbose] [--include-directory] [--debug]")
         print("  <path> can be a JSON file or directory of JSON files")
         print("  --verbose, -v      Show more details")
         print("  --include-directory  Include directory-dependent codes in comparison")
+        print("  --debug            Show feature extraction details for each payment")
         sys.exit(1)
     
     path = Path(sys.argv[1])
     verbose = '--verbose' in sys.argv or '-v' in sys.argv
     include_directory = '--include-directory' in sys.argv
+    debug = '--debug' in sys.argv
     
     if not path.exists():
         print(f"Error: {path} does not exist")
         sys.exit(1)
     
-    # Store flag globally for process functions
-    global INCLUDE_DIRECTORY
+    # Store flags globally for process functions
+    global INCLUDE_DIRECTORY, DEBUG_MODE
     INCLUDE_DIRECTORY = include_directory
+    DEBUG_MODE = debug
     
     if path.is_file():
-        results = process_file(path, verbose)
+        results = process_file(path, verbose, debug)
     else:
-        results = process_directory(path, verbose)
+        results = process_directory(path, verbose, debug)
     
     if not results:
         print("No payments processed. Check file format.")
@@ -1214,6 +1236,7 @@ def main():
 
 # Global flag
 INCLUDE_DIRECTORY = False
+DEBUG_MODE = False
 
 
 if __name__ == '__main__':
