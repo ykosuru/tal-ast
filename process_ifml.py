@@ -164,23 +164,52 @@ class FeatureExtractor:
         for key in ['has_bic', 'has_iban', 'has_nch', 'has_account', 'has_bban', 'has_domestic_account']:
             self.features[f'{prefix}_{key}'] = False
         
-        # Get ID fields
+        # Initialize multiple/duplicate detection
+        self.features[f'{prefix}_has_multiple_ids'] = False
+        self.features[f'{prefix}_has_duplicate_info'] = False
+        self.features[f'{prefix}_has_id'] = False
+        self.features[f'{prefix}_id_has_dirty_chars'] = False
+        
+        # Get ID fields - check if it's a list (multiple IDs)
         id_info = basic.get('ID', {})
+        
+        # CRITICAL: Check for multiple IDs (9017, 9018 detection)
+        if isinstance(id_info, list):
+            if len(id_info) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            id_info = id_info[0] if id_info else {}
+        
         if isinstance(id_info, str):
             id_info = {'text': id_info}
         
         acct_id = {}
         if account:
-            acct_id_inf = account.get('AcctIDInf', {})
+            acct_id_inf = account.get('AcctIDInf', {}) or account.get('AcctIDInfo', {})
             acct_id = acct_id_inf.get('ID', {})
+            
+            # Check for multiple account IDs too
+            if isinstance(acct_id, list):
+                if len(acct_id) > 1:
+                    self.features[f'{prefix}_has_multiple_ids'] = True
+                    self.features[f'{prefix}_has_duplicate_info'] = True
+                acct_id = acct_id[0] if acct_id else {}
+            
             if isinstance(acct_id, str):
                 acct_id = {'text': acct_id}
         
-        id_type = id_info.get('Type', '')
-        id_text = id_info.get('text', '')
-        acct_type = acct_id.get('Type', '')
-        acct_text = acct_id.get('text', '')
+        id_type = id_info.get('Type') or id_info.get('@Type', '')
+        id_text = id_info.get('text') or id_info.get('#text', '')
+        acct_type = acct_id.get('Type') or acct_id.get('@Type', '')
+        acct_text = acct_id.get('text') or acct_id.get('#text', '')
         adr_bank_id = basic.get('AdrBankID', '')
+        
+        # Check for has_id and dirty chars (for 9019)
+        if id_text:
+            self.features[f'{prefix}_has_id'] = True
+            # Dirty chars in ID: unusual characters that need cleaning
+            if re.search(r'[^\w\s/\-\(\)]', id_text):
+                self.features[f'{prefix}_id_has_dirty_chars'] = True
         
         # Classify each identifier
         bic, iban, nch, account_num = None, None, None, None
@@ -188,13 +217,21 @@ class FeatureExtractor:
         # Type S = SWIFT/BIC
         if id_type == 'S' and id_text:
             bic = id_text
+        elif id_type == 'BIC' and id_text:
+            bic = id_text
         elif id_type in ('P', 'D') and id_text:
             account_num = id_text
             if id_type == 'D':
                 self.features[f'{prefix}_has_domestic_account'] = True
+        elif id_type == 'IBAN' and id_text:
+            iban = id_text
         
         if acct_type == 'S' and acct_text:
             bic = acct_text
+        elif acct_type == 'BIC' and acct_text:
+            bic = acct_text
+        elif acct_type == 'IBAN' and acct_text:
+            iban = acct_text
         elif acct_text:
             account_num = acct_text
             if acct_type == 'D':
@@ -208,12 +245,28 @@ class FeatureExtractor:
                     bic = match.group(1)
                     account_num = match.group(2).lstrip('AC')
         
-        # AdrBankID often contains BIC
-        if adr_bank_id and self._is_bic(adr_bank_id):
-            bic = adr_bank_id
+        # AdrBankID often contains BIC or NCH
+        if adr_bank_id:
+            if isinstance(adr_bank_id, dict):
+                adr_type = adr_bank_id.get('Type') or adr_bank_id.get('@Type', '')
+                adr_text = adr_bank_id.get('text') or adr_bank_id.get('#text', '')
+                
+                if adr_type in ['FEDABA', 'FW', 'FEDWIRE']:
+                    nch = adr_text
+                    self.features[f'{prefix}_nch_type'] = 'FEDABA'
+                elif adr_type in ['CHIPS', 'CH', 'CHIPSABA']:
+                    nch = adr_text
+                    self.features[f'{prefix}_nch_type'] = 'CHIPS'
+                elif adr_type in ['SORTCODE', 'SC', 'UKSC']:
+                    nch = adr_text
+                    self.features[f'{prefix}_nch_type'] = 'SORTCODE'
+                elif self._is_bic(adr_text):
+                    bic = adr_text
+            elif self._is_bic(str(adr_bank_id)):
+                bic = str(adr_bank_id)
         
-        # Classify account type
-        if account_num:
+        # Classify account type if not already classified
+        if account_num and not iban and not nch:
             if self._is_iban(account_num):
                 iban = account_num
                 account_num = None
@@ -278,7 +331,7 @@ class FeatureExtractor:
         self.features[f'{prefix}_iban'] = iban
         self.all_ibans.append(iban)
         
-        # Format
+        # Format validation
         self.features[f'{prefix}_iban_valid_format'] = bool(
             re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', iban)
         )
@@ -286,6 +339,20 @@ class FeatureExtractor:
         # Country
         if len(iban) >= 2:
             self.features[f'{prefix}_iban_country'] = iban[:2]
+        
+        # Length check for specific countries
+        iban_lengths = {
+            'DE': 22, 'FR': 27, 'GB': 22, 'ES': 24, 'IT': 27, 'NL': 18, 'BE': 16,
+            'AT': 20, 'CH': 21, 'SE': 24, 'NO': 15, 'DK': 18, 'FI': 18, 'PL': 28,
+            'PT': 25, 'IE': 22, 'GR': 27, 'CZ': 24, 'HU': 28, 'RO': 24, 'SK': 24,
+            'LU': 20, 'HR': 21, 'SI': 19, 'BG': 22, 'LT': 20, 'LV': 21, 'EE': 20,
+        }
+        country = iban[:2] if len(iban) >= 2 else ''
+        expected_len = iban_lengths.get(country)
+        if expected_len and len(iban) != expected_len:
+            self.features[f'{prefix}_iban_wrong_length'] = True
+        else:
+            self.features[f'{prefix}_iban_wrong_length'] = False
         
         # Checksum (mod-97)
         try:
@@ -363,7 +430,15 @@ class FeatureExtractor:
         self.features[f'{prefix}_account_has_dirty_chars'] = (account != clean)
         self.features[f'{prefix}_account_valid_format'] = len(clean) > 0
         self.features[f'{prefix}_account_needs_length_fix'] = False
+        self.features[f'{prefix}_account_wrong_length'] = False
         self.features[f'{prefix}_is_clabe'] = (len(clean) == 18 and clean.isdigit())
+        
+        # Check for wrong length based on account type
+        acct_type = self.features.get(f'{prefix}_account_type', '')
+        if acct_type == 'CLABE' and len(clean) != 18:
+            self.features[f'{prefix}_account_wrong_length'] = True
+        elif acct_type == 'FEDABA' and len(clean) != 9:
+            self.features[f'{prefix}_account_wrong_length'] = True
         
         # Domestic account validation (US)
         country = self.features.get(f'{prefix}_country', '')
@@ -533,6 +608,28 @@ class RuleEngine:
         if self._get(party, 'has_iban', False):
             if self._get(party, 'iban_valid_format', True) and not self._get(party, 'iban_checksum_valid', True):
                 self._emit('8898')
+        
+        # 8852: Incorrect length of attribute
+        # Check for account/IBAN/BIC with wrong length
+        # Note: Don't fire 8852 if 8001 already fires for invalid format
+        if self._get(party, 'has_account', False):
+            if self._get(party, 'account_wrong_length', False):
+                self._emit('8852')
+        if self._get(party, 'has_iban', False):
+            if self._get(party, 'iban_wrong_length', False):
+                self._emit('8852')
+        # BIC length check - only fire if format is valid but length is unusual
+        if self._get(party, 'has_bic', False):
+            bic_len = self._get(party, 'bic_length', 0)
+            bic_valid_format = self._get(party, 'bic_valid_format', True)
+            # 8852 for BIC only when format looks like BIC but length is off
+            # (valid format catches the length check, so we don't double-fire)
+            if bic_len > 0 and bic_len not in (8, 11) and not bic_valid_format:
+                # If bic_valid_format is False, 8001 will fire
+                # Only fire 8852 if it's a length-specific issue with otherwise valid chars
+                bic_val = self._get(party, 'bic', '')
+                if bic_val and re.match(r'^[A-Z0-9]+$', bic_val):
+                    pass  # Let 8001 handle it
     
     # =========================================================================
     # 9XXX REPAIRS (Deterministic - No Directory)
@@ -570,6 +667,11 @@ class RuleEngine:
         # 9018: Duplicate removed
         if self._get(party, 'has_duplicate_info', False):
             self._emit('9018')
+        
+        # 9019: Party identifier cleaned (dirty chars in party ID)
+        if self._get(party, 'has_id', False):
+            if self._get(party, 'id_has_dirty_chars', False):
+                self._emit('9019')
         
         # 9021: FEDABA formatted
         if (self._get(party, 'has_nch', False) and 
