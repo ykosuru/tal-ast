@@ -741,10 +741,11 @@ PRECONDITION_RULES = {
 class RuleEngine:
     """Apply deterministic rules to predict 8XXX and 9XXX codes."""
     
-    def __init__(self, features: Dict):
+    def __init__(self, features: Dict, debug: bool = False):
         self.f = features
         self.codes = set()
         self.directory_eligible = []  # List of (code, party, condition) for directory lookups
+        self.debug = debug
     
     def predict(self) -> Set[str]:
         """Run all deterministic rules and return predicted codes."""
@@ -886,43 +887,79 @@ class RuleEngine:
         # 2. BIC country != Party country (explicit mismatch)
         # 3. BIC country != NCH type country (FEDABA=US, BSB=AU)
         # Note: Only fire deterministic if BIC is valid format
+        
+        # DEBUG: Print 8022 check conditions
+        if self.debug:
+            print(f"  [8022 DEBUG {party}] has_bic={self._get(party, 'has_bic', False)}, "
+                  f"bic_valid_format={self._get(party, 'bic_valid_format', False)}, "
+                  f"has_iban={self._get(party, 'has_iban', False)}, "
+                  f"has_nch={self._get(party, 'has_nch', False)}")
+        
         if self._get(party, 'has_bic', False) and self._get(party, 'bic_valid_format', False):
             bic_country = self._get(party, 'bic_country', '')
+            
+            if self.debug:
+                print(f"  [8022 DEBUG {party}] bic_country={bic_country}, "
+                      f"bic_iban_match={self._get(party, 'bic_iban_match', True)}")
             
             # Check IBAN vs BIC (deterministic - both values present)
             if self._get(party, 'has_iban', False):
                 if not self._get(party, 'bic_iban_match', True):
+                    if self.debug:
+                        print(f"  [8022 DEBUG {party}] EMIT 8022: bic_iban_match=False")
                     self._emit('8022')
             
             # Check BIC vs explicit party country (deterministic)
             party_country = self._get(party, 'country', '')
             if bic_country and party_country and bic_country != party_country:
+                if self.debug:
+                    print(f"  [8022 DEBUG {party}] EMIT 8022: bic_country={bic_country} != party_country={party_country}")
                 self._emit('8022')
             
             # Check BIC vs explicit NCH type (deterministic)
             # FEDABA (9-digit) implies US, BSB (3-digit) implies AU
             if self._get(party, 'has_nch', False):
                 nch_type = self._get(party, 'nch_type', '')
+                if self.debug:
+                    print(f"  [8022 DEBUG {party}] nch_type={nch_type}, bic_country={bic_country}")
                 if nch_type == 'FEDABA' and bic_country and bic_country != 'US':
+                    if self.debug:
+                        print(f"  [8022 DEBUG {party}] EMIT 8022: FEDABA but bic_country={bic_country}")
                     self._emit('8022')
                 if nch_type == 'BSB' and bic_country and bic_country != 'AU':
+                    if self.debug:
+                        print(f"  [8022 DEBUG {party}] EMIT 8022: BSB but bic_country={bic_country}")
                     self._emit('8022')
         
         # 8026: NCH inconsistency (party-level check using precondition)
         # Precondition: has_nch must be True
         # We emit if there's NCH and message-level inconsistency or cross-party mismatch
+        
+        # DEBUG: Print 8026 check conditions
+        if self.debug:
+            print(f"  [8026 DEBUG {party}] has_nch={self._get(party, 'has_nch', False)}, "
+                  f"has_bic={self._get(party, 'has_bic', False)}")
+        
         if self._get(party, 'has_nch', False):
             # Already handled at message level for multiple NCHs
             # But also check if NCH exists and doesn't match BIC country
             if self._get(party, 'has_bic', False):
                 bic_country = self._get(party, 'bic_country', '')
                 nch_type = self._get(party, 'nch_type', '')
+                if self.debug:
+                    print(f"  [8026 DEBUG {party}] bic_country={bic_country}, nch_type={nch_type}")
                 # Cross-check: NCH type vs BIC country
                 if nch_type == 'FEDABA' and bic_country and bic_country != 'US':
+                    if self.debug:
+                        print(f"  [8026 DEBUG {party}] EMIT 8026: FEDABA but bic_country={bic_country}")
                     self._emit('8026')
                 elif nch_type == 'CHIPS_OR_SORT' and bic_country and bic_country not in ('US', 'GB'):
+                    if self.debug:
+                        print(f"  [8026 DEBUG {party}] EMIT 8026: CHIPS_OR_SORT but bic_country={bic_country}")
                     self._emit('8026')
                 elif nch_type == 'BSB' and bic_country and bic_country != 'AU':
+                    if self.debug:
+                        print(f"  [8026 DEBUG {party}] EMIT 8026: BSB but bic_country={bic_country}")
                     self._emit('8026')
         
         # 8030: IBAN derivation not supported
@@ -940,10 +977,22 @@ class RuleEngine:
         # 8894: Invalid IBAN (DETERMINISTIC)
         # This fires when IBAN fails format or checksum validation
         # Also fires when IBAN bank code doesn't match the explicit NCH
+        
+        # DEBUG: Print 8894 check conditions
+        if self.debug:
+            print(f"  [8894 DEBUG {party}] has_iban={self._get(party, 'has_iban', False)}, "
+                  f"iban={self._get(party, 'iban', '')}, "
+                  f"iban_valid_format={self._get(party, 'iban_valid_format', True)}, "
+                  f"iban_checksum_valid={self._get(party, 'iban_checksum_valid', True)}")
+        
         if self._get(party, 'has_iban', False):
             if not self._get(party, 'iban_valid_format', True):
+                if self.debug:
+                    print(f"  [8894 DEBUG {party}] EMIT 8894: iban_valid_format=False")
                 self._emit('8894')
             elif not self._get(party, 'iban_checksum_valid', True):
+                if self.debug:
+                    print(f"  [8894 DEBUG {party}] EMIT 8894: iban_checksum_valid=False")
                 self._emit('8894')
             else:
                 iban_country = self._get(party, 'iban_country', '')
@@ -953,6 +1002,11 @@ class RuleEngine:
                 if iban_country and len(iban) >= 7:
                     iban_bank_code = iban[4:7]  # First 3 digits of BBAN
                     
+                    if self.debug:
+                        print(f"  [8894 DEBUG {party}] iban_bank_code={iban_bank_code}, "
+                              f"has_nch={self._get(party, 'has_nch', False)}, "
+                              f"nch={self._get(party, 'nch', '')}")
+                    
                     # Check if IBAN bank code matches explicit NCH
                     # For countries that use 3-digit bank codes (FI, etc.)
                     if self._get(party, 'has_nch', False):
@@ -960,6 +1014,8 @@ class RuleEngine:
                         if len(explicit_nch) == 3 and explicit_nch.isdigit():
                             # Compare IBAN bank code with explicit NCH
                             if iban_bank_code != explicit_nch:
+                                if self.debug:
+                                    print(f"  [8894 DEBUG {party}] EMIT 8894: iban_bank_code={iban_bank_code} != nch={explicit_nch}")
                                 # Inconsistency: IBAN bank code doesn't match NCH
                                 self._emit('8894')
                     
@@ -1359,8 +1415,18 @@ def process_payment(payment_id: str, request_data: Dict, response_data: Dict,
     extractor = FeatureExtractor()
     features = extractor.extract(ifml)
     
+    # Debug: print all features if requested
+    if debug:
+        print(f"\n=== FULL DEBUG: {payment_id} ===")
+        print("All extracted features:")
+        for key in sorted(features.keys()):
+            val = features[key]
+            if val is not None and val != False and val != 0 and val != '':
+                print(f"  {key}: {val}")
+        print()
+    
     # Predict codes
-    engine = RuleEngine(features)
+    engine = RuleEngine(features, debug=debug)
     predicted = engine.predict()
     directory_eligible = engine.get_directory_eligible()
     
@@ -1378,15 +1444,11 @@ def process_payment(payment_id: str, request_data: Dict, response_data: Dict,
     
     # Debug output for failures
     if debug and predicted != actual:
-        print(f"\n=== DEBUG: {payment_id} ===")
-        print("Key features:")
-        for key in sorted(features.keys()):
-            val = features[key]
-            if val and val != False and val != 0 and val != '':
-                if 'has_' in key or 'multiple' in key or 'duplicate' in key or 'valid' in key or 'match' in key or 'nch' in key:
-                    print(f"  {key}: {val}")
+        print(f"\n=== RESULT DEBUG: {payment_id} ===")
         print(f"Predicted: {sorted(predicted)}")
         print(f"Actual: {sorted(actual)}")
+        print(f"Missing (FN): {sorted(actual - predicted)}")
+        print(f"Extra (FP): {sorted(predicted - actual)}")
     
     return result
 
