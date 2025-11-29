@@ -100,9 +100,23 @@ class FeatureExtractor:
         for ifml_name, prefix in PARTY_MAPPING.items():
             party_data = party_inf.get(ifml_name, {})
             if party_data:
-                self._extract_party(party_data, prefix)
+                # CRITICAL: Check if party is a list (multiple entries = 9017/9018)
+                if isinstance(party_data, list):
+                    if len(party_data) > 1:
+                        # Multiple party entries of same type - triggers 9017/9018
+                        self.features[f'{prefix}_has_multiple_ids'] = True
+                        self.features[f'{prefix}_has_duplicate_info'] = True
+                    # Process first entry for features, but mark as present
+                    self.features[f'{prefix}_present'] = True
+                    party_data = party_data[0] if party_data else {}
+                    self._extract_party(party_data, prefix)
+                else:
+                    self._extract_party(party_data, prefix)
             else:
                 self.features[f'{prefix}_present'] = False
+        
+        # Track intermediary presence for 9024
+        self.features['has_intermediary'] = self.features.get('intm_present', False)
         
         # Cross-party consistency
         self._check_consistency()
@@ -126,10 +140,31 @@ class FeatureExtractor:
         """Extract features for a single party."""
         self.features[f'{prefix}_present'] = True
         
+        # Check if party_data itself is a list (multiple party entries - 9017/9018)
+        if isinstance(party_data, list):
+            if len(party_data) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            party_data = party_data[0] if party_data else {}
+        
         basic = party_data.get('BasicPartyInf', {})
         account = party_data.get('AccountPartyInf', {})
         if not basic and account:
             basic = account.get('BasicPartyInf', account)
+        
+        # Check if basic is a list (multiple BasicPartyInf entries - 9017/9018)
+        if isinstance(basic, list):
+            if len(basic) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            basic = basic[0] if basic else {}
+        
+        # Check if account is a list (multiple AccountPartyInf entries - 9017/9018)
+        if isinstance(account, list):
+            if len(account) > 1:
+                self.features[f'{prefix}_has_multiple_ids'] = True
+                self.features[f'{prefix}_has_duplicate_info'] = True
+            account = account[0] if account else {}
         
         # Extract identifiers
         self._extract_identifiers(basic, account, prefix)
@@ -157,6 +192,45 @@ class FeatureExtractor:
             )
             self.features[f'{prefix}_has_fedaba_in_address'] = bool(re.search(r'\b\d{9}\b', addr_text))
             self.features[f'{prefix}_has_chips_in_address'] = bool(re.search(r'\b\d{6}\b', addr_text))
+        
+        # Check for duplicate values (same BIC in ID and AdrBankID)
+        self._check_duplicate_values(basic, account, prefix)
+    
+    def _check_duplicate_values(self, basic: Dict, account: Dict, prefix: str):
+        """Check for duplicate values across different fields (triggers 9018)."""
+        values = []
+        
+        # Collect ID value
+        id_info = basic.get('ID', {})
+        if isinstance(id_info, dict):
+            id_text = id_info.get('text') or id_info.get('#text', '')
+            if id_text:
+                values.append(id_text)
+        elif isinstance(id_info, str):
+            values.append(id_info)
+        
+        # Collect AdrBankID value
+        adr_bank_id = basic.get('AdrBankID', {})
+        if isinstance(adr_bank_id, dict):
+            adr_text = adr_bank_id.get('text') or adr_bank_id.get('#text', '')
+            if adr_text:
+                values.append(adr_text)
+        elif isinstance(adr_bank_id, str):
+            values.append(adr_bank_id)
+        
+        # Collect account ID value
+        if account:
+            acct_id = account.get('AcctIDInf', {}).get('ID', {})
+            if isinstance(acct_id, dict):
+                acct_text = acct_id.get('text') or acct_id.get('#text', '')
+                if acct_text:
+                    values.append(acct_text)
+            elif isinstance(acct_id, str):
+                values.append(acct_id)
+        
+        # Check for duplicates
+        if len(values) != len(set(values)):
+            self.features[f'{prefix}_has_duplicate_info'] = True
     
     def _extract_identifiers(self, basic: Dict, account: Dict, prefix: str):
         """Extract and classify identifiers (BIC, IBAN, NCH, Account)."""
@@ -202,7 +276,9 @@ class FeatureExtractor:
         id_text = id_info.get('text') or id_info.get('#text', '')
         acct_type = acct_id.get('Type') or acct_id.get('@Type', '')
         acct_text = acct_id.get('text') or acct_id.get('#text', '')
-        adr_bank_id = basic.get('AdrBankID', '')
+        
+        # AdrBankID can be in BasicPartyInf OR AccountPartyInf
+        adr_bank_id = basic.get('AdrBankID', '') or (account.get('AdrBankID', '') if account else '')
         
         # Check for has_id and dirty chars (for 9019)
         if id_text:
@@ -262,8 +338,23 @@ class FeatureExtractor:
                     self.features[f'{prefix}_nch_type'] = 'SORTCODE'
                 elif self._is_bic(adr_text):
                     bic = adr_text
-            elif self._is_bic(str(adr_bank_id)):
-                bic = str(adr_bank_id)
+                elif adr_text and adr_text.isdigit():
+                    # Numeric AdrBankID is likely an NCH
+                    nch = adr_text
+                    self.features[f'{prefix}_nch_type'] = 'NCH'
+            elif isinstance(adr_bank_id, str):
+                # Plain string AdrBankID
+                if self._is_bic(adr_bank_id):
+                    bic = adr_bank_id
+                elif adr_bank_id.isdigit() and len(adr_bank_id) in (3, 6, 9):
+                    # Numeric - likely NCH (BSB=3, CHIPS=6, FEDABA=9)
+                    nch = adr_bank_id
+                    if len(adr_bank_id) == 9:
+                        self.features[f'{prefix}_nch_type'] = 'FEDABA'
+                    elif len(adr_bank_id) == 6:
+                        self.features[f'{prefix}_nch_type'] = 'CHIPS_OR_SORT'
+                    else:
+                        self.features[f'{prefix}_nch_type'] = 'BSB'  # Australian 3-digit
         
         # Classify account type if not already classified
         if account_num and not iban and not nch:
@@ -294,7 +385,8 @@ class FeatureExtractor:
     
     def _is_nch(self, text: str) -> bool:
         clean = re.sub(r'[^0-9]', '', text)
-        return len(clean) in (6, 9)
+        # NCH can be: 3 (AU BSB short), 6 (UK sort/CHIPS), 9 (FEDABA)
+        return len(clean) in (3, 6, 9)
     
     def _validate_bic(self, prefix: str, bic: str):
         bic = bic.strip().upper()
@@ -408,6 +500,13 @@ class FeatureExtractor:
             self.features[f'{prefix}_nch_valid'] = True
             self.features[f'{prefix}_fedaba_checksum_valid'] = True
             self.features[f'{prefix}_nch_needs_formatting'] = False
+        elif len(clean) == 3:
+            # Australian BSB (short form) or other 3-digit codes
+            self.features[f'{prefix}_nch_type'] = 'BSB'
+            self.features[f'{prefix}_is_fedaba'] = False
+            self.features[f'{prefix}_nch_valid'] = True
+            self.features[f'{prefix}_fedaba_checksum_valid'] = True
+            self.features[f'{prefix}_nch_needs_formatting'] = False
         else:
             self.features[f'{prefix}_nch_type'] = 'OTHER'
             self.features[f'{prefix}_is_fedaba'] = False
@@ -415,9 +514,9 @@ class FeatureExtractor:
             self.features[f'{prefix}_fedaba_checksum_valid'] = True
             self.features[f'{prefix}_nch_needs_formatting'] = False
         
-        # NCH validation applicable for US
+        # NCH validation applicable for US or AU
         country = self.features.get(f'{prefix}_country', '')
-        self.features[f'{prefix}_nch_validation_applicable'] = (country == 'US')
+        self.features[f'{prefix}_nch_validation_applicable'] = (country in ['US', 'AU'])
         self.features[f'{prefix}_nch_in_wrong_field'] = False
     
     def _validate_account(self, prefix: str, account: str):
@@ -568,10 +667,34 @@ class RuleEngine:
         if self._get(party, 'country') and not self._get(party, 'country_valid', True):
             self._emit('8006')
         
-        # 8022: IBAN/BIC country mismatch
-        if self._get(party, 'has_iban', False) and self._get(party, 'has_bic', False):
-            if not self._get(party, 'bic_iban_match', True):
+        # 8022: IBAN/BIC country mismatch OR BIC/NCH inconsistency
+        # Can fire when:
+        # 1. IBAN country != BIC country
+        # 2. BIC country != Party country
+        # 3. BIC present with NCH from different country
+        # Note: Only fire if BIC is valid format (otherwise 8001 fires)
+        if self._get(party, 'has_bic', False) and self._get(party, 'bic_valid_format', False):
+            bic_country = self._get(party, 'bic_country', '')
+            
+            # Check IBAN vs BIC
+            if self._get(party, 'has_iban', False):
+                if not self._get(party, 'bic_iban_match', True):
+                    self._emit('8022')
+            
+            # Check BIC vs party country
+            party_country = self._get(party, 'country', '')
+            if bic_country and party_country and bic_country != party_country:
                 self._emit('8022')
+            
+            # Check BIC vs NCH country (US NCH with non-US BIC, etc.)
+            if self._get(party, 'has_nch', False):
+                nch_type = self._get(party, 'nch_type', '')
+                # FEDABA implies US
+                if nch_type == 'FEDABA' and bic_country and bic_country != 'US':
+                    self._emit('8022')
+                # BSB implies AU
+                if nch_type == 'BSB' and bic_country and bic_country != 'AU':
+                    self._emit('8022')
         
         # 8030: IBAN derivation not supported
         if (self._get(party, 'needs_iban', False) and 
@@ -683,6 +806,19 @@ class RuleEngine:
         if self._get(party, 'has_account', False) and self._get(party, 'account_needs_length_fix', False):
             self._emit('9022')
         
+        # 9024: Intermediary added/pushed up
+        # This fires when intermediary routing is performed
+        # From preconditions: party present + has_bic + [directory lookup for intermediary]
+        # Since this is directory-dependent, we should emit as eligible rather than deterministic
+        # But the precondition says require_false: has_intermediary, which is confusing
+        # For now, emit if beneficiary bank has BIC (implies routing might need intermediary)
+        # This is a soft rule - the actual determination is directory-dependent
+        if party == 'bnf':
+            if self._get(party, 'has_bic', False):
+                # This is directory-dependent - we can't know deterministically
+                # Move to directory_eligible instead
+                pass
+        
         # 9028: NCH code strip off
         if self._get(party, 'has_nch', False) and self._get(party, 'nch_in_wrong_field', False):
             self._emit('9028')
@@ -770,7 +906,7 @@ DIRECTORY_DEPENDENT_CODES = {
     '8472',  # Fee code not derived
     
     # 9XXX that require directory lookups
-    '9004', '9005', '9007', '9008', '9013', '9023', '9029', '9032',
+    '9004', '9005', '9007', '9008', '9013', '9023', '9024', '9029', '9032',
     '9475', '9476', '9477', '9478', '9479', '9480', '9481', '9482',
     '9484', '9485', '9486', '9901', '9910', '9917', '9918', '9932',
     '9935', '9936', '9961', '9970', '9978', '9979', '9980', '9981',
