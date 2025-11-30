@@ -39,8 +39,9 @@ DIRECTORY_DEPENDENT_CODES = {
     '8464', '8465', '8472',  # Directory-based
     '8852',   # ACE-specific validation
     '8894',   # Often fired on derived NCH mismatch, not just IBAN format
-    # 9xxx repair codes
-    '9004', '9005', '9007', '9008', '9013', '9018', '9024',
+    '8896',   # ACE-specific validation
+    # 9xxx repair codes (9019 removed - now predicted)
+    '9004', '9005', '9007', '9008', '9013', '9017', '9018', '9024',
     '9476', '9477', '9479', '9480', '9961', '9970', '9985', '9999',
 }
 
@@ -227,6 +228,11 @@ class FeatureExtractor:
         if iban:
             self.features[f'{prefix}_has_iban'] = True
             self.features[f'{prefix}_iban'] = iban
+            self.features[f'{prefix}_iban_raw'] = iban  # Keep raw for cleaning detection
+            # Check if IBAN needs cleaning (has spaces, dashes, etc.)
+            cleaned = re.sub(r'[^A-Za-z0-9]', '', iban)
+            if cleaned != iban:
+                self.features[f'{prefix}_iban_needs_cleaning'] = True
             fmt, cksum = is_valid_iban(iban)
             self.features[f'{prefix}_iban_valid_format'] = fmt
             self.features[f'{prefix}_iban_checksum_valid'] = cksum
@@ -280,6 +286,7 @@ class RuleEngine:
         for prefix in PARTY_PREFIXES:
             if self.f.get(f'{prefix}_present'):
                 self._check_static_8xxx(prefix)
+                self._check_static_9xxx(prefix)
         return self.codes
     
     def _get(self, prefix: str, key: str, default=None):
@@ -290,10 +297,18 @@ class RuleEngine:
     
     def _check_static_8xxx(self, p: str):
         """Only check statically verifiable conditions - no directory lookups."""
-        # Currently no codes can be reliably predicted without directory data.
-        # 8001 (BIC validation) was removed because ACE uses different rules.
-        # All validation codes depend on ACE's reference data and derivation logic.
+        # Currently limited static checks - most codes require directory data
         pass
+    
+    def _check_static_9xxx(self, p: str):
+        """Check for 9xxx repair codes that are statically detectable."""
+        
+        # 9019: Party Identifier will be cleaned of non-alphanumeric characters
+        # Fires when ID contains spaces, dashes, or special chars
+        if self._get(p, 'iban_needs_cleaning'):
+            if self.debug:
+                print(f"[RULES] {p}: 9019 - IBAN needs cleaning: {self._get(p, 'iban_raw')}")
+            self._emit('9019')
 
 # =============================================================================
 # RESPONSE PARSING
