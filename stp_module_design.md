@@ -5,11 +5,14 @@
 1. [Overview](#overview)
 2. [Why Two Models](#why-two-models)
 3. [System Architecture](#system-architecture)
-4. [Model Training Pipeline](#model-training-pipeline)
-5. [Prediction Pipeline](#prediction-pipeline)
-6. [Precondition Rules System](#precondition-rules-system)
-7. [Configuration Reference](#configuration-reference)
-8. [File Structure](#file-structure)
+4. [Code Coverage](#code-coverage)
+5. [Model Training Pipeline](#model-training-pipeline)
+6. [Prediction Pipeline](#prediction-pipeline)
+7. [Precondition Rules System](#precondition-rules-system)
+8. [9XXX Trainability Classification](#9xxx-trainability-classification)
+9. [Configuration Reference](#configuration-reference)
+10. [CLI Reference](#cli-reference)
+11. [File Structure](#file-structure)
 
 ---
 
@@ -21,16 +24,26 @@ The ACE Pelican ML Prediction System predicts error codes and repair actions for
 - **Repair prediction**: Anticipate what enrichments ACE will apply
 - **Cost reduction**: Reduce ACE processing calls by fixing issues upfront
 
+### Code Coverage
+
+| Series | Total Codes | Description |
+|--------|-------------|-------------|
+| **8XXX** | 34 | Validation errors |
+| **9XXX** | 87 | Repair/enrichment codes |
+| | 39 | → Trainable (predict from message) |
+| | 46 | → Directory-dependent (need lookup) |
+| | 2 | → Non-trainable (too generic) |
+
 ### Key Components
 
 | Component | Purpose |
 |-----------|---------|
-| `ifml_parser.py` | Parse IFML JSON into structured features |
+| `ifml_parser.py` | Parse IFML JSON into 443 structured features |
 | `feature_engineering.py` | Transform parsed data into ML features |
 | `model_training.py` | Train RandomForest multi-label classifiers |
 | `predictor.py` | Production inference with filtering |
-| `prediction_utils.py` | Standalone filter and explanation utilities |
-| `precondition_rules.json` | ACE business rules for filtering |
+| `prediction_utils.py` | Code definitions, filtering, explanations |
+| `main.py` | CLI entry point |
 
 ---
 
@@ -84,7 +97,6 @@ Examples:
 | Class balance | 8XXX drowns in 9XXX frequency | Each optimized for its distribution |
 | Feature importance | Conflicting signals | Clean feature relevance |
 | Threshold tuning | One threshold doesn't fit all | Per-series optimization |
-| Accuracy | ~85% | 8XXX: 93.9%, 9XXX: 79.4% |
 
 ### Decision Boundary Differences
 
@@ -110,6 +122,7 @@ Examples:
 │       ▼                                                              │
 │  ┌─────────────┐    ┌──────────────────┐    ┌─────────────────┐     │
 │  │ IFML Parser │───▶│ Feature Engineer │───▶│ Model Training  │     │
+│  │ (443 feat)  │    │                  │    │ (RandomForest)  │     │
 │  └─────────────┘    └──────────────────┘    └─────────────────┘     │
 │                                                    │                 │
 │                              ┌─────────────────────┴──────────────┐  │
@@ -138,22 +151,170 @@ Examples:
 │                     └──────────────────┘                            │
 │                              │                                       │
 │                              ▼                                       │
-│              ┌───────────────────────────────┐                      │
-│              │      FILTERING PIPELINE       │                      │
-│              │                               │                      │
-│              │  1. Precondition Filter       │◀── precondition_rules.json
-│              │  2. Semantic Filter           │                      │
-│              │  3. Mutual Exclusivity Filter │◀── exclusion_rules.json
-│              │                               │                      │
-│              └───────────────────────────────┘                      │
+│              ┌───────────────────────────────────┐                  │
+│              │    PRECONDITION FILTER            │                  │
+│              │    (filter_predictions)           │                  │
+│              │                                   │                  │
+│              │  • Check require_true conditions  │                  │
+│              │  • Check require_false conditions │                  │
+│              │  • Remove false positives         │                  │
+│              └───────────────────────────────────┘                  │
+│                              │                                       │
+│                              ▼                                       │
+│              ┌───────────────────────────────────┐                  │
+│              │    OUTPUT FORMATTING              │                  │
+│              │                                   │                  │
+│              │  8XXX: Add trigger explanations   │                  │
+│              │  9XXX: Add directory lookup info  │                  │
+│              └───────────────────────────────────┘                  │
 │                              │                                       │
 │                              ▼                                       │
 │                     ┌──────────────────┐                            │
-│                     │ Filtered Codes   │                            │
+│                     │ Final Predictions│                            │
 │                     └──────────────────┘                            │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Code Coverage
+
+### 8XXX Validation Errors (34 codes)
+
+| Code | Description | Key Triggers |
+|------|-------------|--------------|
+| 8001 | Invalid BIC | has_bic, !bic_valid |
+| 8004 | IBAN cannot be derived | needs_iban, !has_iban |
+| 8005 | Invalid BIC4 | has_bic |
+| 8006 | Invalid country code | !country_valid |
+| 8007 | Amount fractional digits exceed max | has_amount |
+| 8022 | IBAN inconsistent with BIC | has_iban, has_bic, !bic_iban_match |
+| 8023 | IBAN inconsistency in message | has_iban |
+| 8024 | BBAN inconsistency in message | has_account |
+| 8025 | Domestic Account inconsistency | has_account, is_domestic |
+| 8026 | NCH inconsistency in message | has_nch |
+| 8027 | ISO Country Code inconsistency | present |
+| 8028 | BIC4 inconsistency | has_bic |
+| 8029 | Account Number inconsistency | has_account |
+| 8030 | IBAN derivation not supported | needs_iban, !has_iban |
+| 8033 | CLABE inconsistency | has_account |
+| 8034 | Forced Debit not allowed | - |
+| 8035 | FCDA account validation failed | has_account (directory) |
+| 8036 | FCDA account name matching failed | has_account (directory) |
+| 8124 | Invalid currency | has_currency, !currency_valid |
+| 8464 | Target Channel not derived | (directory) |
+| 8465 | Product code not found | (directory) |
+| 8472 | Fee code not derived | (directory) |
+| 8851 | Incorrect field size | present |
+| 8852 | Incorrect length of attribute | has_account |
+| 8853 | Incorrect number format | present |
+| 8892 | Invalid Account number | has_account, !account_valid |
+| 8894 | Invalid IBAN | has_iban, !iban_checksum_valid |
+| 8895 | Invalid NCH code | has_nch, !nch_valid |
+| 8896 | Invalid Domestic Account Number | has_account, is_domestic |
+| 8897 | Invalid BBAN | has_account, !bban_valid |
+| 8898 | IBAN Check Digit validation failed | has_iban, !iban_checksum_valid |
+| 8905 | Hash code Mismatch | - |
+| 8906 | Message in wrong flow | - |
+
+### 9XXX Repair Codes (87 codes)
+
+#### Trainable (39 codes) - Can Predict From Message Alone
+
+| Code | Description | Detectable From |
+|------|-------------|-----------------|
+| 9000 | NCH code cleaned | nch_has_dirty_chars |
+| 9001 | D Field deleted | present |
+| 9002 | Account cleaned of non-alphanumeric | account_has_dirty_chars |
+| 9006 | IBAN Cleaned | iban_needs_formatting |
+| 9009 | Field Cleaned | present |
+| 9010 | Field 23E generated | - |
+| 9012 | IBAN Formatted | iban_needs_formatting |
+| 9013 | Name and Address repair | has_name |
+| 9014 | BBAN cleaned | has_account |
+| 9015 | Domestic account cleaned | account_has_dirty_chars |
+| 9017 | Multiple party info present | present |
+| 9018 | Duplicate party info removed | present |
+| 9019 | Party ID cleaned (spaces/dashes) | id_has_dirty_chars, iban_needs_formatting |
+| 9020 | Party ID cleaned | id_has_dirty_chars |
+| 9021 | FEDABA correctly formatted | nch_needs_formatting |
+| 9022 | Account formatted to length | has_account |
+| 9026 | Purpose Info found in Field 72 | - |
+| 9028 | NCH Code strip off | has_nch |
+| 9479 | Account Number Cleaned | account_has_dirty_chars |
+| 9483 | Receiver's duplicate info removed | present |
+| 9487 | Receiver's BIC info removed | has_bic |
+| 9492 | Charge Field updated with value B | - |
+| 9493 | Debit Charge Field update with value N | - |
+| 9494 | Field updated with GTYOUR | - |
+| 9495 | Field updated with FCY | - |
+| 9496 | Field updated with FCY OUR CHARGES | - |
+| 9497 | Field updated with FCY GTYOUR | - |
+| 9498 | PRESAM SecWir updated with Y | - |
+| 9918 | Attribute type auto corrected | - |
+| 9938 | Redundant phrases deleted | - |
+| 9964 | Advice instructions modified | - |
+| 9965 | Charge flag modified | - |
+| 9966 | Secondary wire flag modified | - |
+| 9967 | Cleared PO Box number | has_address |
+| 9968 | Parameter values added | - |
+| 9969 | Related Amounts added | - |
+| 9971 | Negative ref cancels pos ref | - |
+| 9987 | Code Consistent | - |
+| 9990 | Duplicate CDT info removed | present |
+
+#### Directory-Dependent (46 codes) - Require External Lookup
+
+| Code | Description | Directory |
+|------|-------------|-----------|
+| 9004 | IBAN repaired in Account line | IBAN_DERIVATION |
+| 9005 | BIC replaced by derived BIC | NCH_TO_BIC |
+| 9007 | Account replaced by IBAN | IBAN_DERIVATION |
+| 9008 | IBAN to BIC repair | IBAN_TO_BIC |
+| 9023 | Fund to Account repair | ACCOUNT_DIRECTORY |
+| 9024 | Push Up performed | ROUTING |
+| 9025 | CLABE repaired | CLABE_DIRECTORY |
+| 9027 | FCDA account reformatted | FCDA_DIRECTORY |
+| 9029 | GL account insertion for FED | GL_DIRECTORY |
+| 9030 | DDA to GL attribute type conversion | GL_DIRECTORY |
+| 9031 | Trust account to GL number insertion | GL_DIRECTORY |
+| 9032 | 8 char BIC insertion | BIC_DIRECTORY |
+| 9475 | D-A using Account No. from Name/Address | NAME_ADDRESS_PARSE |
+| 9476 | D-A using CHIPS ABA from Name/Address | NAME_ADDRESS_PARSE |
+| 9477 | D-A using FED ABA from Name/Address | NAME_ADDRESS_PARSE |
+| 9478 | D-A using CHIPS UID from Name/Address | NAME_ADDRESS_PARSE |
+| 9480 | Push Down type Push 1 | ROUTING |
+| 9481 | Push Down type Push 2 | ROUTING |
+| 9482 | Partial Push 2 | ROUTING |
+| 9484 | Repaired from Ban to Bank Info | BANK_DIRECTORY |
+| 9485 | D-A using NCH from Name/Address | NAME_ADDRESS_PARSE |
+| 9486 | A to D performed | ROUTING |
+| 9488 | Partial push down | ROUTING |
+| 9490 | Fee Code Updated | FEE_DIRECTORY |
+| 9491 | Tariff Fee Updated | FEE_DIRECTORY |
+| 9901 | D-A using BIC from field | BIC_DIRECTORY |
+| 9910 | BIC repaired from field 72 | BIC_DIRECTORY |
+| 9917 | BIC repaired from BIC Plus | BIC_PLUS |
+| 9932 | Account line repaired with Account | ACCOUNT_DIRECTORY |
+| 9935 | Account line repaired by NCH | NCH_DIRECTORY |
+| 9936 | D-A using BIC from Name/Address | NAME_TO_BIC |
+| 9961 | BIC Derived from Name/Address | NAME_TO_BIC |
+| 9962 | Account number updated | ACCOUNT_DIRECTORY |
+| 9963 | Account number added | ACCOUNT_DIRECTORY |
+| 9970 | D-A using BIC from Name/Address | NAME_TO_BIC |
+| 9978-9984 | Various BIC derivations | BIC_DIRECTORY |
+| 9985 | BIC from CHIPS ABA Repaired | CHIPS_ABA_TO_BIC |
+| 9986 | Head Office BIC Repaired | BIC_DIRECTORY |
+| 9991 | Account pushed to BBI from BBK | ROUTING |
+| 9992 | NCH translocated to BBI | ROUTING |
+
+#### Non-Trainable (2 codes)
+
+| Code | Description | Reason |
+|------|-------------|--------|
+| 9439 | No Pattern Found | Too generic |
+| 9999 | Field Repaired | Catch-all |
 
 ---
 
@@ -171,7 +332,7 @@ pipeline.load_combined_files('./raw_data', '*.json')
 
 ### 2. Feature Extraction
 
-The `IFMLParser` extracts ~200 features per payment:
+The `IFMLParser` extracts 443 features per payment:
 
 ```python
 # Party-level features (for each party: orig, cdt, bnf, intm, etc.)
@@ -186,8 +347,7 @@ The `IFMLParser` extracts ~200 features per payment:
     'cdt_has_nch': False,
     'cdt_has_account': True,
     'cdt_needs_iban': True,
-    'cdt_is_domestic': False,
-    'cdt_is_international': True,
+    'cdt_iban_needs_formatting': False,  # For 9019 detection
     ...
 }
 
@@ -202,29 +362,25 @@ The `IFMLParser` extracts ~200 features per payment:
 
 ### 3. Label Encoding
 
-Codes are extracted and formatted as composite codes:
+Codes are encoded as composite codes to preserve party context:
 
 ```python
 # ACE returns: "8894" on party "CdtPty"
 # We encode as: "8894_CDTPTY"
 
-# This preserves party context for predictions
+# This enables party-specific predictions
 ```
 
 ### 4. Model Training
 
-```python
-from model_training import ACEErrorCodeModel
+```bash
+# Train 8XXX model (all 8XXX codes are trainable)
+python main.py train --data-file payments.json --output-dir ./models_8x \
+    --code-series 8 --composite
 
-# Train 8XXX model
-model_8x = ACEErrorCodeModel()
-model_8x.fit(X_train, y_train_8xxx)
-model_8x.save('./models_8x/')
-
-# Train 9XXX model  
-model_9x = ACEErrorCodeModel()
-model_9x.fit(X_train, y_train_9xxx)
-model_9x.save('./models_9x/')
+# Train 9XXX model (trainable codes only)
+python main.py train --data-file payments.json --output-dir ./models_9x \
+    --code-series 9 --composite --trainable-only
 ```
 
 ### Model Type: Multi-Label Classification
@@ -251,50 +407,42 @@ predictor = ACEPredictor('./models_8x')
 result = predictor.predict(ifml_json)
 ```
 
-Internally:
+### Step 2: Apply Precondition Filter
+
+The `filter_predictions()` function removes false positives:
 
 ```python
-# 1. Parse IFML
-features = self.parser.parse(ifml_json)
-feature_dict = self.parser.to_dict(features)
+from prediction_utils import filter_predictions
 
-# 2. Transform to model input
-X = self.feature_engineer.transform(pd.DataFrame([feature_dict]))
-
-# 3. Get probabilities
-probabilities = self.model.predict_proba(X)
+raw_predictions = model.predict(X)
+filtered, removed = filter_predictions(raw_predictions, features)
 ```
 
-### Step 2: Apply Threshold
+### Step 3: Format Output
 
-```python
-predicted_codes = []
-for idx, prob in enumerate(probabilities):
-    code = self.class_names[idx]
-    
-    # Check per-code threshold from config
-    threshold = self.prediction_config.get('high_threshold_codes', {}).get(code, 0.5)
-    
-    if prob >= threshold:
-        predicted_codes.append(code)
+For 8XXX codes, add trigger explanations:
+```json
+{
+  "code": "8895_BNFBNK",
+  "description": "Invalid NCH code",
+  "probability": 0.85,
+  "triggers": [
+    {"feature": "bnf_has_nch", "value": true, "condition": "must be True"},
+    {"feature": "bnf_nch_valid", "value": false, "condition": "must be False"}
+  ]
+}
 ```
 
-### Step 3: Apply Filters
-
-```python
-# Filter 1: Precondition filter (from precondition_rules.json)
-if self.precondition_rules:
-    predicted_codes, warnings = self._apply_precondition_filter(
-        predicted_codes, feature_dict)
-
-# Filter 2: Semantic filter (built-in rules)
-predicted_codes, warnings = self._apply_semantic_filters(
-    predicted_codes, feature_dict)
-
-# Filter 3: Mutual exclusivity filter (from exclusion_rules.json)
-if self.exclusion_rules:
-    predicted_codes, warnings = self._apply_mutual_exclusivity(
-        predicted_codes, code_probs, feature_dict)
+For 9XXX directory-dependent codes, add lookup conditions:
+```json
+{
+  "code": "9008_BNFBNK",
+  "description": "BIC derived from IBAN",
+  "category": "DIRECTORY_DEPENDENT",
+  "needs_directory": true,
+  "directory": "IBAN_TO_BIC",
+  "lookup_condition": "LOOKUP(IBAN_TO_BIC, iban=GB82WEST12345698765432) -> IF found EMIT 9008 ELSE skip"
+}
 ```
 
 ---
@@ -318,13 +466,13 @@ Rather than retraining the model, we apply **post-prediction filtering** based o
 
 Each code has two condition types:
 
-```json
-{
-  "8894": {
-    "require_true": ["has_iban"],
-    "require_false": ["iban_valid_format", "iban_checksum_valid"],
-    "description": "Invalid IBAN - format or checksum invalid"
-  }
+```python
+CODE_TRIGGERS = {
+    '8894': {
+        'require_true': ['has_iban'],
+        'require_false': ['iban_valid_format', 'iban_checksum_valid'],
+        'description': 'Invalid IBAN - format or checksum invalid'
+    }
 }
 ```
 
@@ -356,30 +504,7 @@ def filter_predictions(predicted_codes, features):
             FILTER_OUT(code, "all validity checks passed")
 ```
 
-### Why Party Presence Matters for 9XXX
-
-For repair codes, the party must exist to be repaired:
-
-```json
-{
-  "9004": {
-    "require_true": ["present", "needs_iban"],
-    "require_false": ["has_iban"],
-    "description": "IBAN derived for credit party"
-  }
-}
-```
-
-Logic:
-- `present=True`: Credit party exists in the message
-- `needs_iban=True`: Party's country requires IBAN
-- `has_iban=False`: Party doesn't already have IBAN
-
-If any condition fails, 9004 cannot fire.
-
-### Rules Applied at Runtime
-
-The filter checks are applied **after** model prediction but **before** returning results:
+### Filter Applied at Runtime
 
 ```
 Model Output: [8894_CDTPTY, 8022_CDTPTY, 8004_CDTPTY]
@@ -404,6 +529,121 @@ iban_valid=T   bic_iban_match=T  has_iban=F
 
 ---
 
+## 9XXX Trainability Classification
+
+### Why Classify 9XXX Codes?
+
+Not all 9XXX codes can be predicted from message features alone:
+
+| Category | Can Predict? | Example |
+|----------|--------------|---------|
+| **Trainable** | Yes | 9019: ID has spaces → will be cleaned |
+| **Directory-Dependent** | Partial | 9008: Has IBAN, no BIC → *might* derive BIC (depends on lookup) |
+| **Non-Trainable** | No | 9999: Generic catch-all |
+
+### Using `--trainable-only` Flag
+
+```bash
+# Train only on codes we can actually predict
+python main.py train --data-file payments.json --output-dir ./models_9x \
+    --code-series 9 --composite --trainable-only
+```
+
+This filters training data to only include the 39 trainable 9XXX codes.
+
+### Directory-Dependent Output Format
+
+For codes that need directory lookup, the prediction output includes:
+
+```json
+{
+  "code": "9004_CDTPTY",
+  "category": "DIRECTORY_DEPENDENT",
+  "needs_directory": true,
+  "directory": "IBAN_DERIVATION",
+  "lookup_condition": "LOOKUP(IBAN_DERIVATION, country=DE, account=123456789) -> IF found EMIT 9004 ELSE EMIT 8004",
+  "note": "Prediction conditional on directory lookup result"
+}
+```
+
+This tells the caller: "The model thinks this *might* fire, but you need to check the directory to be sure."
+
+---
+
+## CLI Reference
+
+### Training
+
+```bash
+# Train 8XXX model
+python main.py train --data-file payments.json --output-dir ./models_8x \
+    --code-series 8 --composite
+
+# Train 9XXX model (trainable only)
+python main.py train --data-file payments.json --output-dir ./models_9x \
+    --code-series 9 --composite --trainable-only
+
+# Train with specific model type
+python main.py train --data-file payments.json --output-dir ./models \
+    --model-type random_forest --composite
+```
+
+**Training Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--data-file` | Single JSON file with payments |
+| `--data-dir` | Directory of JSON files |
+| `--output-dir` | Where to save model |
+| `--code-series` | Filter to series (e.g., `8 9`) |
+| `--composite` | Use party-composite codes (e.g., `8894_CDTPTY`) |
+| `--trainable-only` | For 9XXX: only train on trainable codes |
+| `--model-type` | `random_forest`, `gradient_boost`, `decision_tree` |
+| `--min-samples` | Min samples for a code to be a class (default: 5) |
+
+### Prediction
+
+```bash
+python main.py predict --model-dir ./models_8x --input request.json --threshold 0.5
+```
+
+**Output:**
+
+```json
+{
+  "transaction_id": "TXN123",
+  "predictions": [
+    {
+      "code": "8895_BNFBNK",
+      "description": "Invalid NCH code",
+      "probability": 0.85,
+      "triggers": [...]
+    }
+  ],
+  "filtered_out": [
+    {"code": "8894_BNFBNK", "reason": "iban_checksum_valid=True"}
+  ],
+  "raw_prediction_count": 2,
+  "filtered_prediction_count": 1
+}
+```
+
+### Analysis
+
+```bash
+python main.py analyze --model-dir ./models_8x --input request.json
+python main.py analyze --model-dir ./models_8x --input request.json --code 8895
+```
+
+### Feature Importance
+
+```bash
+python main.py importance --model-dir ./models_8x --top 30
+python main.py importance --model-dir ./models_8x --code 8895_BNFBNK
+```
+
+---
+
 ## Configuration Reference
 
 ### prediction_config.json
@@ -423,49 +663,15 @@ iban_valid=T   bic_iban_match=T  has_iban=F
     "9999": 0.80
   },
   
-  "apply_precondition_filter": true,
-  "apply_semantic_filter": true,
-  "apply_exclusion_filter": true
+  "apply_precondition_filter": true
 }
 ```
 
 | Setting | Purpose |
 |---------|---------|
-| `high_threshold_codes` | Per-code probability thresholds (higher = fewer false positives) |
-| `apply_precondition_filter` | Enable/disable precondition rules |
-| `apply_semantic_filter` | Enable/disable built-in semantic rules |
-| `apply_exclusion_filter` | Enable/disable mutual exclusivity rules |
+| `high_threshold_codes` | Per-code probability thresholds |
+| `apply_precondition_filter` | Enable/disable precondition filtering |
 | `suppressed_codes` | Codes to never predict |
-
-### precondition_rules.json
-
-```json
-{
-  "8894": {
-    "require_true": ["has_iban"],
-    "require_false": ["iban_valid_format", "iban_checksum_valid"],
-    "description": "Invalid IBAN"
-  },
-  "9004": {
-    "require_true": ["present", "needs_iban"],
-    "require_false": ["has_iban"],
-    "description": "IBAN derived for credit party"
-  }
-}
-```
-
-### exclusion_rules.json (Optional)
-
-```json
-{
-  "mutual_exclusions": [
-    {"codes": ["8894", "8898"], "reason": "Both are IBAN errors, pick one"}
-  ],
-  "same_field_conflicts": [
-    {"codes": ["8894", "8896"], "resolution": "Use is_international feature"}
-  ]
-}
-```
 
 ---
 
@@ -473,147 +679,56 @@ iban_valid=T   bic_iban_match=T  has_iban=F
 
 ```
 ace_ml/
-├── README.md                    # Quick start guide
+├── README_ML_MODEL.md           # Quick start guide
 ├── DESIGN.md                    # This document
 │
 ├── Core Modules
-│   ├── ifml_parser.py           # Parse IFML JSON → structured features
+│   ├── main.py                  # CLI entry point
+│   ├── ifml_parser.py           # Parse IFML JSON → 443 features
 │   ├── feature_engineering.py   # Transform features → ML input
 │   ├── data_pipeline.py         # Load and prepare training data
 │   ├── model_training.py        # Train multi-label classifiers
-│   └── predictor.py             # Production inference with filtering
+│   └── predictor.py             # Production inference
 │
 ├── Utilities
-│   ├── prediction_utils.py      # Standalone filter + explainer
-│   ├── ace_codes.py             # ACE code definitions
+│   ├── prediction_utils.py      # CODE_TRIGGERS, filter, explain
 │   └── test_model.py            # Accuracy testing
 │
 ├── Config Files
-│   ├── precondition_rules.json  # ACE business rules for filtering
-│   ├── prediction_config.json   # Thresholds and settings
-│   └── exclusion_rules.json     # Mutual exclusivity rules
+│   ├── precondition_rules.json  # ACE business rules
+│   └── prediction_config.json   # Thresholds and settings
 │
 └── Model Directories
     ├── models_8x/               # 8XXX validation error model
     │   ├── model.pkl
     │   ├── feature_engineer.pkl
-    │   ├── training_info.json
-    │   ├── precondition_rules.json
-    │   └── prediction_config.json
+    │   └── training_info.json
     │
-    └── models_9x/               # 9XXX repair/enrichment model
+    └── models_9x/               # 9XXX repair model (trainable only)
         ├── model.pkl
         ├── feature_engineer.pkl
-        ├── training_info.json
-        ├── precondition_rules.json
-        └── prediction_config.json
+        └── training_info.json
 ```
 
 ---
 
-## Usage Examples
+## Key Insights
 
-### Training
+1. **Composite codes work better** - `8895_BNFBNK` learns party-specific patterns better than just `8895`
 
-```bash
-# Train 8XXX model
-python main.py train --data-dir ./raw_data --output-dir ./models_8x --series 8
+2. **9019 fires for ANY ID with special chars** - not just IBANs
+   - Examples: `IE93-00-67`, `066196221 FFC X29968153`, `383174835:HALLERAPPRAISALSERVICEIN`
 
-# Train 9XXX model
-python main.py train --data-dir ./raw_data --output-dir ./models_9x --series 9
-```
+3. **Directory-dependent codes can't be fully predicted** - they depend on ACE's reference data
+   - Train only on trainable codes with `--trainable-only`
+   - Output includes lookup conditions for runtime evaluation
 
-### Testing
+4. **Precondition filtering is essential** - removes false positives where ML predicts error but data is actually valid
 
-```bash
-# Test with precondition filtering
-python test_model.py --model-dir ./models_8x --data-dir ./raw_data --series 8
-```
+5. **Feature count must match exactly** - parser outputs 443 features for all party types (even when absent) to ensure consistency between training and prediction
 
-### Prediction
-
-```python
-from predictor import ACEPredictor
-
-# Load model with filters
-predictor = ACEPredictor('./models_8x')
-
-# Predict
-result = predictor.predict(payment_json)
-
-print(result.predicted_codes)  # ['8004_CDTPTY']
-print(result.warnings)         # Any filtering warnings
-```
-
-### Explanation
-
-```bash
-# Generate prediction explanations
-python prediction_utils.py --model-dir ./models_8x --payment ./test.json
-```
-
-Output:
-```
-PREDICTION EXPLANATION
-============================================================
-Raw predicted: ['8894_BNFBNK', '8004_BNPPTY']
-After filter: ['8004_BNPPTY']
-
-Filtered out:
-  - 8894_BNFBNK: all validity checks passed: ['bnf_iban_valid_format']
-
---- 8004_BNPPTY ---
-ACE Definition: IBAN cannot be derived - IBAN required but missing
-
-Field                                    Value      Explanation
-----------------------------------------------------------------------
-bnf_needs_iban                           True       Beneficiary Bank: Party is in IBAN-required country
-bnf_has_iban                             False      Beneficiary Bank: IBAN is provided
-```
-
----
-
-## Performance Summary
-
-| Model | Accuracy | Notes |
-|-------|----------|-------|
-| 8XXX (no filter) | 92.7% | Raw model predictions |
-| 8XXX (with filter) | 93.9% | +1.2% from precondition filtering |
-| 9XXX | 79.4% | More complex due to external dependencies |
-
-### Remaining Error Sources
-
-| Issue | Cause | Potential Fix |
-|-------|-------|---------------|
-| False positives on valid data | Model learned correlation, not causation | More precondition rules |
-| Missing predictions | Rare codes with few training examples | Rare code detectors |
-| 9XXX accuracy gap | External directory lookups not modeled | Add derived features |
-
----
-
-## Appendix: ACE Code Reference
-
-### 8XXX Validation Errors
-
-| Code | Description | Precondition |
-|------|-------------|--------------|
-| 8001 | Invalid BIC | has_bic ∧ ¬bic_valid |
-| 8004 | IBAN cannot be derived | needs_iban ∧ ¬has_iban |
-| 8022 | IBAN/BIC country mismatch | has_iban ∧ has_bic ∧ ¬bic_iban_match |
-| 8026 | NCH inconsistency | has_nch |
-| 8894 | Invalid IBAN | has_iban ∧ ¬iban_valid |
-| 8895 | Invalid NCH | has_nch ∧ ¬nch_valid |
-| 8896 | Invalid domestic account | has_account ∧ ¬account_valid |
-| 8898 | IBAN checksum failed | has_iban ∧ ¬iban_checksum_valid |
-
-### 9XXX Repair Codes
-
-| Code | Description | Precondition |
-|------|-------------|--------------|
-| 9002 | Account cleaned | present ∧ has_account |
-| 9004 | IBAN derived (credit party) | present ∧ needs_iban ∧ ¬has_iban |
-| 9005 | BIC derived from NCH | present ∧ has_nch ∧ ¬has_bic |
-| 9007 | IBAN derived (beneficiary) | present ∧ needs_iban ∧ ¬has_iban |
-| 9008 | BIC derived from IBAN | present ∧ has_iban ∧ ¬has_bic |
-| 9477 | BIC enriched 8→11 | present ∧ has_bic |
-| 9479 | Party enriched from BIC dir | present ∧ has_bic |
+6. **Parser fixes applied:**
+   - `Type="S"` recognized as BIC identifier
+   - `BeneficiaryPartyInf` merged with `BeneficiaryBankInfo`
+   - Plain string IBAN/BIC detection by pattern
+   - `iban_needs_formatting` flag for 9019 detection
