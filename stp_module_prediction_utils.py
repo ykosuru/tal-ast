@@ -424,13 +424,13 @@ CODE_TRIGGERS = {
         'needs_directory': False
     },
     '9018': {
-        'require_true': ['present'],
+        'require_true': ['present', 'has_duplicate_info'],
         'require_false': [],
         'description': 'Duplicate party information removed',
         'needs_directory': False
     },
     '9483': {
-        'require_true': ['present'],
+        'require_true': ['present', 'has_duplicate_info'],
         'require_false': [],
         'description': "Receiver's duplicate information removed",
         'needs_directory': False
