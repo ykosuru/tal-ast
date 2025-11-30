@@ -390,7 +390,8 @@ def train_model(data_dir: str = None, data_file: str = None,
                 use_composite_codes: bool = False,
                 min_code_samples: int = 5,
                 code_series_filter: List[str] = None,
-                max_negative_ratio: int = 3) -> Dict[str, Any]:
+                max_negative_ratio: int = 3,
+                trainable_codes_filter: List[str] = None) -> Dict[str, Any]:
     """
     Train error code prediction model from IFML data.
     
@@ -404,6 +405,7 @@ def train_model(data_dir: str = None, data_file: str = None,
         min_code_samples: Minimum samples for a code to have its own class
         code_series_filter: Filter to specific code series (e.g., ['8', '9'] for 8XXX/9XXX)
         max_negative_ratio: Max ratio of negative to positive samples (default 3:1)
+        trainable_codes_filter: List of specific codes to include (e.g., TRAINABLE_9XXX_CODES)
     
     Returns:
         Training results dictionary
@@ -442,13 +444,17 @@ def train_model(data_dir: str = None, data_file: str = None,
     if code_series_filter:
         print(f"   Filtering to code series: {code_series_filter}")
         print(f"   Including negative cases (transactions without these codes)")
+    if trainable_codes_filter:
+        print(f"   Filtering to trainable codes only: {len(trainable_codes_filter)} codes")
+    
     X_raw, X_transformed, y_multilabel = pipeline.create_dataset(
         filter_severity=filter_severity,
         min_code_samples=min_code_samples,
         use_composite_codes=use_composite_codes,
         code_series_filter=code_series_filter,
         include_negative_cases=True if code_series_filter else False,
-        max_negative_ratio=max_negative_ratio
+        max_negative_ratio=max_negative_ratio,
+        trainable_codes_filter=trainable_codes_filter
     )
     
     X = X_transformed.values.astype(np.float32)
@@ -1452,6 +1458,8 @@ Examples:
                              help='Filter to specific code series (e.g., 8 9 for 8XXX and 9XXX only)')
     train_parser.add_argument('--negative-ratio', type=int, default=3,
                              help='Max ratio of negative to positive samples (default: 3). Set to 0 to disable downsampling.')
+    train_parser.add_argument('--trainable-only', action='store_true',
+                             help='For 9XXX: only train on codes that dont need directory lookup')
     
     # Predict command
     predict_parser = subparsers.add_parser('predict', help='Predict error codes')
@@ -1483,6 +1491,13 @@ Examples:
             print("ERROR: Must provide either --data-dir or --data-file")
             sys.exit(1)
         
+        # Handle --trainable-only flag for 9XXX
+        trainable_codes_filter = None
+        if args.trainable_only:
+            from prediction_utils import TRAINABLE_9XXX_CODES
+            trainable_codes_filter = TRAINABLE_9XXX_CODES
+            print(f"Filtering to trainable 9XXX codes only: {trainable_codes_filter}")
+        
         config = ModelConfig(
             model_type=args.model_type,
             task_type='multilabel'
@@ -1496,7 +1511,8 @@ Examples:
             use_composite_codes=args.composite,
             min_code_samples=args.min_samples,
             code_series_filter=args.code_series,
-            max_negative_ratio=args.negative_ratio
+            max_negative_ratio=args.negative_ratio,
+            trainable_codes_filter=trainable_codes_filter
         )
         print(json.dumps(results.get('training_info', {}), indent=2))
     
@@ -1505,7 +1521,7 @@ Examples:
         
         # Get features for trigger analysis
         from ifml_parser import IFMLParser
-        from prediction_utils import CODE_TRIGGERS, FEATURE_EXPLANATIONS
+        from prediction_utils import CODE_TRIGGERS, FEATURE_EXPLANATIONS, filter_predictions
         
         with open(args.input, 'r') as f:
             input_json = json.load(f)
@@ -1513,9 +1529,13 @@ Examples:
         features_obj = parser.parse(input_json)
         feature_dict = parser.to_dict(features_obj)
         
+        # Apply precondition filter to remove false positives
+        raw_predicted = result.predicted_codes
+        filtered_codes, filtered_out = filter_predictions(raw_predicted, feature_dict)
+        
         # Add descriptions and triggers to output
         predictions_with_desc = []
-        for code in result.predicted_codes:
+        for code in filtered_codes:  # Use filtered_codes, not raw
             pred_info = {
                 'code': code,
                 'description': get_code_description(code),
@@ -1583,14 +1603,40 @@ Examples:
                     pred_info['triggers'] = triggered_features
                     pred_info['rule_description'] = triggers.get('description', '')
             
+            # Add 9XXX specific handling with directory lookup info
+            elif base_code.startswith('9'):
+                from prediction_utils import format_9xxx_prediction, get_9xxx_category
+                
+                formatted = format_9xxx_prediction(code, feature_dict, result.probabilities.get(code, 0))
+                pred_info['category'] = formatted.get('category', 'UNKNOWN')
+                
+                if formatted.get('needs_directory'):
+                    pred_info['needs_directory'] = True
+                    pred_info['directory'] = formatted.get('directory')
+                    pred_info['lookup_condition'] = formatted.get('lookup_condition')
+                    pred_info['note'] = formatted.get('note')
+                else:
+                    pred_info['needs_directory'] = False
+                    if formatted.get('triggers'):
+                        pred_info['triggers'] = formatted['triggers']
+            
             predictions_with_desc.append(pred_info)
         
-        print(json.dumps({
+        # Build output with filtered info
+        output = {
             'transaction_id': result.transaction_id,
             'predictions': predictions_with_desc,
             'confidence': result.confidence,
             'warnings': result.warnings
-        }, indent=2))
+        }
+        
+        # Add filtered out codes if any
+        if filtered_out:
+            output['filtered_out'] = filtered_out
+            output['raw_prediction_count'] = len(raw_predicted)
+            output['filtered_prediction_count'] = len(filtered_codes)
+        
+        print(json.dumps(output, indent=2))
     
     elif args.command == 'analyze':
         analysis = analyze(args.model_dir, args.input, args.code)
