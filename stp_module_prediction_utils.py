@@ -152,118 +152,283 @@ CODE_TRIGGERS = {
     # 9XXX REPAIR/ENRICHMENT CODES
     # ==========================================================================
     
-    # --- Account/Name Cleaning ---
+    # **************************************************************************
+    # TRAINABLE 9XXX CODES - Can be predicted from message features alone
+    # **************************************************************************
+    
+    # --- Account/Name Cleaning (detectable from message) ---
     '9002': {
-        'require_true': ['present', 'has_account'],
+        'require_true': ['present', 'account_has_dirty_chars'],
         'require_false': [],
-        'description': 'Account cleaned - removed dirty chars/spaces/special chars'
+        'description': 'Account cleaned - removed dirty chars/spaces/special chars',
+        'needs_directory': False
     },
     '9015': {
-        'require_true': ['present', 'has_name'],
+        'require_true': ['present', 'name_has_dirty_chars'],
         'require_false': [],
-        'description': 'Name cleaned - removed dirty characters'
-    },
-    
-    # --- IBAN Derivation ---
-    '9004': {
-        'require_true': ['present', 'needs_iban'],
-        'require_false': ['has_iban'],
-        'description': 'IBAN derived for credit party - party present, needs IBAN, doesnt have one'
-    },
-    '9007': {
-        'require_true': ['present', 'needs_iban'],
-        'require_false': ['has_iban'],
-        'description': 'IBAN derived for beneficiary - party present, needs IBAN, doesnt have one'
-    },
-    
-    # --- BIC Derivation ---
-    '9005': {
-        'require_true': ['present', 'has_nch'],
-        'require_false': ['has_bic'],
-        'description': 'BIC derived from NCH - party present with NCH but no BIC'
-    },
-    '9008': {
-        'require_true': ['present', 'has_iban'],
-        'require_false': ['has_bic'],
-        'description': 'BIC derived from IBAN - party present with IBAN but no BIC'
-    },
-    
-    # --- Formatting Fixes ---
-    '9006': {
-        'require_true': ['present', 'has_iban'],
-        'require_false': [],
-        'description': 'IBAN formatted - standardized IBAN format'
-    },
-    '9021': {
-        'require_true': ['present', 'has_nch'],
-        'require_false': [],
-        'description': 'NCH formatted - standardized routing number format'
-    },
-    '9025': {
-        'require_true': ['present', 'has_account'],
-        'require_false': [],
-        'description': 'Account length fixed - padded or trimmed account number'
-    },
-    
-    # --- Duplicate/Inconsistency Resolution ---
-    '9017': {
-        'require_true': ['present'],
-        'require_false': [],
-        'description': 'Duplicate info resolved for credit party'
-    },
-    '9018': {
-        'require_true': ['present'],
-        'require_false': [],
-        'description': 'Duplicate info resolved for intermediary'
+        'description': 'Name cleaned - removed dirty characters',
+        'needs_directory': False
     },
     '9019': {
         'require_true': ['present'],
         'require_false': [],
         'description': 'Party identifier cleaned - removed non-alphanumeric chars (spaces, dashes, colons)',
-        'soft_require': ['iban_needs_formatting', 'account_has_dirty_chars', 'account_has_spaces']
+        'soft_require': ['iban_needs_formatting', 'account_has_dirty_chars', 'account_has_spaces'],
+        'needs_directory': False
     },
     
-    # --- Intermediary/Routing ---
+    # --- Formatting Fixes (detectable from message) ---
+    '9006': {
+        'require_true': ['present', 'iban_needs_formatting'],
+        'require_false': [],
+        'description': 'IBAN formatted - standardized IBAN format',
+        'needs_directory': False
+    },
+    '9012': {
+        'require_true': ['present', 'iban_needs_formatting'],
+        'require_false': [],
+        'description': 'IBAN reformatted - spaces/dashes removed',
+        'needs_directory': False
+    },
+    '9021': {
+        'require_true': ['present', 'nch_needs_formatting'],
+        'require_false': [],
+        'description': 'NCH formatted - standardized routing number format',
+        'needs_directory': False
+    },
+    '9025': {
+        'require_true': ['present', 'account_needs_length_fix'],
+        'require_false': [],
+        'description': 'Account length fixed - padded or trimmed account number',
+        'needs_directory': False
+    },
+    
+    # --- Duplicate/Inconsistency Resolution (detectable from message) ---
+    '9017': {
+        'require_true': ['present', 'has_duplicate_info'],
+        'require_false': [],
+        'description': 'Duplicate info resolved for credit party',
+        'needs_directory': False
+    },
+    '9018': {
+        'require_true': ['present', 'has_duplicate_info'],
+        'require_false': [],
+        'description': 'Duplicate info resolved for intermediary',
+        'needs_directory': False
+    },
+    
+    # **************************************************************************
+    # DIRECTORY-DEPENDENT 9XXX CODES - Require BIC/IBAN/NCH directory lookup
+    # Output: "LOOKUP(directory) -> IF found EMIT code ELSE skip"
+    # **************************************************************************
+    
+    # --- IBAN Derivation (needs IBAN directory) ---
+    '9004': {
+        'require_true': ['present', 'needs_iban', 'is_iban_derivable'],
+        'require_false': ['has_iban'],
+        'description': 'IBAN derived for credit party',
+        'needs_directory': True,
+        'directory': 'IBAN_DERIVATION',
+        'lookup_condition': 'LOOKUP(IBAN_DERIVATION, country={country}, account={account}) -> IF found EMIT 9004 ELSE EMIT 8004'
+    },
+    '9007': {
+        'require_true': ['present', 'needs_iban', 'is_iban_derivable'],
+        'require_false': ['has_iban'],
+        'description': 'IBAN derived for beneficiary',
+        'needs_directory': True,
+        'directory': 'IBAN_DERIVATION',
+        'lookup_condition': 'LOOKUP(IBAN_DERIVATION, country={country}, account={account}) -> IF found EMIT 9007 ELSE EMIT 8004'
+    },
+    
+    # --- BIC Derivation (needs BIC directory) ---
+    '9005': {
+        'require_true': ['present', 'has_nch'],
+        'require_false': ['has_bic'],
+        'description': 'BIC derived from NCH',
+        'needs_directory': True,
+        'directory': 'NCH_TO_BIC',
+        'lookup_condition': 'LOOKUP(NCH_TO_BIC, nch={nch_value}) -> IF found EMIT 9005 ELSE skip'
+    },
+    '9008': {
+        'require_true': ['present', 'has_iban'],
+        'require_false': ['has_bic'],
+        'description': 'BIC derived from IBAN',
+        'needs_directory': True,
+        'directory': 'IBAN_TO_BIC',
+        'lookup_condition': 'LOOKUP(IBAN_TO_BIC, iban={iban}) -> IF found EMIT 9008 ELSE skip'
+    },
+    
+    # --- Intermediary/Routing (needs routing directory) ---
     '9024': {
         'require_true': ['present', 'has_bic'],
         'require_false': ['has_intermediary'],
-        'description': 'Intermediary bank added - beneficiary present with BIC, no intermediary'
+        'description': 'Intermediary bank added',
+        'needs_directory': True,
+        'directory': 'ROUTING',
+        'lookup_condition': 'LOOKUP(ROUTING, dest_bic={bic}) -> IF intermediary_required EMIT 9024 ELSE skip'
     },
     
-    # --- BIC Enrichment ---
+    # --- BIC Enrichment (needs BIC directory) ---
     '9477': {
         'require_true': ['present', 'has_bic'],
         'require_false': [],
-        'description': 'BIC enriched from 8 to 11 characters'
+        'description': 'BIC enriched from 8 to 11 characters',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY',
+        'lookup_condition': 'LOOKUP(BIC_DIRECTORY, bic8={bic}) -> IF bic11_found EMIT 9477 ELSE skip',
+        'precondition': 'bic_length == 8'
     },
     '9479': {
         'require_true': ['present', 'has_bic'],
         'require_false': [],
-        'description': 'Party enriched - bank name/address added from BIC directory'
+        'description': 'Party enriched - bank name/address added from BIC directory',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY',
+        'lookup_condition': 'LOOKUP(BIC_DIRECTORY, bic={bic}) -> IF bank_info_found EMIT 9479 ELSE skip'
     },
     '9480': {
         'require_true': ['present', 'has_bic'],
         'require_false': [],
-        'description': 'Credit party enriched from BIC directory'
+        'description': 'Credit party enriched from BIC directory',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY',
+        'lookup_condition': 'LOOKUP(BIC_DIRECTORY, bic={bic}) -> IF enrichment_available EMIT 9480 ELSE skip'
     },
     
-    # --- Other Repairs ---
+    # --- Other Repairs (unpredictable/catch-all) ---
     '9938': {
         'require_true': [],
         'require_false': [],
-        'description': 'Message structure repaired'
+        'description': 'Message structure repaired',
+        'needs_directory': False,
+        'trainable': False  # Too generic to train
     },
     '9970': {
         'require_true': [],
         'require_false': [],
-        'description': 'Default values applied'
+        'description': 'Default values applied',
+        'needs_directory': False,
+        'trainable': False  # Too generic to train
     },
     '9999': {
         'require_true': [],
         'require_false': [],
-        'description': 'General repair applied'
+        'description': 'General repair applied',
+        'needs_directory': False,
+        'trainable': False  # Too generic to train
     },
 }
+
+# =============================================================================
+# 9XXX CODE CATEGORIZATION
+# =============================================================================
+
+# Trainable 9XXX codes - can be predicted from message features alone
+TRAINABLE_9XXX_CODES = [
+    code for code, info in CODE_TRIGGERS.items() 
+    if code.startswith('9') and not info.get('needs_directory', False) and info.get('trainable', True)
+]
+
+# Directory-dependent 9XXX codes - need external lookup
+DIRECTORY_DEPENDENT_9XXX_CODES = [
+    code for code, info in CODE_TRIGGERS.items() 
+    if code.startswith('9') and info.get('needs_directory', False)
+]
+
+# Non-trainable codes (too generic)
+NON_TRAINABLE_9XXX_CODES = [
+    code for code, info in CODE_TRIGGERS.items() 
+    if code.startswith('9') and info.get('trainable') == False
+]
+
+def get_9xxx_category(code: str) -> str:
+    """Get category for a 9XXX code."""
+    base_code = code.split('_')[0] if '_' in code else code
+    if base_code in TRAINABLE_9XXX_CODES:
+        return 'TRAINABLE'
+    elif base_code in DIRECTORY_DEPENDENT_9XXX_CODES:
+        return 'DIRECTORY_DEPENDENT'
+    elif base_code in NON_TRAINABLE_9XXX_CODES:
+        return 'NON_TRAINABLE'
+    return 'UNKNOWN'
+
+def get_lookup_condition(code: str, features: dict = None) -> Optional[str]:
+    """
+    Get the directory lookup condition for a 9XXX code.
+    
+    Returns formatted string like:
+    "LOOKUP(BIC_DIRECTORY, bic=DEUTDEFF) -> IF found EMIT 9477 ELSE skip"
+    """
+    base_code = code.split('_')[0] if '_' in code else code
+    info = CODE_TRIGGERS.get(base_code, {})
+    
+    if not info.get('needs_directory'):
+        return None
+    
+    lookup_template = info.get('lookup_condition', '')
+    
+    if features and lookup_template:
+        # Extract party prefix from composite code
+        party_prefix = None
+        if '_' in code:
+            party_hint = code.split('_')[1]
+            party_prefix = SUFFIX_TO_PREFIX.get(party_hint)
+        
+        # Substitute feature values into template
+        replacements = {}
+        if party_prefix:
+            replacements['country'] = features.get(f'{party_prefix}_country') or features.get(f'{party_prefix}_iban_country') or '?'
+            replacements['account'] = features.get(f'{party_prefix}_account_value') or '?'
+            replacements['bic'] = features.get(f'{party_prefix}_bic') or features.get(f'{party_prefix}_id_value') or '?'
+            replacements['iban'] = features.get(f'{party_prefix}_iban') or features.get(f'{party_prefix}_account_value') or '?'
+            replacements['nch_value'] = features.get(f'{party_prefix}_nch_value') or '?'
+        
+        for key, val in replacements.items():
+            lookup_template = lookup_template.replace('{' + key + '}', str(val))
+    
+    return lookup_template
+
+def format_9xxx_prediction(code: str, features: dict, probability: float) -> dict:
+    """
+    Format a 9XXX prediction with appropriate category and lookup info.
+    """
+    base_code = code.split('_')[0] if '_' in code else code
+    info = CODE_TRIGGERS.get(base_code, {})
+    category = get_9xxx_category(code)
+    
+    result = {
+        'code': code,
+        'description': info.get('description', 'Unknown'),
+        'probability': round(probability, 4),
+        'category': category
+    }
+    
+    if category == 'DIRECTORY_DEPENDENT':
+        result['needs_directory'] = True
+        result['directory'] = info.get('directory', 'UNKNOWN')
+        lookup = get_lookup_condition(code, features)
+        if lookup:
+            result['lookup_condition'] = lookup
+        result['note'] = 'Prediction conditional on directory lookup result'
+    elif category == 'TRAINABLE':
+        result['needs_directory'] = False
+        # Add trigger features
+        triggers = []
+        party_prefix = None
+        if '_' in code:
+            party_hint = code.split('_')[1]
+            party_prefix = SUFFIX_TO_PREFIX.get(party_hint)
+        
+        for feat in info.get('require_true', []) + info.get('soft_require', []):
+            full_feat = f'{party_prefix}_{feat}' if party_prefix else feat
+            val = features.get(full_feat) or features.get(feat)
+            if val:
+                triggers.append({'feature': full_feat, 'value': val})
+        
+        if triggers:
+            result['triggers'] = triggers
+    
+    return result
 
 # Party suffix to feature prefix mapping
 SUFFIX_TO_PREFIX = {
