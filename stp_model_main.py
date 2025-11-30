@@ -1441,7 +1441,7 @@ Examples:
     train_parser.add_argument('--data-file', help='Single JSON file with all payments')
     train_parser.add_argument('--output-dir', default='./models', help='Output directory')
     train_parser.add_argument('--model-type', default='random_forest',
-                             choices=['lightgbm', 'xgboost', 'random_forest', 'gradient_boost', 'decision_tree'])
+                             choices=['random_forest', 'gradient_boost', 'decision_tree'])
     train_parser.add_argument('--severity', nargs='+', default=None,
                              help='Filter codes by severity (E, W, I, R). Default: all')
     train_parser.add_argument('--composite', action='store_true',
