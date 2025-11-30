@@ -27,7 +27,7 @@
   "8026": {
     "require_true": ["has_nch"],
     "require_false": [],
-    "description": "NCH inconsistency - multiple NCH values inconsistent"
+    "description": "NCH inconsistency - multiple NCH values inconsistent. Compound IDs (id_has_bic_and_nch) increase likelihood."
   },
   "8030": {
     "require_true": ["needs_iban"],
@@ -107,6 +107,12 @@
     "require_false": [],
     "description": "Name cleaned - party present with name"
   },
+  "9018": {
+    "require_true": ["intm_has_multiple", "intm_has_redundant_info"],
+    "require_false": [],
+    "description": "Duplicate party information removed - requires multiple intermediary entries with shared AdrBankID, country, or BIC prefix indicating redundancy",
+    "global_feature": true
+  },
   "9019": {
     "require_true": ["present", "any_id_needs_cleaning"],
     "require_false": [],
@@ -118,9 +124,10 @@
     "description": "NCH formatted - party present with NCH"
   },
   "9024": {
-    "require_true": ["present", "has_bic"],
-    "require_false": ["has_intermediary"],
-    "description": "Intermediary added - beneficiary present with BIC, no intermediary yet"
+    "require_true": ["intm_present"],
+    "require_false": [],
+    "description": "Push Up performed - intermediary present, typically with redundancy that requires consolidation. intm_has_redundant_info increases likelihood.",
+    "global_feature": true
   },
   "9025": {
     "require_true": ["present", "has_account"],
@@ -141,5 +148,10 @@
     "require_true": ["present", "has_bic"],
     "require_false": [],
     "description": "Credit party enriched - party present with BIC"
-  }
+  },
+
+  "_section_suppress": "CODES TO SUPPRESS (unpredictable or directory-dependent)",
+  
+  "_note_9490": "9490 (Fee Code Updated) requires directory lookup - cannot predict from message alone",
+  "_note_9999": "9999 (Field Repair) is generic catch-all for manual/misc repairs - not predictable"
 }
