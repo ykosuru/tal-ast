@@ -30,32 +30,22 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 
-# Try to import optional libraries
-try:
-    import lightgbm as lgb
-    HAS_LIGHTGBM = True
-except (ImportError, OSError) as e:
-    HAS_LIGHTGBM = False
-    print(f"LightGBM not available ({type(e).__name__}). Using sklearn alternatives.")
-
-try:
-    import xgboost as xgb
-    HAS_XGBOOST = True
-except (ImportError, OSError) as e:
-    HAS_XGBOOST = False
+# Optional libraries - disabled to avoid dependency issues
+# Set to False to use sklearn RandomForest instead
+HAS_LIGHTGBM = False
+HAS_XGBOOST = False
 
 try:
     import shap
     HAS_SHAP = True
 except (ImportError, OSError) as e:
     HAS_SHAP = False
-    print("SHAP not available. Explainability features limited.")
 
 
 @dataclass
 class ModelConfig:
     """Configuration for model training."""
-    model_type: str = 'lightgbm'  # 'lightgbm', 'xgboost', 'random_forest', 'gradient_boost', 'decision_tree'
+    model_type: str = 'random_forest'  # 'random_forest', 'gradient_boost', 'decision_tree'
     task_type: str = 'multiclass'  # 'binary', 'multiclass', 'multilabel'
     handle_imbalance: str = 'class_weight'  # 'class_weight', 'smote', 'undersample', 'none'
     n_estimators: int = 500
