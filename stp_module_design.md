@@ -576,12 +576,12 @@ This tells the caller: "The model thinks this *might* fire, but you need to chec
 
 ```bash
 # Train 8XXX model
-python main.py train --data-file payments.json --output-dir ./models_8x \
-    --code-series 8 --composite
+python main.py train --data-dir ./prd_emts_formatted --output-dir ./models8xemts \
+    --code-series 8 --composite --negative-ratio 1
 
 # Train 9XXX model (trainable only)
-python main.py train --data-file payments.json --output-dir ./models_9x \
-    --code-series 9 --composite --trainable-only
+python main.py train --data-dir ./prd_emts_formatted --output-dir ./models9xemts \
+    --code-series 9 --composite --negative-ratio 1 --trainable-only
 
 # Train with specific model type
 python main.py train --data-file payments.json --output-dir ./models \
