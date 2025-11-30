@@ -147,6 +147,16 @@ class IFMLFeatureEngineer:
         'orig_iban_needs_formatting', 'send_iban_needs_formatting', 'dbt_iban_needs_formatting',
         'cdt_iban_needs_formatting', 'intm_iban_needs_formatting', 'bnf_iban_needs_formatting',
         'ordi_iban_needs_formatting', 'acwi_iban_needs_formatting',
+        # ID cleaning (9019) - identifier contains non-alphanumeric chars
+        'orig_id_needs_cleaning', 'send_id_needs_cleaning', 'dbt_id_needs_cleaning',
+        'cdt_id_needs_cleaning', 'intm_id_needs_cleaning', 'bnf_id_needs_cleaning',
+        'ordi_id_needs_cleaning', 'acwi_id_needs_cleaning',
+        'orig_iban_needs_cleaning', 'send_iban_needs_cleaning', 'dbt_iban_needs_cleaning',
+        'cdt_iban_needs_cleaning', 'intm_iban_needs_cleaning', 'bnf_iban_needs_cleaning',
+        'ordi_iban_needs_cleaning', 'acwi_iban_needs_cleaning',
+        'orig_any_id_needs_cleaning', 'send_any_id_needs_cleaning', 'dbt_any_id_needs_cleaning',
+        'cdt_any_id_needs_cleaning', 'intm_any_id_needs_cleaning', 'bnf_any_id_needs_cleaning',
+        'ordi_any_id_needs_cleaning', 'acwi_any_id_needs_cleaning',
     ]
     
     # Numeric columns
