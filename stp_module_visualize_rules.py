@@ -49,7 +49,7 @@ def load_model(model_dir: str) -> Tuple[Any, List[str], List[str]]:
 
 
 def extract_tree_rules(tree, feature_names: List[str], class_name: str, 
-                       max_depth: int = 5) -> List[Dict]:
+                       max_depth: int = 8, min_confidence: float = 0.3) -> List[Dict]:
     """Extract decision rules from a single decision tree."""
     tree_ = tree.tree_
     feature_name = [
@@ -77,16 +77,21 @@ def extract_tree_rules(tree, feature_names: List[str], class_name: str,
         else:
             # Leaf node - check if it predicts positive
             values = tree_.value[node][0]
-            if len(values) >= 2 and values[1] > values[0]:  # Positive class wins
-                confidence = values[1] / sum(values)
-                samples = int(sum(values))
-                if confidence > 0.5 and samples >= 3:  # Meaningful rule
-                    rules.append({
-                        'conditions': path,
-                        'confidence': confidence,
-                        'samples': samples,
-                        'class': class_name
-                    })
+            if len(values) >= 2:
+                total = sum(values)
+                if total > 0:
+                    confidence = values[1] / total
+                    samples = int(total)
+                    # More lenient: accept lower confidence, fewer samples
+                    if confidence >= min_confidence and samples >= 1 and len(path) >= 1:
+                        rules.append({
+                            'conditions': path,
+                            'confidence': confidence,
+                            'samples': samples,
+                            'class': class_name,
+                            'positive_samples': int(values[1]),
+                            'negative_samples': int(values[0])
+                        })
     
     recurse(0, [], 0)
     return rules
@@ -131,29 +136,61 @@ def extract_rules_for_class(model, class_idx: int, feature_names: List[str],
     """Extract top rules for a specific class."""
     all_rules = []
     
-    if hasattr(model, 'estimators_'):
-        estimator = model.estimators_[class_idx]
-        
-        # For RandomForest, sample from trees
-        if hasattr(estimator, 'estimators_'):
-            trees = estimator.estimators_[:10]  # Sample first 10 trees
-            for tree in trees:
-                rules = extract_tree_rules(tree, feature_names, class_name)
-                all_rules.extend(rules)
-        else:
-            # Single tree
-            rules = extract_tree_rules(estimator, feature_names, class_name)
-            all_rules.extend(rules)
+    estimator = None
     
-    # Deduplicate and sort by confidence * samples
-    seen = set()
-    unique_rules = []
+    # Handle different model structures
+    if hasattr(model, 'estimators_'):
+        # MultiOutputClassifier wrapping RandomForest or single estimator
+        if class_idx < len(model.estimators_):
+            estimator = model.estimators_[class_idx]
+    elif hasattr(model, 'estimator'):
+        estimator = model.estimator
+    else:
+        estimator = model
+    
+    if estimator is None:
+        return []
+    
+    # For RandomForest, iterate through trees
+    if hasattr(estimator, 'estimators_'):
+        trees = estimator.estimators_
+        for tree in trees[:20]:  # Sample up to 20 trees
+            rules = extract_tree_rules(tree, feature_names, class_name)
+            all_rules.extend(rules)
+    elif hasattr(estimator, 'tree_'):
+        # Single decision tree
+        rules = extract_tree_rules(estimator, feature_names, class_name)
+        all_rules.extend(rules)
+    
+    if not all_rules:
+        return []
+    
+    # Deduplicate by merging similar rules
+    rule_groups = defaultdict(list)
     for rule in all_rules:
-        key = tuple(sorted(str(c) for c in rule['conditions']))
-        if key not in seen:
-            seen.add(key)
-            rule['score'] = rule['confidence'] * np.log1p(rule['samples'])
-            unique_rules.append(rule)
+        # Create a simplified key based on top conditions
+        key_conditions = []
+        for cond in rule['conditions'][:4]:  # First 4 conditions
+            feat, op, thresh = cond
+            # Normalize threshold for boolean features
+            if 0.4 < thresh < 0.6:
+                key_conditions.append((feat, 'bool', op))
+            else:
+                key_conditions.append((feat, round(thresh, 1), op))
+        key = tuple(sorted(str(c) for c in key_conditions))
+        rule_groups[key].append(rule)
+    
+    # Aggregate rules in each group
+    unique_rules = []
+    for key, group in rule_groups.items():
+        best = max(group, key=lambda x: x['confidence'] * x['samples'])
+        total_samples = sum(r['samples'] for r in group)
+        avg_confidence = sum(r['confidence'] * r['samples'] for r in group) / total_samples
+        best['samples'] = total_samples
+        best['confidence'] = avg_confidence
+        best['score'] = avg_confidence * np.log1p(total_samples)
+        best['tree_count'] = len(group)
+        unique_rules.append(best)
     
     unique_rules.sort(key=lambda x: x['score'], reverse=True)
     return unique_rules[:max_rules]
@@ -389,16 +426,62 @@ def main():
     parser = argparse.ArgumentParser(description='Visualize ML model decision rules')
     parser.add_argument('--model-dir', required=True, help='Model directory')
     parser.add_argument('--output', default='rules.html', help='Output file (html or txt)')
-    parser.add_argument('--format', choices=['html', 'text', 'mermaid'], default='html',
+    parser.add_argument('--format', choices=['html', 'text', 'mermaid', 'importance'], default='html',
                        help='Output format')
     parser.add_argument('--top', type=int, default=30, help='Number of top classes to show')
     parser.add_argument('--code', default=None, help='Specific code to analyze')
+    parser.add_argument('--debug', action='store_true', help='Show debug info about model structure')
     
     args = parser.parse_args()
     
     print(f"Loading model from {args.model_dir}...")
     model, feature_names, class_names = load_model(args.model_dir)
     print(f"Loaded model with {len(feature_names)} features and {len(class_names)} classes")
+    
+    if args.debug:
+        print("\n=== MODEL STRUCTURE DEBUG ===")
+        print(f"Model type: {type(model)}")
+        if hasattr(model, 'estimators_'):
+            print(f"Number of estimators: {len(model.estimators_)}")
+            if len(model.estimators_) > 0:
+                est = model.estimators_[0]
+                print(f"First estimator type: {type(est)}")
+                if hasattr(est, 'estimators_'):
+                    print(f"  Sub-estimators (trees): {len(est.estimators_)}")
+                    if len(est.estimators_) > 0:
+                        tree = est.estimators_[0]
+                        print(f"  Tree depth: {tree.tree_.max_depth}")
+                        print(f"  Tree nodes: {tree.tree_.node_count}")
+                if hasattr(est, 'feature_importances_'):
+                    top_idx = np.argsort(est.feature_importances_)[-5:][::-1]
+                    print(f"  Top 5 features:")
+                    for i in top_idx:
+                        print(f"    {feature_names[i]}: {est.feature_importances_[i]:.4f}")
+        print("=" * 40)
+        return
+    
+    if args.format == 'importance':
+        # Simple feature importance view
+        print("\n" + "=" * 80)
+        print("FEATURE IMPORTANCE BY CODE")
+        print("=" * 80)
+        
+        importance_by_class = get_feature_importance_per_class(model, feature_names, class_names)
+        
+        codes_to_show = [args.code] if args.code else sorted(class_names)[:args.top]
+        
+        for class_name in codes_to_show:
+            if class_name not in importance_by_class:
+                continue
+            print(f"\n{'─' * 80}")
+            print(f"CODE: {class_name}")
+            print(f"{'─' * 80}")
+            
+            for feat, imp in importance_by_class[class_name][:15]:
+                bar_len = int(imp * 100)
+                bar = "█" * bar_len + "░" * (20 - bar_len)
+                print(f"  {feat:<50} {imp:.4f} {bar}")
+        return
     
     if args.code:
         # Single code analysis
