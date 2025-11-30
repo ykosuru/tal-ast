@@ -441,7 +441,7 @@ class ACEErrorCodeModel:
             per_class_report = {}
             for i, class_name in enumerate(self.class_names):
                 support = int(y[:, i].sum())
-                if support > 0:
+                if support > 0:  # Skip empty classes
                     precision = precision_score(y[:, i], y_pred[:, i], zero_division=0)
                     recall = recall_score(y[:, i], y_pred[:, i], zero_division=0)
                     f1 = f1_score(y[:, i], y_pred[:, i], zero_division=0)
