@@ -80,72 +80,224 @@ FEATURE_EXPLANATIONS = {
 # require_false: features that MUST be False for the code to be valid
 CODE_TRIGGERS = {
     # ==========================================================================
-    # 8XXX VALIDATION ERRORS
+    # 8XXX VALIDATION ERRORS - All are trainable from message features
     # ==========================================================================
+    
+    # --- BIC Validation ---
     '8001': {
         'require_true': ['has_bic'],
         'require_false': ['bic_valid_format', 'bic_valid_country'],
-        'description': 'Invalid BIC - BIC present but format/country invalid'
+        'description': 'Invalid BIC',
+        'needs_directory': False
     },
+    '8005': {
+        'require_true': ['has_bic'],
+        'require_false': [],
+        'description': 'Invalid BIC4',
+        'needs_directory': False
+    },
+    '8006': {
+        'require_true': ['present'],
+        'require_false': ['country_valid'],
+        'description': 'Invalid country code',
+        'needs_directory': False
+    },
+    
+    # --- IBAN/Account Validation ---
     '8004': {
         'require_true': ['needs_iban'],
         'require_false': ['has_iban'],
-        'description': 'IBAN cannot be derived - IBAN required but missing'
-    },
-    '8022': {
-        'require_true': ['has_iban', 'has_bic'],
-        'require_false': ['bic_iban_match'],
-        'description': 'IBAN inconsistent with BIC - countries do not match'
-    },
-    '8023': {
-        'require_true': ['has_iban'],
-        'require_false': [],
-        'description': 'IBAN inconsistency found in message'
-    },
-    '8026': {
-        'require_true': ['has_nch'],
-        'require_false': [],
-        'description': 'NCH inconsistency - multiple NCH values that are inconsistent'
+        'description': 'IBAN cannot be derived',
+        'needs_directory': True,
+        'directory': 'IBAN_DERIVATION'
     },
     '8030': {
         'require_true': ['needs_iban'],
         'require_false': ['has_iban'],
-        'description': 'IBAN derivation not supported for the country'
-    },
-    '8852': {
-        'require_true': ['has_account'],
-        'require_false': [],
-        'description': 'Incorrect length of attribute'
+        'description': 'IBAN derivation not supported for the country',
+        'needs_directory': False
     },
     '8892': {
         'require_true': ['has_account'],
-        'require_false': [],
-        'description': 'Invalid account number format'
+        'require_false': ['account_valid'],
+        'description': 'Invalid Account number',
+        'needs_directory': False
     },
     '8894': {
         'require_true': ['has_iban'],
         'require_false': ['iban_valid_format', 'iban_checksum_valid'],
-        'description': 'Invalid IBAN - format or checksum invalid'
-    },
-    '8895': {
-        'require_true': ['has_nch'],
-        'require_false': ['nch_valid', 'fedaba_checksum_valid'],
-        'description': 'Invalid NCH code - routing number invalid'
-    },
-    '8896': {
-        'require_true': ['has_account', 'is_domestic'],
-        'require_false': [],
-        'description': 'Invalid domestic account number format'
+        'description': 'Invalid IBAN',
+        'needs_directory': False
     },
     '8897': {
         'require_true': ['has_account'],
-        'require_false': [],
-        'description': 'Invalid BBAN'
+        'require_false': ['bban_valid'],
+        'description': 'Invalid BBAN',
+        'needs_directory': False
     },
     '8898': {
         'require_true': ['has_iban'],
         'require_false': ['iban_checksum_valid'],
-        'description': 'IBAN check digit validation failed'
+        'description': 'IBAN Check Digit calculation/validation failed',
+        'needs_directory': False
+    },
+    
+    # --- NCH/Routing Validation ---
+    '8895': {
+        'require_true': ['has_nch'],
+        'require_false': ['nch_valid', 'fedaba_checksum_valid'],
+        'description': 'Invalid NCH code',
+        'needs_directory': False
+    },
+    '8896': {
+        'require_true': ['has_account', 'is_domestic'],
+        'require_false': ['domestic_account_valid'],
+        'description': 'Invalid Domestic Account Number',
+        'needs_directory': False
+    },
+    
+    # --- Inconsistency Errors ---
+    '8022': {
+        'require_true': ['has_iban', 'has_bic'],
+        'require_false': ['bic_iban_match'],
+        'description': 'IBAN inconsistent with Account With Institution BIC',
+        'needs_directory': False
+    },
+    '8023': {
+        'require_true': ['has_iban'],
+        'require_false': [],
+        'description': 'IBAN inconsistency found in message',
+        'needs_directory': False
+    },
+    '8024': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'BBAN inconsistency found in message',
+        'needs_directory': False
+    },
+    '8025': {
+        'require_true': ['has_account', 'is_domestic'],
+        'require_false': [],
+        'description': 'Domestic Account Number inconsistency found in message',
+        'needs_directory': False
+    },
+    '8026': {
+        'require_true': ['has_nch'],
+        'require_false': [],
+        'description': 'NCH inconsistency found in message',
+        'needs_directory': False
+    },
+    '8027': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'ISO Country Code inconsistency found in message',
+        'needs_directory': False
+    },
+    '8028': {
+        'require_true': ['has_bic'],
+        'require_false': [],
+        'description': 'BIC4 inconsistency found in message',
+        'needs_directory': False
+    },
+    '8029': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'Account Number inconsistency found in message',
+        'needs_directory': False
+    },
+    '8033': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'CLABE inconsistency found in message',
+        'needs_directory': False
+    },
+    
+    # --- Format/Length Errors ---
+    '8007': {
+        'require_true': ['has_amount'],
+        'require_false': [],
+        'description': 'Number of fractional digits of amount exceeds maximum allowable',
+        'needs_directory': False
+    },
+    '8851': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Incorrect field size',
+        'needs_directory': False
+    },
+    '8852': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'Incorrect length of attribute',
+        'needs_directory': False
+    },
+    '8853': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Incorrect number format',
+        'needs_directory': False
+    },
+    
+    # --- Other Validation Errors ---
+    '8003': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'File name derivation failed',
+        'needs_directory': True
+    },
+    '8034': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Forced Debit is not allowed and hence message cannot be processed',
+        'needs_directory': False
+    },
+    '8035': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'FCDA account validation failed',
+        'needs_directory': True
+    },
+    '8036': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'FCDA account name matching failed',
+        'needs_directory': True
+    },
+    '8124': {
+        'require_true': ['has_currency'],
+        'require_false': ['currency_valid'],
+        'description': 'Invalid currency',
+        'needs_directory': False
+    },
+    '8464': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Target Channel not derived',
+        'needs_directory': True
+    },
+    '8465': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Product code not found',
+        'needs_directory': True
+    },
+    '8472': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Fee code not derived',
+        'needs_directory': True
+    },
+    '8905': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Hash code Mismatch',
+        'needs_directory': False
+    },
+    '8906': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Message in wrong flow',
+        'needs_directory': False
     },
     
     # ==========================================================================
@@ -156,95 +308,193 @@ CODE_TRIGGERS = {
     # TRAINABLE 9XXX CODES - Can be predicted from message features alone
     # **************************************************************************
     
-    # --- Account/Name Cleaning (detectable from message) ---
-    '9002': {
-        'require_true': ['present', 'account_has_dirty_chars'],
+    # --- NCH/Routing Cleaning ---
+    '9000': {
+        'require_true': ['has_nch', 'nch_has_dirty_chars'],
         'require_false': [],
-        'description': 'Account cleaned - removed dirty chars/spaces/special chars',
-        'needs_directory': False
-    },
-    '9015': {
-        'require_true': ['present', 'name_has_dirty_chars'],
-        'require_false': [],
-        'description': 'Name cleaned - removed dirty characters',
-        'needs_directory': False
-    },
-    '9019': {
-        'require_true': ['present'],
-        'require_false': [],
-        'description': 'Party identifier cleaned - removed non-alphanumeric chars (spaces, dashes, colons)',
-        'soft_require': ['iban_needs_formatting', 'account_has_dirty_chars', 'account_has_spaces'],
-        'needs_directory': False
-    },
-    
-    # --- Formatting Fixes (detectable from message) ---
-    '9006': {
-        'require_true': ['present', 'iban_needs_formatting'],
-        'require_false': [],
-        'description': 'IBAN formatted - standardized IBAN format',
-        'needs_directory': False
-    },
-    '9012': {
-        'require_true': ['present', 'iban_needs_formatting'],
-        'require_false': [],
-        'description': 'IBAN reformatted - spaces/dashes removed',
+        'description': 'NCH code cleaned',
         'needs_directory': False
     },
     '9021': {
-        'require_true': ['present', 'nch_needs_formatting'],
+        'require_true': ['has_nch', 'nch_needs_formatting'],
         'require_false': [],
-        'description': 'NCH formatted - standardized routing number format',
+        'description': 'FEDABA Code correctly formatted',
         'needs_directory': False
     },
-    '9025': {
-        'require_true': ['present', 'account_needs_length_fix'],
+    '9028': {
+        'require_true': ['has_nch'],
         'require_false': [],
-        'description': 'Account length fixed - padded or trimmed account number',
+        'description': 'NCH Code strip off',
         'needs_directory': False
     },
     
-    # --- Duplicate/Inconsistency Resolution (detectable from message) ---
-    '9017': {
-        'require_true': ['present', 'has_duplicate_info'],
+    # --- Account Cleaning ---
+    '9002': {
+        'require_true': ['has_account', 'account_has_dirty_chars'],
         'require_false': [],
-        'description': 'Duplicate info resolved for credit party',
+        'description': 'Account number cleaned of non alpha numeric characters',
+        'needs_directory': False
+    },
+    '9022': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'Account number formatted to required length',
+        'needs_directory': False
+    },
+    '9479': {
+        'require_true': ['has_account', 'account_has_dirty_chars'],
+        'require_false': [],
+        'description': 'Account Number Cleaned',
+        'needs_directory': False
+    },
+    
+    # --- IBAN Cleaning/Formatting ---
+    '9006': {
+        'require_true': ['has_iban', 'iban_needs_formatting'],
+        'require_false': [],
+        'description': 'IBAN Cleaned',
+        'needs_directory': False
+    },
+    '9012': {
+        'require_true': ['has_iban', 'iban_needs_formatting'],
+        'require_false': [],
+        'description': 'IBAN Formatted in field',
+        'needs_directory': False
+    },
+    '9014': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'BBAN cleaned',
+        'needs_directory': False
+    },
+    
+    # --- Name/Address Cleaning ---
+    '9001': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'D Field deleted',
+        'needs_directory': False
+    },
+    '9009': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Field Cleaned',
+        'needs_directory': False
+    },
+    '9013': {
+        'require_true': ['has_name'],
+        'require_false': [],
+        'description': 'Name and Address repair done',
+        'needs_directory': False
+    },
+    '9015': {
+        'require_true': ['has_account', 'account_has_dirty_chars'],
+        'require_false': [],
+        'description': 'Domestic account number cleaned',
+        'needs_directory': False
+    },
+    '9967': {
+        'require_true': ['has_address'],
+        'require_false': [],
+        'description': 'Cleared PO Box number',
+        'needs_directory': False
+    },
+    
+    # --- Party Identifier Cleaning ---
+    '9019': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Party Identifier cleaned of non alpha numeric characters',
+        'soft_require': ['iban_needs_formatting', 'account_has_dirty_chars', 'account_has_spaces', 'id_has_dirty_chars'],
+        'needs_directory': False
+    },
+    '9020': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Party Identifier cleaned of non alpha numeric characters',
+        'soft_require': ['id_has_dirty_chars'],
+        'needs_directory': False
+    },
+    
+    # --- Duplicate/Inconsistency Resolution ---
+    '9017': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Multiple party information present',
         'needs_directory': False
     },
     '9018': {
-        'require_true': ['present', 'has_duplicate_info'],
+        'require_true': ['present'],
         'require_false': [],
-        'description': 'Duplicate info resolved for intermediary',
+        'description': 'Duplicate party information removed',
+        'needs_directory': False
+    },
+    '9483': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': "Receiver's duplicate information removed",
+        'needs_directory': False
+    },
+    '9487': {
+        'require_true': ['has_bic'],
+        'require_false': [],
+        'description': "Receiver's BIC information removed",
+        'needs_directory': False
+    },
+    '9990': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Duplicate information of CDT is removed BBI removed',
+        'needs_directory': False
+    },
+    
+    # --- Field Generation ---
+    '9010': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Field 23E generated',
+        'needs_directory': False
+    },
+    '9026': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Purpose Information found in Field 72',
+        'needs_directory': False
+    },
+    '9938': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Deleted redundant phrases from Sender to Receiver information',
         'needs_directory': False
     },
     
     # **************************************************************************
-    # DIRECTORY-DEPENDENT 9XXX CODES - Require BIC/IBAN/NCH directory lookup
-    # Output: "LOOKUP(directory) -> IF found EMIT code ELSE skip"
+    # DIRECTORY-DEPENDENT 9XXX CODES - Require external lookup
     # **************************************************************************
     
-    # --- IBAN Derivation (needs IBAN directory) ---
+    # --- IBAN Derivation ---
     '9004': {
-        'require_true': ['present', 'needs_iban', 'is_iban_derivable'],
+        'require_true': ['present', 'has_account'],
         'require_false': ['has_iban'],
-        'description': 'IBAN derived for credit party',
+        'description': 'IBAN repaired in Account Number line',
         'needs_directory': True,
         'directory': 'IBAN_DERIVATION',
         'lookup_condition': 'LOOKUP(IBAN_DERIVATION, country={country}, account={account}) -> IF found EMIT 9004 ELSE EMIT 8004'
     },
     '9007': {
-        'require_true': ['present', 'needs_iban', 'is_iban_derivable'],
+        'require_true': ['present', 'has_account'],
         'require_false': ['has_iban'],
-        'description': 'IBAN derived for beneficiary',
+        'description': 'Account number replaced by IBAN',
         'needs_directory': True,
         'directory': 'IBAN_DERIVATION',
         'lookup_condition': 'LOOKUP(IBAN_DERIVATION, country={country}, account={account}) -> IF found EMIT 9007 ELSE EMIT 8004'
     },
     
-    # --- BIC Derivation (needs BIC directory) ---
+    # --- BIC Derivation ---
     '9005': {
         'require_true': ['present', 'has_nch'],
         'require_false': ['has_bic'],
-        'description': 'BIC derived from NCH',
+        'description': 'BIC replaced by derived BIC',
         'needs_directory': True,
         'directory': 'NCH_TO_BIC',
         'lookup_condition': 'LOOKUP(NCH_TO_BIC, nch={nch_value}) -> IF found EMIT 9005 ELSE skip'
@@ -252,70 +502,421 @@ CODE_TRIGGERS = {
     '9008': {
         'require_true': ['present', 'has_iban'],
         'require_false': ['has_bic'],
-        'description': 'BIC derived from IBAN',
+        'description': 'IBAN to BIC repair done',
         'needs_directory': True,
         'directory': 'IBAN_TO_BIC',
         'lookup_condition': 'LOOKUP(IBAN_TO_BIC, iban={iban}) -> IF found EMIT 9008 ELSE skip'
     },
+    '9032': {
+        'require_true': ['has_bic'],
+        'require_false': [],
+        'description': '8 char BIC insertion',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9910': {
+        'require_true': [],
+        'require_false': ['has_bic'],
+        'description': 'BIC repaired from BIC found in field 72',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9917': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'BIC repaired from BIC Plus using field 72',
+        'needs_directory': True,
+        'directory': 'BIC_PLUS'
+    },
+    '9961': {
+        'require_true': ['has_name'],
+        'require_false': ['has_bic'],
+        'description': 'BIC Derived from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_TO_BIC'
+    },
+    '9970': {
+        'require_true': ['has_name'],
+        'require_false': ['has_bic'],
+        'description': 'D-A using BIC from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_TO_BIC'
+    },
+    '9978': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Numeric BIC derived using field 58',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9979': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Numeric BIC derived using field 57',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9980': {
+        'require_true': ['has_bic'],
+        'require_false': [],
+        'description': 'Alpha BIC repaired with numeric BIC',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9981': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Merged BIC derived using field 58',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9982': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Merged BIC derived using field 57',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9983': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Exception BIC derived using field 58',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9984': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Exception BIC derived using field 57',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9985': {
+        'require_true': ['has_nch'],
+        'require_false': [],
+        'description': 'BIC from CHIPS ABA Repaired',
+        'needs_directory': True,
+        'directory': 'CHIPS_ABA_TO_BIC'
+    },
+    '9986': {
+        'require_true': ['has_bic'],
+        'require_false': [],
+        'description': 'Head Office BIC Repaired',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9901': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'D-A using BIC retrieved from the field',
+        'needs_directory': True,
+        'directory': 'BIC_DIRECTORY'
+    },
+    '9936': {
+        'require_true': ['has_name'],
+        'require_false': [],
+        'description': 'D-A using BIC from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_TO_BIC'
+    },
     
-    # --- Intermediary/Routing (needs routing directory) ---
+    # --- NCH Derivation from Name/Address ---
+    '9475': {
+        'require_true': ['has_name'],
+        'require_false': ['has_account'],
+        'description': 'D-A using Account No. from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_ADDRESS_PARSE'
+    },
+    '9476': {
+        'require_true': ['has_name'],
+        'require_false': ['has_nch'],
+        'description': 'D-A using CHIPS ABA from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_ADDRESS_PARSE'
+    },
+    '9477': {
+        'require_true': ['has_name'],
+        'require_false': ['has_nch'],
+        'description': 'D-A using FED ABA from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_ADDRESS_PARSE'
+    },
+    '9478': {
+        'require_true': ['has_name'],
+        'require_false': [],
+        'description': 'D-A using CHIPS UID from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_ADDRESS_PARSE'
+    },
+    '9485': {
+        'require_true': ['has_name'],
+        'require_false': ['has_nch'],
+        'description': 'D-A using NCH from Name and Address',
+        'needs_directory': True,
+        'directory': 'NAME_ADDRESS_PARSE'
+    },
+    
+    # --- Push Up/Down Operations ---
     '9024': {
         'require_true': ['present', 'has_bic'],
         'require_false': ['has_intermediary'],
-        'description': 'Intermediary bank added',
+        'description': 'Push Up performed',
         'needs_directory': True,
         'directory': 'ROUTING',
         'lookup_condition': 'LOOKUP(ROUTING, dest_bic={bic}) -> IF intermediary_required EMIT 9024 ELSE skip'
     },
-    
-    # --- BIC Enrichment (needs BIC directory) ---
-    '9477': {
-        'require_true': ['present', 'has_bic'],
-        'require_false': [],
-        'description': 'BIC enriched from 8 to 11 characters',
-        'needs_directory': True,
-        'directory': 'BIC_DIRECTORY',
-        'lookup_condition': 'LOOKUP(BIC_DIRECTORY, bic8={bic}) -> IF bic11_found EMIT 9477 ELSE skip',
-        'precondition': 'bic_length == 8'
-    },
-    '9479': {
-        'require_true': ['present', 'has_bic'],
-        'require_false': [],
-        'description': 'Party enriched - bank name/address added from BIC directory',
-        'needs_directory': True,
-        'directory': 'BIC_DIRECTORY',
-        'lookup_condition': 'LOOKUP(BIC_DIRECTORY, bic={bic}) -> IF bank_info_found EMIT 9479 ELSE skip'
-    },
     '9480': {
-        'require_true': ['present', 'has_bic'],
+        'require_true': ['present'],
         'require_false': [],
-        'description': 'Credit party enriched from BIC directory',
+        'description': 'Push Down of type Push 1 performed',
         'needs_directory': True,
-        'directory': 'BIC_DIRECTORY',
-        'lookup_condition': 'LOOKUP(BIC_DIRECTORY, bic={bic}) -> IF enrichment_available EMIT 9480 ELSE skip'
+        'directory': 'ROUTING'
+    },
+    '9481': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Push Down of type Push 2 performed',
+        'needs_directory': True,
+        'directory': 'ROUTING'
+    },
+    '9482': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Push Down of type partial Push 2 performed',
+        'needs_directory': True,
+        'directory': 'ROUTING'
+    },
+    '9486': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'A to D performed',
+        'needs_directory': True,
+        'directory': 'ROUTING'
+    },
+    '9488': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Partial push down performed',
+        'needs_directory': True,
+        'directory': 'ROUTING'
+    },
+    '9991': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Account Number pushed down to BBI from BBK',
+        'needs_directory': True,
+        'directory': 'ROUTING'
+    },
+    '9992': {
+        'require_true': ['has_nch'],
+        'require_false': [],
+        'description': 'NCH code has been translocated to BBI',
+        'needs_directory': True,
+        'directory': 'ROUTING'
     },
     
-    # --- Other Repairs (unpredictable/catch-all) ---
-    '9938': {
-        'require_true': [],
+    # --- Account Repairs ---
+    '9023': {
+        'require_true': ['has_account'],
         'require_false': [],
-        'description': 'Message structure repaired',
-        'needs_directory': False,
-        'trainable': False  # Too generic to train
+        'description': 'Fund to Account repair done',
+        'needs_directory': True,
+        'directory': 'ACCOUNT_DIRECTORY'
     },
-    '9970': {
+    '9025': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'CLABE repaired',
+        'needs_directory': True,
+        'directory': 'CLABE_DIRECTORY'
+    },
+    '9027': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'FCDA account reformatted',
+        'needs_directory': True,
+        'directory': 'FCDA_DIRECTORY'
+    },
+    '9029': {
         'require_true': [],
         'require_false': [],
-        'description': 'Default values applied',
+        'description': 'GL account insertion for FED',
+        'needs_directory': True,
+        'directory': 'GL_DIRECTORY'
+    },
+    '9030': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'DDA to GL attribute type conversion',
+        'needs_directory': True,
+        'directory': 'GL_DIRECTORY'
+    },
+    '9031': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Trust account to GL number insertion',
+        'needs_directory': True,
+        'directory': 'GL_DIRECTORY'
+    },
+    '9932': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'Account number line repaired with Account number',
+        'needs_directory': True,
+        'directory': 'ACCOUNT_DIRECTORY'
+    },
+    '9935': {
+        'require_true': ['has_nch'],
+        'require_false': [],
+        'description': 'Account number line repaired by NCH code',
+        'needs_directory': True,
+        'directory': 'NCH_DIRECTORY'
+    },
+    '9962': {
+        'require_true': ['has_account'],
+        'require_false': [],
+        'description': 'Account number updated',
+        'needs_directory': True,
+        'directory': 'ACCOUNT_DIRECTORY'
+    },
+    '9963': {
+        'require_true': [],
+        'require_false': ['has_account'],
+        'description': 'Account number added',
+        'needs_directory': True,
+        'directory': 'ACCOUNT_DIRECTORY'
+    },
+    '9484': {
+        'require_true': ['present'],
+        'require_false': [],
+        'description': 'Repaired using info derived from Ban to Bank Info',
+        'needs_directory': True,
+        'directory': 'BANK_DIRECTORY'
+    },
+    
+    # --- Fee/Charge Updates ---
+    '9490': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Fee Code Updated',
+        'needs_directory': True,
+        'directory': 'FEE_DIRECTORY'
+    },
+    '9491': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Tariff Fee Updated',
+        'needs_directory': True,
+        'directory': 'FEE_DIRECTORY'
+    },
+    '9492': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Charge Field updated with value B',
+        'needs_directory': False
+    },
+    '9493': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Debit Charge Field update with value N',
+        'needs_directory': False
+    },
+    '9494': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Field updated with GTYOUR',
+        'needs_directory': False
+    },
+    '9495': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Field updated with FCY',
+        'needs_directory': False
+    },
+    '9496': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Field updated with FCY OUR CHARGES',
+        'needs_directory': False
+    },
+    '9497': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Field updated with FCY GTYOUR',
+        'needs_directory': False
+    },
+    '9498': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'PRESAM SecWir updated with Y',
+        'needs_directory': False
+    },
+    
+    # --- Other Updates ---
+    '9918': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Attribute type auto corrected',
+        'needs_directory': False
+    },
+    '9964': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Advice instructions modified',
+        'needs_directory': False
+    },
+    '9965': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Charge flag modified',
+        'needs_directory': False
+    },
+    '9966': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Secondary wire flag modified',
+        'needs_directory': False
+    },
+    '9968': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Parameter values added',
+        'needs_directory': False
+    },
+    '9969': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Related Amounts added',
+        'needs_directory': False
+    },
+    '9971': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Negative ref cancels pos ref and benededuct',
+        'needs_directory': False
+    },
+    '9987': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'Code Consistent',
+        'needs_directory': False
+    },
+    
+    # --- Catch-all/Generic ---
+    '9439': {
+        'require_true': [],
+        'require_false': [],
+        'description': 'No Pattern Found',
         'needs_directory': False,
-        'trainable': False  # Too generic to train
+        'trainable': False
     },
     '9999': {
         'require_true': [],
         'require_false': [],
-        'description': 'General repair applied',
+        'description': 'Field Repaired',
         'needs_directory': False,
-        'trainable': False  # Too generic to train
+        'trainable': False
     },
 }
 
