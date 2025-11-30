@@ -953,6 +953,224 @@ def get_9xxx_category(code: str) -> str:
         return 'NON_TRAINABLE'
     return 'UNKNOWN'
 
+
+# =============================================================================
+# DIRECTORY LOOKUP HEURISTICS
+# =============================================================================
+# These are deterministic rules based on message features that indicate
+# which directory lookups ACE will perform
+
+DIRECTORY_LOOKUP_RULES = {
+    # BIC derivation from IBAN
+    '9008': {
+        'condition': lambda f, p: f.get(f'{p}_has_iban') and not f.get(f'{p}_has_bic'),
+        'directory': 'IBAN_TO_BIC',
+        'template': 'LOOKUP(IBAN_TO_BIC, iban={iban}) → IF found EMIT 9008 ELSE skip',
+        'description': 'Derive BIC from IBAN',
+        'fields': {'iban': '{p}_account_value'}
+    },
+    # BIC derivation from NCH
+    '9005': {
+        'condition': lambda f, p: f.get(f'{p}_has_nch') and not f.get(f'{p}_has_bic'),
+        'directory': 'NCH_TO_BIC',
+        'template': 'LOOKUP(NCH_TO_BIC, nch={nch}, type={nch_type}) → IF found EMIT 9005 ELSE skip',
+        'description': 'Derive BIC from NCH/routing number',
+        'fields': {'nch': '{p}_nch_value', 'nch_type': '{p}_nch_type'}
+    },
+    # IBAN derivation
+    '9004': {
+        'condition': lambda f, p: f.get(f'{p}_needs_iban') and not f.get(f'{p}_has_iban') and f.get(f'{p}_has_account'),
+        'directory': 'IBAN_DERIVATION',
+        'template': 'LOOKUP(IBAN_DERIVATION, country={country}, account={account}) → IF found EMIT 9004 ELSE EMIT 8004',
+        'description': 'Derive IBAN from country + account',
+        'fields': {'country': '{p}_country', 'account': '{p}_account_value'},
+        'else_code': '8004'
+    },
+    '9007': {
+        'condition': lambda f, p: f.get(f'{p}_needs_iban') and not f.get(f'{p}_has_iban') and f.get(f'{p}_has_account'),
+        'directory': 'IBAN_DERIVATION',
+        'template': 'LOOKUP(IBAN_DERIVATION, country={country}, account={account}) → IF found EMIT 9007 ELSE EMIT 8004',
+        'description': 'Derive IBAN for beneficiary',
+        'fields': {'country': '{p}_country', 'account': '{p}_account_value'},
+        'else_code': '8004'
+    },
+    # BIC expansion 8→11
+    '9477': {
+        'condition': lambda f, p: f.get(f'{p}_has_bic') and f.get(f'{p}_bic_length') == 8,
+        'directory': 'BIC_DIRECTORY',
+        'template': 'LOOKUP(BIC_DIRECTORY, bic={bic}) → IF branch_code_found EMIT 9477 (expand to 11 chars)',
+        'description': 'Expand 8-char BIC to 11-char',
+        'fields': {'bic': '{p}_bic'}
+    },
+    # Push down operations
+    '9480': {
+        'condition': lambda f, p: f.get('has_intermediary') and f.get('has_beneficiary_bank'),
+        'directory': 'ROUTING',
+        'template': 'LOOKUP(ROUTING, intm_bic={intm_bic}, bnf_bic={bnf_bic}) → IF push_down_required EMIT 9480',
+        'description': 'Push Down type 1 - route through intermediary',
+        'fields': {'intm_bic': 'intm_bic', 'bnf_bic': 'bnf_bic'},
+        'party_override': 'intm'  # This fires on INTBNK
+    },
+    '9481': {
+        'condition': lambda f, p: f.get('has_intermediary') and f.get('has_beneficiary_bank'),
+        'directory': 'ROUTING',
+        'template': 'LOOKUP(ROUTING, intm_bic={intm_bic}, bnf_bic={bnf_bic}) → IF push_down_type2_required EMIT 9481',
+        'description': 'Push Down type 2',
+        'fields': {'intm_bic': 'intm_bic', 'bnf_bic': 'bnf_bic'},
+        'party_override': 'intm'
+    },
+    '9024': {
+        'condition': lambda f, p: f.get('has_intermediary') or f.get('is_cross_border'),
+        'directory': 'ROUTING',
+        'template': 'LOOKUP(ROUTING, destination={country}) → IF push_up_required EMIT 9024',
+        'description': 'Push Up - add intermediary routing',
+        'fields': {'country': 'beneficiary_country'}
+    },
+    # BIC from name/address
+    '9961': {
+        'condition': lambda f, p: not f.get(f'{p}_has_bic') and f.get(f'{p}_has_name') and f.get(f'{p}_address_line_count', 0) > 0,
+        'directory': 'NAME_TO_BIC',
+        'template': 'LOOKUP(NAME_TO_BIC, name={name}, country={country}) → IF found EMIT 9961',
+        'description': 'Derive BIC from name and address',
+        'fields': {'name': '{p}_has_name', 'country': '{p}_country'}
+    },
+    # Fee lookups
+    '9490': {
+        'condition': lambda f, p: True,  # Always check fee directory
+        'directory': 'FEE_DIRECTORY',
+        'template': 'LOOKUP(FEE_DIRECTORY, amount={amount}, currency={currency}, route={route}) → IF fee_code_found EMIT 9490',
+        'description': 'Derive fee code',
+        'fields': {'amount': 'primary_amount', 'currency': 'primary_currency', 'route': 'is_cross_border'},
+        'party_override': None  # Transaction level
+    },
+}
+
+# Party prefixes
+PARTY_PREFIXES = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'ordi', 'acwi']
+
+
+def generate_directory_lookup_hints(features: dict) -> List[dict]:
+    """
+    Generate directory lookup hints based on payment features.
+    
+    These are NOT predictions - they are deterministic heuristics that tell
+    developers which ACE directory lookups will be triggered based on the
+    input message structure.
+    
+    Returns list of hints like:
+    {
+        'code': '9008',
+        'party': 'BNFBNK',
+        'directory': 'IBAN_TO_BIC',
+        'lookup': 'LOOKUP(IBAN_TO_BIC, iban=GB82WEST12345698765432) → IF found EMIT 9008 ELSE skip',
+        'description': 'Derive BIC from IBAN',
+        'reason': 'bnf_has_iban=True, bnf_has_bic=False'
+    }
+    """
+    hints = []
+    
+    for code, rule in DIRECTORY_LOOKUP_RULES.items():
+        # Determine which parties to check
+        if 'party_override' in rule:
+            # Explicit party override
+            if rule['party_override'] is None:
+                # Transaction-level rule, check once with empty prefix
+                parties_to_check = ['']
+            else:
+                # Check only the specified party
+                parties_to_check = [rule['party_override']]
+        else:
+            # No override - check all parties
+            parties_to_check = PARTY_PREFIXES
+        
+        for party_prefix in parties_to_check:
+            # Skip if party not present
+            if party_prefix and not features.get(f'{party_prefix}_present'):
+                continue
+            
+            try:
+                # Check if condition is met
+                if rule['condition'](features, party_prefix):
+                    # Build the lookup string with actual values
+                    lookup_str = rule['template']
+                    reason_parts = []
+                    
+                    for field_name, field_path in rule.get('fields', {}).items():
+                        # Substitute party prefix
+                        if '{p}' in field_path:
+                            actual_path = field_path.replace('{p}', party_prefix)
+                        else:
+                            actual_path = field_path
+                        
+                        value = features.get(actual_path, '?')
+                        lookup_str = lookup_str.replace('{' + field_name + '}', str(value) if value else '?')
+                        
+                        if value and value != '?':
+                            reason_parts.append(f"{actual_path}={value}")
+                    
+                    # Map party prefix to party suffix for output
+                    party_suffix = {
+                        'orig': 'ORGPTY', 'send': 'SNDBNK', 'dbt': 'DBTPTY',
+                        'cdt': 'CDTPTY', 'intm': 'INTBNK', 'bnf': 'BNFBNK', '': 'TXN'
+                    }.get(party_prefix, party_prefix.upper())
+                    
+                    hint = {
+                        'code': code,
+                        'party': party_suffix,
+                        'composite_code': f"{code}_{party_suffix}" if party_suffix != 'TXN' else code,
+                        'directory': rule['directory'],
+                        'lookup': lookup_str,
+                        'description': rule['description'],
+                        'reason': ', '.join(reason_parts) if reason_parts else 'conditions met'
+                    }
+                    
+                    if 'else_code' in rule:
+                        hint['else_code'] = rule['else_code']
+                        hint['note'] = f"If lookup fails, will emit {rule['else_code']} instead"
+                    
+                    hints.append(hint)
+            except Exception as e:
+                # Skip rules that fail to evaluate
+                continue
+    
+    return hints
+
+
+def format_lookup_hints_for_display(hints: List[dict]) -> str:
+    """Format lookup hints as readable text for developers."""
+    if not hints:
+        return "No directory lookups required for this payment."
+    
+    lines = []
+    lines.append("=" * 80)
+    lines.append("DIRECTORY LOOKUP HINTS")
+    lines.append("=" * 80)
+    lines.append("")
+    lines.append("Based on input message structure, ACE will perform these directory lookups:")
+    lines.append("")
+    
+    # Group by directory
+    by_directory = {}
+    for hint in hints:
+        dir_name = hint['directory']
+        if dir_name not in by_directory:
+            by_directory[dir_name] = []
+        by_directory[dir_name].append(hint)
+    
+    for directory, dir_hints in sorted(by_directory.items()):
+        lines.append(f"┌─ {directory} ─" + "─" * (70 - len(directory)))
+        for hint in dir_hints:
+            lines.append(f"│")
+            lines.append(f"│  {hint['composite_code']}: {hint['description']}")
+            lines.append(f"│  {hint['lookup']}")
+            if hint.get('note'):
+                lines.append(f"│  ⚠️  {hint['note']}")
+            lines.append(f"│  Reason: {hint['reason']}")
+        lines.append(f"└" + "─" * 78)
+        lines.append("")
+    
+    return "\n".join(lines)
+
 def get_lookup_condition(code: str, features: dict = None) -> Optional[str]:
     """
     Get the directory lookup condition for a 9XXX code.
