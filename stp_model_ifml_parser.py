@@ -378,6 +378,14 @@ class PartyInfo:
     # 9006, 9012: IBAN formatting features
     iban_needs_formatting: bool = False  # IBAN present but needs cleanup/formatting
     
+    # === COMPOUND ID FEATURES (for 8026, 8022) ===
+    id_has_slash: bool = False  # ID contains '/' separator
+    id_is_compound: bool = False  # ID appears to contain multiple values
+    id_compound_parts: int = 0  # Number of parts in compound ID
+    id_has_bic_pattern: bool = False  # Compound contains BIC-like pattern
+    id_has_nch_pattern: bool = False  # Compound contains NCH-like pattern
+    id_has_bic_and_nch: bool = False  # Contains both - high risk for 8026
+    
     def __post_init__(self):
         if self.address_lines is None:
             self.address_lines = []
@@ -434,6 +442,16 @@ class IFMLFeatures:
     
     # Raw data for debugging
     raw_json: Optional[dict] = None
+    
+    # === INTERMEDIARY REDUNDANCY FEATURES (for 9018, 9024) ===
+    intm_count: int = 0  # Number of IntermediaryBankInf entries
+    intm_has_multiple: bool = False  # More than one intermediary entry
+    intm_entries_share_adr_bank_id: bool = False  # Multiple entries have same AdrBankID
+    intm_entries_share_country: bool = False  # Multiple entries have same country
+    intm_entries_share_bic_prefix: bool = False  # Multiple entries have similar BIC
+    intm_has_redundant_info: bool = False  # Composite: likely has duplicates to remove
+    intm_types_present: List[str] = field(default_factory=list)  # e.g., ["IBK", "IB1"]
+    intm_has_multiple_types: bool = False  # Different Type values present
 
 
 class IFMLParser:
@@ -484,6 +502,64 @@ class IFMLParser:
         if len(cleaned) < 15 or len(cleaned) > 34:
             return False
         return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned))
+    
+    def _analyze_compound_id(self, id_text: str) -> dict:
+        """
+        Analyze ID for compound/multi-value patterns.
+        
+        Compound IDs like "CUSCAU2S/AU805013" contain both a BIC and NCH,
+        which can trigger 8026 (NCH inconsistency) if they don't agree,
+        or 8022 (BIC/IBAN mismatch) if countries differ.
+        
+        Returns:
+            dict with has_slash, is_compound, compound_parts, has_bic_pattern, has_nch_pattern
+        """
+        result = {
+            'has_slash': False,
+            'is_compound': False,
+            'compound_parts': 0,
+            'has_bic_pattern': False,
+            'has_nch_pattern': False,
+        }
+        
+        if not id_text:
+            return result
+        
+        id_text = str(id_text).strip()
+        
+        # Check for slash separator
+        result['has_slash'] = '/' in id_text
+        
+        if '/' in id_text:
+            parts = [p.strip() for p in id_text.split('/') if p.strip()]
+            result['is_compound'] = len(parts) > 1
+            result['compound_parts'] = len(parts)
+            
+            for part in parts:
+                # BIC pattern: 8 or 11 chars, first 4 are letters (bank code)
+                # positions 5-6 are letters (country code)
+                if len(part) in [8, 11]:
+                    if part[:4].isalpha() and len(part) >= 6 and part[4:6].isalpha():
+                        result['has_bic_pattern'] = True
+                
+                # NCH patterns:
+                # - FEDABA: 9 digits
+                # - CHIPS: 6 digits  
+                # - AU BSB: 6 digits or XX + 6 digits (e.g., AU805013)
+                # - Sort code: 6 digits with possible dashes
+                clean_part = part.replace('-', '').replace(' ', '')
+                
+                if clean_part.isdigit() and len(clean_part) in [6, 9]:
+                    result['has_nch_pattern'] = True
+                
+                # Australian BSB pattern: AU + 6 digits or 2 letters + 6 digits
+                if len(part) >= 8:
+                    prefix = part[:2]
+                    suffix = part[2:].replace('-', '')
+                    if prefix.isalpha() and suffix.isdigit() and len(suffix) >= 6:
+                        result['has_nch_pattern'] = True
+        
+        return result
     
     def parse_file(self, filepath: str) -> IFMLFeatures:
         """Parse IFML from a file path."""
@@ -677,6 +753,123 @@ class IFMLParser:
                     # Create new
                     parsed_party = self._parse_single_party('BeneficiaryBankInfo', bnf_party_inf)
                     features.parties['BeneficiaryBankInfo'] = parsed_party
+        
+        # Parse intermediary array for redundancy detection (9018, 9024)
+        self._parse_intermediary_array(party_info, features)
+    
+    def _parse_intermediary_array(self, party_info: dict, features: IFMLFeatures):
+        """
+        Parse IntermediaryBankInf as an array to detect redundancy patterns.
+        
+        This handles the case where IntermediaryBankInf is a list of entries
+        (e.g., IBK, IB1) and detects when entries share information that
+        indicates duplicates that ACE will remove (9018) or consolidate (9024).
+        """
+        # Get intermediary data - handle both naming conventions
+        intm_data = party_info.get('IntermediaryBankInf') or party_info.get('IntermediaryBankInfo')
+        
+        if not intm_data:
+            return
+        
+        # Normalize to list
+        if isinstance(intm_data, dict):
+            intm_list = [intm_data]
+        elif isinstance(intm_data, list):
+            intm_list = intm_data
+        else:
+            return
+        
+        features.intm_count = len(intm_list)
+        features.intm_has_multiple = len(intm_list) > 1
+        
+        if len(intm_list) < 2:
+            # Single intermediary - no redundancy possible
+            return
+        
+        # Collect identifying information from each entry
+        adr_bank_ids = []
+        countries = []
+        bic_prefixes = []
+        entry_types = []
+        
+        for entry in intm_list:
+            if not isinstance(entry, dict):
+                continue
+            
+            # Get entry type (IBK, IB1, etc.)
+            entry_type = entry.get('Type')
+            if entry_type:
+                entry_types.append(entry_type)
+            
+            # Navigate to basic info - handle multiple naming conventions
+            basic = (
+                entry.get('BasicPartyInf') or 
+                entry.get('BasicPartyInfo') or
+                entry.get('BasicPartyBankInf') or
+                entry.get('BasicPartyBankInfo') or
+                entry
+            )
+            
+            if not isinstance(basic, dict):
+                continue
+            
+            # Extract AdrBankID
+            adr_id = basic.get('AdrBankID')
+            if adr_id:
+                if isinstance(adr_id, dict):
+                    adr_id = adr_id.get('text') or adr_id.get('#text') or str(adr_id)
+                adr_bank_ids.append(str(adr_id))
+            
+            # Extract country
+            country = basic.get('Country')
+            if not country:
+                # Try to get from address
+                addr_info = basic.get('AddressInf') or basic.get('AddressInfo') or []
+                if addr_info:
+                    country, _, _ = extract_country_from_address(addr_info)
+            if country:
+                countries.append(country.upper())
+            
+            # Extract BIC prefix (first 6 chars = bank + country)
+            id_info = basic.get('ID', {})
+            if isinstance(id_info, dict):
+                bic = id_info.get('text') or id_info.get('#text') or ''
+                id_type = (id_info.get('Type') or id_info.get('@Type') or '').upper()
+                
+                # Only consider BIC-type IDs
+                if id_type in ('BIC', 'S', 'SWIFT', '') and bic:
+                    # Check if it looks like a BIC
+                    if len(bic) >= 6 and bic[:4].isalpha():
+                        bic_prefixes.append(bic[:6].upper())
+            elif isinstance(id_info, str) and len(id_info) >= 6:
+                if id_info[:4].isalpha():
+                    bic_prefixes.append(id_info[:6].upper())
+        
+        # Store entry types
+        features.intm_types_present = list(set(entry_types))
+        features.intm_has_multiple_types = len(set(entry_types)) > 1
+        
+        # Detect redundancy patterns
+        # Same AdrBankID across entries = strong redundancy signal
+        if len(adr_bank_ids) >= 2:
+            features.intm_entries_share_adr_bank_id = len(set(adr_bank_ids)) < len(adr_bank_ids)
+        
+        # Same country across entries = routing redundancy
+        if len(countries) >= 2:
+            features.intm_entries_share_country = len(set(countries)) < len(countries)
+        
+        # Same BIC prefix = same bank, likely duplicate
+        if len(bic_prefixes) >= 2:
+            features.intm_entries_share_bic_prefix = len(set(bic_prefixes)) < len(bic_prefixes)
+        
+        # Composite redundancy indicator
+        # If 2+ signals match, very likely ACE will consolidate (9018/9024)
+        redundancy_signals = sum([
+            features.intm_entries_share_adr_bank_id,
+            features.intm_entries_share_country,
+            features.intm_entries_share_bic_prefix,
+        ])
+        features.intm_has_redundant_info = redundancy_signals >= 2
     
     def _parse_single_party(self, party_type: str, party_data: dict) -> PartyInfo:
         """Parse a single party's information."""
@@ -734,6 +927,17 @@ class IFMLParser:
                     party.has_bic = True
                     party.bic = party.id_value
                     party.bic_value = party.id_value
+        
+        # === COMPOUND ID ANALYSIS (for 8026, 8022) ===
+        # Detect IDs like "CUSCAU2S/AU805013" that contain multiple values
+        if party.id_value:
+            compound_info = self._analyze_compound_id(party.id_value)
+            party.id_has_slash = compound_info['has_slash']
+            party.id_is_compound = compound_info['is_compound']
+            party.id_compound_parts = compound_info['compound_parts']
+            party.id_has_bic_pattern = compound_info['has_bic_pattern']
+            party.id_has_nch_pattern = compound_info['has_nch_pattern']
+            party.id_has_bic_and_nch = compound_info['has_bic_pattern'] and compound_info['has_nch_pattern']
         
         # Check for BIC in ID type (legacy check)
         if isinstance(id_field, dict):
@@ -1185,6 +1389,14 @@ class IFMLParser:
             'has_bank_info': features.has_bank_info,
             'bank_info_count': features.bank_info_count,
             'amount_count': len(features.amounts),
+            # === INTERMEDIARY REDUNDANCY FEATURES (for 9018, 9024) ===
+            'intm_count': features.intm_count,
+            'intm_has_multiple': features.intm_has_multiple,
+            'intm_entries_share_adr_bank_id': features.intm_entries_share_adr_bank_id,
+            'intm_entries_share_country': features.intm_entries_share_country,
+            'intm_entries_share_bic_prefix': features.intm_entries_share_bic_prefix,
+            'intm_has_redundant_info': features.intm_has_redundant_info,
+            'intm_has_multiple_types': features.intm_has_multiple_types,
         }
         
         # Add party-specific features
@@ -1258,6 +1470,13 @@ class IFMLParser:
                 result[f'{prefix}_account_needs_length_fix'] = party.account_needs_length_fix
                 # IBAN formatting (9006, 9012)
                 result[f'{prefix}_iban_needs_formatting'] = party.iban_needs_formatting
+                # Compound ID features (for 8026, 8022)
+                result[f'{prefix}_id_has_slash'] = party.id_has_slash
+                result[f'{prefix}_id_is_compound'] = party.id_is_compound
+                result[f'{prefix}_id_compound_parts'] = party.id_compound_parts
+                result[f'{prefix}_id_has_bic_pattern'] = party.id_has_bic_pattern
+                result[f'{prefix}_id_has_nch_pattern'] = party.id_has_nch_pattern
+                result[f'{prefix}_id_has_bic_and_nch'] = party.id_has_bic_and_nch
             else:
                 result[f'{prefix}_present'] = False
                 result[f'{prefix}_has_id'] = False
@@ -1324,6 +1543,13 @@ class IFMLParser:
                 result[f'{prefix}_account_needs_length_fix'] = False
                 # IBAN formatting (9006, 9012)
                 result[f'{prefix}_iban_needs_formatting'] = False
+                # Compound ID features (for 8026, 8022)
+                result[f'{prefix}_id_has_slash'] = False
+                result[f'{prefix}_id_is_compound'] = False
+                result[f'{prefix}_id_compound_parts'] = 0
+                result[f'{prefix}_id_has_bic_pattern'] = False
+                result[f'{prefix}_id_has_nch_pattern'] = False
+                result[f'{prefix}_id_has_bic_and_nch'] = False
         
         return result
     
