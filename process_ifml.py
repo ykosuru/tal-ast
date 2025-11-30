@@ -26,11 +26,36 @@ PARTY_MAPPING = {
 }
 
 DIRECTORY_DEPENDENT_CODES = {
+    # These codes require directory/reference data to validate
     '8004', '8036', '8464', '8465', '8472',
-    '9004', '9005', '9007', '9008', '9013', '9024', '9476', '9477', '9479', '9480', '9961', '9970', '9985',
+    # 9xxx repair codes - depend on what ACE derives
+    '9004', '9005', '9007', '9008', '9013', '9018', '9024', 
+    '9476', '9477', '9479', '9480', '9961', '9970', '9985', '9999',
 }
 
-VALID_COUNTRIES = {'US', 'GB', 'DE', 'FR', 'FI', 'SE', 'NO', 'DK', 'NL', 'BE', 'AT', 'CH', 'IT', 'ES', 'PT', 'IE', 'AU', 'NZ', 'CA', 'JP', 'CN', 'SG', 'HK'}
+# Codes that can be BOTH static AND directory-dependent
+# We can only predict the static cases
+PARTIALLY_STATIC_CODES = {'8001', '8022', '8026', '8894'}
+
+# Full ISO 3166-1 alpha-2 country codes
+VALID_COUNTRIES = {
+    'AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AO', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AW', 'AX', 'AZ',
+    'BA', 'BB', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ', 'BL', 'BM', 'BN', 'BO', 'BQ', 'BR', 'BS',
+    'BT', 'BV', 'BW', 'BY', 'BZ', 'CA', 'CC', 'CD', 'CF', 'CG', 'CH', 'CI', 'CK', 'CL', 'CM', 'CN',
+    'CO', 'CR', 'CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DE', 'DJ', 'DK', 'DM', 'DO', 'DZ', 'EC', 'EE',
+    'EG', 'EH', 'ER', 'ES', 'ET', 'FI', 'FJ', 'FK', 'FM', 'FO', 'FR', 'GA', 'GB', 'GD', 'GE', 'GF',
+    'GG', 'GH', 'GI', 'GL', 'GM', 'GN', 'GP', 'GQ', 'GR', 'GS', 'GT', 'GU', 'GW', 'GY', 'HK', 'HM',
+    'HN', 'HR', 'HT', 'HU', 'ID', 'IE', 'IL', 'IM', 'IN', 'IO', 'IQ', 'IR', 'IS', 'IT', 'JE', 'JM',
+    'JO', 'JP', 'KE', 'KG', 'KH', 'KI', 'KM', 'KN', 'KP', 'KR', 'KW', 'KY', 'KZ', 'LA', 'LB', 'LC',
+    'LI', 'LK', 'LR', 'LS', 'LT', 'LU', 'LV', 'LY', 'MA', 'MC', 'MD', 'ME', 'MF', 'MG', 'MH', 'MK',
+    'ML', 'MM', 'MN', 'MO', 'MP', 'MQ', 'MR', 'MS', 'MT', 'MU', 'MV', 'MW', 'MX', 'MY', 'MZ', 'NA',
+    'NC', 'NE', 'NF', 'NG', 'NI', 'NL', 'NO', 'NP', 'NR', 'NU', 'NZ', 'OM', 'PA', 'PE', 'PF', 'PG',
+    'PH', 'PK', 'PL', 'PM', 'PN', 'PR', 'PS', 'PT', 'PW', 'PY', 'QA', 'RE', 'RO', 'RS', 'RU', 'RW',
+    'SA', 'SB', 'SC', 'SD', 'SE', 'SG', 'SH', 'SI', 'SJ', 'SK', 'SL', 'SM', 'SN', 'SO', 'SR', 'SS',
+    'ST', 'SV', 'SX', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK', 'TL', 'TM', 'TN', 'TO',
+    'TR', 'TT', 'TV', 'TW', 'TZ', 'UA', 'UG', 'UM', 'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI',
+    'VN', 'VU', 'WF', 'WS', 'XK', 'YE', 'YT', 'ZA', 'ZM', 'ZW'
+}
 
 INCLUDE_DIRECTORY = False
 
@@ -81,16 +106,33 @@ def looks_like_iban(s: str) -> bool:
     s = s.upper().replace(' ', '')
     return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', s))
 
-def looks_like_nch(s: str) -> str:
+def looks_like_nch(s: str, explicit_type: str = '') -> str:
+    """
+    Determine NCH type.
+    Only return BSB/SORTCODE if explicitly typed - length alone is unreliable.
+    """
     if not s:
         return ''
     s = s.strip()
+    
+    # If explicit type provided, use it
+    if explicit_type:
+        t = explicit_type.upper()
+        if t in ('FEDABA', 'FW', 'FEDWIRE', 'ABA'):
+            return 'FEDABA'
+        if t in ('CHIPS', 'CH', 'CHIPSUID'):
+            return 'CHIPS'
+        if t in ('SORTCODE', 'SC', 'SORT'):
+            return 'SORTCODE'
+        if t in ('BSB',):
+            return 'BSB'
+        return t
+    
+    # Without explicit type, only detect FEDABA (9-digit US routing)
     if len(s) == 9 and s.isdigit():
         return 'FEDABA'
-    if len(s) == 6 and s.isdigit():
-        return 'CHIPS_OR_SORT'
-    if len(s) == 3 and s.isdigit():
-        return 'BSB'
+    
+    # For other numeric codes, don't assume type
     return ''
 
 class FeatureExtractor:
@@ -278,17 +320,19 @@ class FeatureExtractor:
         
         # === Extract AdrBankID (NCH) ===
         adr_bank_id = basic.get('AdrBankID')
+        nch_explicit_type = ''
         if self.debug:
             print(f"[DEBUG]   AdrBankID: {type(adr_bank_id).__name__} = {adr_bank_id}")
         
         if adr_bank_id:
             if isinstance(adr_bank_id, dict):
                 nch = adr_bank_id.get('text') or adr_bank_id.get('#text') or ''
+                nch_explicit_type = adr_bank_id.get('Type') or adr_bank_id.get('@Type') or ''
             else:
                 nch = str(adr_bank_id)
             self.features[f'{prefix}_has_adr_bank_id'] = True
             if self.debug:
-                print(f"[DEBUG]   -> NCH value: {nch}")
+                print(f"[DEBUG]   -> NCH value: {nch}, explicit_type: {nch_explicit_type}")
         
         # === Store extracted values ===
         if bic:
@@ -316,7 +360,7 @@ class FeatureExtractor:
         if nch:
             self.features[f'{prefix}_has_nch'] = True
             self.features[f'{prefix}_nch'] = nch
-            nch_type = looks_like_nch(nch)
+            nch_type = looks_like_nch(nch, nch_explicit_type)
             self.features[f'{prefix}_nch_type'] = nch_type
             if self.debug:
                 print(f"[DEBUG]   NCH stored: {nch}, type={nch_type}")
@@ -442,18 +486,8 @@ class RuleEngine:
             elif not self._get(p, 'iban_checksum_valid', True):
                 if self.debug: print(f"[RULES]   -> EMIT 8894 (checksum)")
                 self._emit('8894')
-            else:
-                # IBAN bank code vs NCH
-                iban = self._get(p, 'iban', '')
-                nch = self._get(p, 'nch', '')
-                if self.debug: print(f"[RULES]   iban={iban}, nch={nch}")
-                
-                if iban and nch and len(iban) >= 7 and len(nch) == 3:
-                    iban_bank = iban[4:7]
-                    if self.debug: print(f"[RULES]   iban_bank_code={iban_bank}, nch={nch}")
-                    if iban_bank != nch:
-                        if self.debug: print(f"[RULES]   -> EMIT 8894 (IBAN bank != NCH)")
-                        self._emit('8894')
+            # Note: IBAN bank code vs NCH comparison removed - requires directory lookup
+            # to know if they should match. This is directory-dependent validation.
 
 def extract_actual_codes(response: Dict, include_dir: bool = False) -> Set[str]:
     codes = set()
