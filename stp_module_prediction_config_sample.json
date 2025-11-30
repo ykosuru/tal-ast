@@ -1,8 +1,17 @@
 {
-  "_comment": "Prediction configuration - copy to each model directory as prediction_config.json",
+  "_comment": "Prediction configuration for ACE Pelican error code model",
   
   "negative_margin": 0.1,
-  "suppressed_codes": [],
+  
+  "suppressed_codes": [
+    "9999",
+    "9490"
+  ],
+  
+  "_suppression_notes": {
+    "9999": "Generic field repair - manual intervention, not predictable from message structure",
+    "9490": "Fee code updated - requires fee directory lookup, not predictable from message alone"
+  },
   
   "high_threshold_codes": {
     "_comment_8xxx": "Validation errors - higher threshold for codes prone to false positives",
@@ -11,19 +20,39 @@
     "8894": 0.70,
     "8895": 0.70,
     
-    "_comment_9xxx": "Repair codes - higher threshold for directory-dependent codes",
+    "_comment_9xxx": "Repair codes - higher threshold for directory-dependent or complex codes",
     "9004": 0.70,
     "9005": 0.70,
     "9007": 0.70,
     "9008": 0.70,
-    "9024": 0.75,
+    "9018": 0.65,
+    "9024": 0.70,
     "9477": 0.70,
     "9479": 0.80,
-    "9480": 0.75,
-    "9999": 0.80
+    "9480": 0.75
   },
   
   "apply_precondition_filter": true,
   "apply_semantic_filter": true,
-  "apply_exclusion_filter": true
+  "apply_exclusion_filter": true,
+  
+  "_feature_notes": {
+    "9018_features": [
+      "intm_has_multiple - multiple IntermediaryBankInf entries exist",
+      "intm_entries_share_adr_bank_id - entries share same AdrBankID (strong signal)",
+      "intm_entries_share_country - entries share same country", 
+      "intm_entries_share_bic_prefix - entries have similar BIC (same bank)",
+      "intm_has_redundant_info - composite: 2+ of above signals true"
+    ],
+    "9024_features": [
+      "intm_present - at least one intermediary exists",
+      "intm_has_redundant_info - redundancy suggests consolidation needed",
+      "intm_has_multiple_types - different Type values (IBK, IB1) present"
+    ],
+    "8026_features": [
+      "has_nch - NCH/routing code present",
+      "id_has_bic_and_nch - compound ID contains both BIC and NCH patterns",
+      "nch_sources > 1 - multiple NCH sources could conflict"
+    ]
+  }
 }
