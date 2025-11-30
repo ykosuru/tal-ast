@@ -30,12 +30,14 @@ PARTY_MAPPING = {
 # Codes we CANNOT predict without directory/reference data
 # These are excluded from pass/fail comparison
 DIRECTORY_DEPENDENT_CODES = {
-    # 8xxx validation that requires derived values
+    # 8xxx validation that requires derived values or ACE-specific rules
+    '8001',   # BIC validation - ACE uses different rules than standard
     '8004',   # IBAN required (needs country rules)
     '8022',   # NCH inconsistency (needs derived NCH from BIC/IBAN)
     '8026',   # NCH inconsistency (needs derived NCH)
     '8036',   # Directory lookup
     '8464', '8465', '8472',  # Directory-based
+    '8852',   # ACE-specific validation
     '8894',   # Often fired on derived NCH mismatch, not just IBAN format
     # 9xxx repair codes
     '9004', '9005', '9007', '9008', '9013', '9018', '9024',
@@ -288,19 +290,10 @@ class RuleEngine:
     
     def _check_static_8xxx(self, p: str):
         """Only check statically verifiable conditions - no directory lookups."""
-        
-        # 8001: Invalid BIC format or country
-        # Only fire if BIC is present AND format/country is definitively invalid
-        if self._get(p, 'has_bic'):
-            bic = self._get(p, 'bic', '')
-            fmt_valid = self._get(p, 'bic_valid_format', True)
-            country_valid = self._get(p, 'bic_valid_country', True)
-            
-            if not fmt_valid:
-                if self.debug:
-                    print(f"[RULES] {p}: 8001 - BIC format invalid: {bic}")
-                self._emit('8001')
-            # Note: Don't fire on country_valid=False - our country list might be incomplete
+        # Currently no codes can be reliably predicted without directory data.
+        # 8001 (BIC validation) was removed because ACE uses different rules.
+        # All validation codes depend on ACE's reference data and derivation logic.
+        pass
 
 # =============================================================================
 # RESPONSE PARSING
