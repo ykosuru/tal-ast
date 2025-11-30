@@ -12,8 +12,13 @@ from pathlib import Path
 from predictor import ACEPredictor
 
 
-def extract_codes_from_response(response: dict) -> set:
-    """Extract base codes from response."""
+def extract_codes_from_response(response: dict, composite: bool = True) -> set:
+    """Extract codes from response.
+    
+    Args:
+        response: ACE response dict
+        composite: If True, extract composite codes (8895_BNFBNK), else base codes (8895)
+    """
     codes = set()
     
     def find_codes(obj):
@@ -21,7 +26,28 @@ def extract_codes_from_response(response: dict) -> set:
             if 'Code' in obj:
                 code = obj['Code']
                 if code:
-                    codes.add(str(code).split('_')[0])
+                    code_str = str(code).split('_')[0]  # Base code
+                    
+                    if composite:
+                        # Extract party from InformationalData (e.g., "BNFBNK NCH code...")
+                        info_data = obj.get('InformationalData', '')
+                        if info_data:
+                            # Party is usually first word
+                            parts = str(info_data).split()
+                            if parts:
+                                party = parts[0].upper()
+                                # Only add party suffix if it looks like a party code
+                                if party in ['BNFBNK', 'CDTPTY', 'BNPPTY', 'DBTPTY', 'INTMBNK', 
+                                            'ORGPTY', 'SNDBNK', 'CDTBNK', 'DBTBNK']:
+                                    codes.add(f"{code_str}_{party}")
+                                else:
+                                    codes.add(code_str)  # No party found, use base
+                            else:
+                                codes.add(code_str)
+                        else:
+                            codes.add(code_str)
+                    else:
+                        codes.add(code_str)
             
             if 'MsgStatus' in obj:
                 status = obj['MsgStatus']
@@ -48,6 +74,7 @@ def main():
     parser.add_argument('--test-dir', required=True, help='Test data directory')
     parser.add_argument('--threshold', type=float, default=0.5, help='Threshold')
     parser.add_argument('--series', default=None, help='Code series (e.g., 8 for 8XXX)')
+    parser.add_argument('--composite', action='store_true', help='Compare composite codes (8895_BNFBNK) instead of base codes')
     
     args = parser.parse_args()
     
@@ -58,7 +85,8 @@ def main():
     # Find test files
     test_path = Path(args.test_dir)
     test_files = sorted(test_path.glob('*.json'))
-    print(f"Found {len(test_files)} test files\n")
+    print(f"Found {len(test_files)} test files")
+    print(f"Composite mode: {args.composite}\n")
     
     success_count = 0
     fail_count = 0
@@ -82,16 +110,25 @@ def main():
             # Get actual codes
             actual_codes = set()
             if response:
-                actual_codes = extract_codes_from_response(response)
+                actual_codes = extract_codes_from_response(response, composite=args.composite)
                 if args.series:
-                    actual_codes = {c for c in actual_codes if c.startswith(args.series)}
+                    actual_codes = {c for c in actual_codes if c.split('_')[0].startswith(args.series)}
             
             # Predict
             try:
-                result = predictor.predict(request, threshold=args.threshold, include_explanation=False)
-                predicted_codes = {c.split('_')[0] for c in result.predicted_codes}
+                result = predictor.predict(request, threshold=args.threshold, 
+                                          include_explanation=False,
+                                          composite_only=args.composite)
+                
+                if args.composite:
+                    # Keep composite codes as-is
+                    predicted_codes = set(result.predicted_codes)
+                else:
+                    # Convert to base codes for comparison
+                    predicted_codes = {c.split('_')[0] for c in result.predicted_codes}
+                
                 if args.series:
-                    predicted_codes = {c for c in predicted_codes if c.startswith(args.series)}
+                    predicted_codes = {c for c in predicted_codes if c.split('_')[0].startswith(args.series)}
             except Exception as e:
                 fail_count += 1
                 total_count += 1
