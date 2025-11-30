@@ -1,0 +1,157 @@
+{
+  "_comment": "Precondition rules for ACE Pelican error codes",
+  "_logic": "require_true: ALL must be True. require_false: at least ONE must be False (validation failed)",
+
+  "_section": "8XXX VALIDATION ERRORS",
+
+  "8001": {
+    "require_true": ["has_bic"],
+    "require_false": ["bic_valid_format", "bic_valid_country"],
+    "description": "Invalid BIC - BIC present but format/country invalid"
+  },
+  "8004": {
+    "require_true": ["needs_iban"],
+    "require_false": ["has_iban"],
+    "description": "IBAN cannot be derived - IBAN required but missing"
+  },
+  "8022": {
+    "require_true": ["has_iban", "has_bic"],
+    "require_false": ["bic_iban_match"],
+    "description": "IBAN inconsistent with BIC - countries do not match"
+  },
+  "8023": {
+    "require_true": ["has_iban"],
+    "require_false": [],
+    "description": "IBAN inconsistency - requires IBAN present"
+  },
+  "8026": {
+    "require_true": ["has_nch"],
+    "require_false": [],
+    "description": "NCH inconsistency - multiple NCH values inconsistent. Compound IDs (id_has_bic_and_nch) increase likelihood."
+  },
+  "8030": {
+    "require_true": ["needs_iban"],
+    "require_false": ["has_iban"],
+    "description": "IBAN derivation not supported for country"
+  },
+  "8852": {
+    "require_true": ["has_account"],
+    "require_false": [],
+    "description": "Incorrect length of attribute"
+  },
+  "8892": {
+    "require_true": ["has_account"],
+    "require_false": ["account_valid"],
+    "description": "Invalid account number format"
+  },
+  "8894": {
+    "require_true": ["has_iban"],
+    "require_false": ["iban_valid_format", "iban_checksum_valid"],
+    "description": "Invalid IBAN - format or checksum invalid"
+  },
+  "8895": {
+    "require_true": ["has_nch"],
+    "require_false": ["nch_valid", "fedaba_checksum_valid"],
+    "description": "Invalid NCH code - routing number invalid"
+  },
+  "8896": {
+    "require_true": ["has_account"],
+    "require_false": ["account_valid"],
+    "description": "Invalid domestic account number"
+  },
+  "8897": {
+    "require_true": ["has_account"],
+    "require_false": [],
+    "description": "Invalid BBAN"
+  },
+  "8898": {
+    "require_true": ["has_iban"],
+    "require_false": ["iban_checksum_valid"],
+    "description": "IBAN check digit failed"
+  },
+
+  "_section_9xxx": "9XXX REPAIR/ENRICHMENT CODES",
+
+  "9002": {
+    "require_true": ["present", "has_account"],
+    "require_false": [],
+    "description": "Account cleaned"
+  },
+  "9004": {
+    "require_true": ["present", "needs_iban"],
+    "require_false": ["has_iban"],
+    "description": "IBAN derived for credit party - party present, needs IBAN, doesn't have one"
+  },
+  "9005": {
+    "require_true": ["present", "has_nch"],
+    "require_false": ["has_bic"],
+    "description": "BIC derived from NCH - party present with NCH but no BIC"
+  },
+  "9006": {
+    "require_true": ["present", "has_iban"],
+    "require_false": [],
+    "description": "IBAN formatted - party present with IBAN"
+  },
+  "9007": {
+    "require_true": ["present", "needs_iban"],
+    "require_false": ["has_iban"],
+    "description": "IBAN derived for beneficiary - party present, needs IBAN, doesn't have one"
+  },
+  "9008": {
+    "require_true": ["present", "has_iban"],
+    "require_false": ["has_bic"],
+    "description": "BIC derived from IBAN - party present with IBAN but no BIC"
+  },
+  "9015": {
+    "require_true": ["present", "has_name"],
+    "require_false": [],
+    "description": "Name cleaned - party present with name"
+  },
+  "9018": {
+    "require_true": ["intm_has_multiple", "intm_has_redundant_info"],
+    "require_false": [],
+    "description": "Duplicate party information removed - requires multiple intermediary entries with shared AdrBankID, country, or BIC prefix indicating redundancy",
+    "global_feature": true
+  },
+  "9019": {
+    "require_true": ["present", "any_id_needs_cleaning"],
+    "require_false": [],
+    "description": "Party identifier cleaned - ID/IBAN contains non-alphanumeric chars (spaces, dashes, etc.)"
+  },
+  "9021": {
+    "require_true": ["present", "has_nch"],
+    "require_false": [],
+    "description": "NCH formatted - party present with NCH"
+  },
+  "9024": {
+    "require_true": ["intm_present"],
+    "require_false": [],
+    "description": "Push Up performed - intermediary present, typically with redundancy that requires consolidation. intm_has_redundant_info increases likelihood.",
+    "global_feature": true
+  },
+  "9025": {
+    "require_true": ["present", "has_account"],
+    "require_false": [],
+    "description": "Account length fixed - party present with account"
+  },
+  "9477": {
+    "require_true": ["present", "has_bic"],
+    "require_false": [],
+    "description": "BIC enriched 8->11 chars - party present with BIC"
+  },
+  "9479": {
+    "require_true": ["present", "has_bic"],
+    "require_false": [],
+    "description": "Party enriched from BIC directory - party present with BIC"
+  },
+  "9480": {
+    "require_true": ["present", "has_bic"],
+    "require_false": [],
+    "description": "Credit party enriched - party present with BIC"
+  },
+
+  "_section_suppress": "CODES TO SUPPRESS (unpredictable or directory-dependent)",
+  
+  "_note_9490": "9490 (Fee Code Updated) requires directory lookup - cannot predict from message alone",
+  "_note_9999": "9999 (Field Repair) is generic catch-all for manual/misc repairs - not predictable"
+}
