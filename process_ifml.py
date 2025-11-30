@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-ACE Pelican IFML Verification Tool.
-Uses enhanced parser that handles all ID type variations.
+ACE Pelican IFML Verification Tool - Debug Version
 """
 
 import json
@@ -21,7 +20,7 @@ PARTY_MAPPING = {
     'CreditPartyInf': 'cdt', 'CreditPartyInfo': 'cdt',
     'IntermediaryBankInf': 'intm', 'IntermediaryBankInfo': 'intm',
     'BeneficiaryBankInf': 'bnf', 'BeneficiaryBankInfo': 'bnf',
-    'BeneficiaryPartyInf': 'bnf',  # Both map to bnf
+    'BeneficiaryPartyInf': 'bnf',
     'AccountWithInstitution': 'acwi',
     'OrderingInstitution': 'ordi',
 }
@@ -42,18 +41,12 @@ class VerificationResult:
     actual: Set[str]
     passed: bool = field(init=False)
     directory_codes: Set[str] = field(default_factory=set)
-    directory_eligible: List[Tuple[str, str, str]] = field(default_factory=list)
     features: Dict = field(default_factory=dict)
     
     def __post_init__(self):
         self.passed = self.predicted == self.actual
 
-# =============================================================================
-# VALIDATION FUNCTIONS
-# =============================================================================
-
 def is_valid_bic(s: str) -> Tuple[bool, bool]:
-    """Check if string is valid BIC. Returns (format_valid, country_valid)."""
     if not s or len(s) not in (8, 11):
         return False, False
     s = s.upper()
@@ -63,7 +56,6 @@ def is_valid_bic(s: str) -> Tuple[bool, bool]:
     return True, country in VALID_COUNTRIES
 
 def is_valid_iban(s: str) -> Tuple[bool, bool]:
-    """Check if string is valid IBAN. Returns (format_valid, checksum_valid)."""
     if not s or len(s) < 5:
         return False, False
     s = s.upper().replace(' ', '').replace('-', '')
@@ -71,7 +63,6 @@ def is_valid_iban(s: str) -> Tuple[bool, bool]:
         return False, False
     if len(s) < 15 or len(s) > 34:
         return False, False
-    # Checksum
     try:
         rearranged = s[4:] + s[:4]
         numeric = ''.join(str(ord(c) - ord('A') + 10) if c.isalpha() else c for c in rearranged)
@@ -80,20 +71,17 @@ def is_valid_iban(s: str) -> Tuple[bool, bool]:
         return True, False
 
 def looks_like_bic(s: str) -> bool:
-    """Quick check if string looks like a BIC."""
     if not s or len(s) not in (8, 11):
         return False
     return bool(re.match(r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2,5}$', s.upper()))
 
 def looks_like_iban(s: str) -> bool:
-    """Quick check if string looks like an IBAN."""
     if not s or len(s) < 15:
         return False
     s = s.upper().replace(' ', '')
     return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', s))
 
 def looks_like_nch(s: str) -> str:
-    """Check what type of NCH this looks like. Returns type or empty string."""
     if not s:
         return ''
     s = s.strip()
@@ -102,12 +90,8 @@ def looks_like_nch(s: str) -> str:
     if len(s) == 6 and s.isdigit():
         return 'CHIPS_OR_SORT'
     if len(s) == 3 and s.isdigit():
-        return 'BSB'  # Australian BSB or Finnish bank code
+        return 'BSB'
     return ''
-
-# =============================================================================
-# FEATURE EXTRACTOR
-# =============================================================================
 
 class FeatureExtractor:
     def __init__(self, debug: bool = False):
@@ -117,21 +101,44 @@ class FeatureExtractor:
     def extract(self, data: Dict) -> Dict:
         self.features = {}
         
+        if self.debug:
+            print(f"\n[DEBUG] === STARTING EXTRACTION ===")
+            print(f"[DEBUG] Top-level keys: {list(data.keys())[:10]}")
+        
         # Navigate to Message
         message = self._find_message(data)
         if not message:
             if self.debug:
-                print("  [EXTRACT] No message found!")
+                print("[DEBUG] ERROR: No message found!")
             return self.features
         
-        # Get PartyInf - check both Message level and BasicPayment level
-        party_inf = message.get('PartyInf') or message.get('PartyInfo') or {}
+        if self.debug:
+            print(f"[DEBUG] Message keys: {list(message.keys())[:10]}")
+        
+        # Get PartyInf - check multiple locations
+        party_inf = None
+        
+        # Location 1: Message.PartyInf
+        party_inf = message.get('PartyInf') or message.get('PartyInfo')
+        if self.debug:
+            print(f"[DEBUG] Message.PartyInf: {type(party_inf).__name__} -> {list(party_inf.keys()) if isinstance(party_inf, dict) else 'NOT FOUND'}")
+        
+        # Location 2: Message.BasicPayment.PartyInf
         if not party_inf:
             bp = message.get('BasicPayment', {})
-            party_inf = bp.get('PartyInf') or bp.get('PartyInfo') or {}
+            if self.debug:
+                print(f"[DEBUG] BasicPayment keys: {list(bp.keys()) if isinstance(bp, dict) else 'NOT DICT'}")
+            party_inf = bp.get('PartyInf') or bp.get('PartyInfo')
+            if self.debug:
+                print(f"[DEBUG] BasicPayment.PartyInf: {type(party_inf).__name__} -> {list(party_inf.keys()) if isinstance(party_inf, dict) else 'NOT FOUND'}")
+        
+        if not party_inf or not isinstance(party_inf, dict):
+            if self.debug:
+                print("[DEBUG] ERROR: No PartyInf found!")
+            return self.features
         
         if self.debug:
-            print(f"  [EXTRACT] PartyInf keys: {list(party_inf.keys()) if party_inf else 'EMPTY'}")
+            print(f"[DEBUG] PartyInf keys: {list(party_inf.keys())}")
         
         # Process each party
         processed = set()
@@ -139,14 +146,20 @@ class FeatureExtractor:
             party_data = party_inf.get(ifml_name)
             if party_data:
                 if self.debug:
-                    print(f"  [EXTRACT] Processing {ifml_name} -> {prefix}")
+                    print(f"\n[DEBUG] Found {ifml_name} -> {prefix}")
+                    print(f"[DEBUG]   Type: {type(party_data).__name__}")
+                    if isinstance(party_data, dict):
+                        print(f"[DEBUG]   Keys: {list(party_data.keys())}")
+                
                 if prefix in processed:
+                    if self.debug:
+                        print(f"[DEBUG]   Merging into existing {prefix}")
                     self._merge_party(party_data, prefix)
                 else:
                     self._extract_party(party_data, prefix)
                     processed.add(prefix)
         
-        # Set defaults for missing parties
+        # Set defaults
         for prefix in PARTY_PREFIXES:
             if f'{prefix}_present' not in self.features:
                 self.features[f'{prefix}_present'] = False
@@ -154,7 +167,6 @@ class FeatureExtractor:
         return self.features
     
     def _find_message(self, data: Dict) -> Optional[Dict]:
-        """Navigate to Message node."""
         paths = [
             ['Request', 'IFML', 'File', 'Message'],
             ['IFML', 'File', 'Message'],
@@ -162,36 +174,59 @@ class FeatureExtractor:
             ['Message'],
         ]
         for path in paths:
+            if self.debug:
+                print(f"[DEBUG] Trying path: {path}")
             current = data
             for key in path:
                 if isinstance(current, dict):
                     current = current.get(key)
+                    if self.debug and current:
+                        print(f"[DEBUG]   Found '{key}': {type(current).__name__}")
                 else:
                     current = None
                     break
             if current and isinstance(current, dict):
+                if self.debug:
+                    print(f"[DEBUG] SUCCESS: Found Message via {path}")
                 return current
-        return data if isinstance(data, dict) and 'PartyInf' in data else None
+        
+        # Fallback: check if data itself has PartyInf
+        if isinstance(data, dict) and ('PartyInf' in data or 'PartyInfo' in data):
+            if self.debug:
+                print("[DEBUG] Using data itself as Message (has PartyInf)")
+            return data
+        
+        return None
     
     def _extract_party(self, party_data: Dict, prefix: str):
-        """Extract features from a party."""
         if isinstance(party_data, list):
+            if self.debug:
+                print(f"[DEBUG]   Party is LIST with {len(party_data)} items, using first")
             party_data = party_data[0] if party_data else {}
         
         self.features[f'{prefix}_present'] = True
         
-        # Get BasicPartyInf or AccountPartyInf
+        # Get BasicPartyInf
         basic = party_data.get('BasicPartyInf') or party_data.get('BasicPartyInfo') or {}
         account = party_data.get('AccountPartyInf') or party_data.get('AccountPartyInfo') or {}
+        
+        if self.debug:
+            print(f"[DEBUG]   BasicPartyInf: {type(basic).__name__} -> {list(basic.keys()) if isinstance(basic, dict) else 'NOT DICT'}")
+        
         if not basic and account:
             basic = account.get('BasicPartyInf', account)
         
         if isinstance(basic, list):
+            if self.debug:
+                print(f"[DEBUG]   BasicPartyInf is LIST, using first")
             basic = basic[0] if basic else {}
         
-        # Extract ID
+        # === Extract ID ===
         id_field = basic.get('ID')
         bic, iban, nch, account_num = None, None, None, None
+        
+        if self.debug:
+            print(f"[DEBUG]   ID field: {type(id_field).__name__} = {id_field}")
         
         if id_field:
             self.features[f'{prefix}_has_id'] = True
@@ -199,56 +234,63 @@ class FeatureExtractor:
                 id_type = id_field.get('Type') or id_field.get('@Type') or ''
                 id_text = id_field.get('text') or id_field.get('#text') or ''
                 
-                # Type-based detection
+                if self.debug:
+                    print(f"[DEBUG]   ID Type: '{id_type}', Text: '{id_text}'")
+                
                 if id_type.upper() in ('S', 'SWIFT', 'BIC'):
                     bic = id_text
+                    if self.debug:
+                        print(f"[DEBUG]   -> Detected as BIC: {bic}")
                 elif id_type.upper() == 'IBAN':
                     iban = id_text
+                    if self.debug:
+                        print(f"[DEBUG]   -> Detected as IBAN: {iban}")
                 else:
-                    # Auto-detect
                     if looks_like_bic(id_text):
                         bic = id_text
+                        if self.debug:
+                            print(f"[DEBUG]   -> Auto-detected as BIC: {bic}")
                     elif looks_like_iban(id_text):
                         iban = id_text
+                        if self.debug:
+                            print(f"[DEBUG]   -> Auto-detected as IBAN: {iban}")
                     else:
                         account_num = id_text
+                        if self.debug:
+                            print(f"[DEBUG]   -> Stored as account: {account_num}")
             else:
-                # Plain string - auto-detect
                 id_text = str(id_field)
+                if self.debug:
+                    print(f"[DEBUG]   ID is plain string: '{id_text}'")
+                
                 if looks_like_iban(id_text):
                     iban = id_text
+                    if self.debug:
+                        print(f"[DEBUG]   -> Auto-detected as IBAN: {iban}")
                 elif looks_like_bic(id_text):
                     bic = id_text
+                    if self.debug:
+                        print(f"[DEBUG]   -> Auto-detected as BIC: {bic}")
                 else:
                     account_num = id_text
+                    if self.debug:
+                        print(f"[DEBUG]   -> Stored as account: {account_num}")
         
-        # Extract AdrBankID (NCH)
+        # === Extract AdrBankID (NCH) ===
         adr_bank_id = basic.get('AdrBankID')
+        if self.debug:
+            print(f"[DEBUG]   AdrBankID: {type(adr_bank_id).__name__} = {adr_bank_id}")
+        
         if adr_bank_id:
             if isinstance(adr_bank_id, dict):
                 nch = adr_bank_id.get('text') or adr_bank_id.get('#text') or ''
             else:
                 nch = str(adr_bank_id)
             self.features[f'{prefix}_has_adr_bank_id'] = True
+            if self.debug:
+                print(f"[DEBUG]   -> NCH value: {nch}")
         
-        # Also check AcctIDInf for IDs
-        acct_id_inf = basic.get('AcctIDInf') or account.get('AcctIDInf') or {}
-        if acct_id_inf:
-            acct_id = acct_id_inf.get('ID')
-            if acct_id:
-                if isinstance(acct_id, dict):
-                    acct_type = acct_id.get('Type') or ''
-                    acct_text = acct_id.get('text') or ''
-                    if acct_type.upper() == 'IBAN' or looks_like_iban(acct_text):
-                        iban = iban or acct_text
-                    else:
-                        account_num = account_num or acct_text
-                elif looks_like_iban(str(acct_id)):
-                    iban = iban or str(acct_id)
-                else:
-                    account_num = account_num or str(acct_id)
-        
-        # Store extracted values
+        # === Store extracted values ===
         if bic:
             self.features[f'{prefix}_has_bic'] = True
             self.features[f'{prefix}_bic'] = bic
@@ -257,6 +299,8 @@ class FeatureExtractor:
             self.features[f'{prefix}_bic_valid_country'] = ctry
             if len(bic) >= 6:
                 self.features[f'{prefix}_bic_country'] = bic[4:6].upper()
+            if self.debug:
+                print(f"[DEBUG]   BIC stored: {bic}, country={self.features.get(f'{prefix}_bic_country')}")
         
         if iban:
             self.features[f'{prefix}_has_iban'] = True
@@ -266,22 +310,28 @@ class FeatureExtractor:
             self.features[f'{prefix}_iban_checksum_valid'] = cksum
             if len(iban) >= 2:
                 self.features[f'{prefix}_iban_country'] = iban[:2].upper()
+            if self.debug:
+                print(f"[DEBUG]   IBAN stored: {iban}, country={self.features.get(f'{prefix}_iban_country')}")
         
         if nch:
             self.features[f'{prefix}_has_nch'] = True
             self.features[f'{prefix}_nch'] = nch
             nch_type = looks_like_nch(nch)
             self.features[f'{prefix}_nch_type'] = nch_type
+            if self.debug:
+                print(f"[DEBUG]   NCH stored: {nch}, type={nch_type}")
         
         if account_num:
             self.features[f'{prefix}_has_account'] = True
             self.features[f'{prefix}_account'] = account_num
         
-        # BIC/IBAN country match
+        # BIC/IBAN match
         bic_country = self.features.get(f'{prefix}_bic_country')
         iban_country = self.features.get(f'{prefix}_iban_country')
         if bic_country and iban_country:
             self.features[f'{prefix}_bic_iban_match'] = (bic_country == iban_country)
+            if self.debug:
+                print(f"[DEBUG]   BIC/IBAN match: {bic_country} == {iban_country} -> {self.features[f'{prefix}_bic_iban_match']}")
         
         # Country
         country = party_data.get('MailingCountry') or party_data.get('Country') or basic.get('Country') or ''
@@ -289,7 +339,6 @@ class FeatureExtractor:
             self.features[f'{prefix}_country'] = country
     
     def _merge_party(self, party_data: Dict, prefix: str):
-        """Merge additional party data (e.g., BeneficiaryPartyInf into bnf)."""
         if isinstance(party_data, list):
             party_data = party_data[0] if party_data else {}
         
@@ -297,8 +346,10 @@ class FeatureExtractor:
         if isinstance(basic, list):
             basic = basic[0] if basic else {}
         
-        # Extract ID and merge if not already present
         id_field = basic.get('ID')
+        if self.debug:
+            print(f"[DEBUG]   Merge - ID field: {type(id_field).__name__} = {id_field}")
+        
         if id_field and not self.features.get(f'{prefix}_has_iban'):
             if isinstance(id_field, dict):
                 id_text = id_field.get('text') or id_field.get('#text') or ''
@@ -314,21 +365,19 @@ class FeatureExtractor:
                 if len(id_text) >= 2:
                     self.features[f'{prefix}_iban_country'] = id_text[:2].upper()
                 
-                # Update BIC/IBAN match
+                if self.debug:
+                    print(f"[DEBUG]   Merged IBAN: {id_text}")
+                
+                # Update match
                 bic_country = self.features.get(f'{prefix}_bic_country')
                 iban_country = self.features.get(f'{prefix}_iban_country')
                 if bic_country and iban_country:
                     self.features[f'{prefix}_bic_iban_match'] = (bic_country == iban_country)
 
-# =============================================================================
-# RULE ENGINE
-# =============================================================================
-
 class RuleEngine:
     def __init__(self, features: Dict, debug: bool = False):
         self.f = features
         self.codes = set()
-        self.directory_eligible = []
         self.debug = debug
     
     def predict(self) -> Set[str]:
@@ -336,9 +385,6 @@ class RuleEngine:
         for prefix in PARTY_PREFIXES:
             if self.f.get(f'{prefix}_present'):
                 self._check_8xxx(prefix)
-                self._check_9xxx(prefix)
-                if INCLUDE_DIRECTORY:
-                    self._check_directory(prefix)
         return self.codes
     
     def _get(self, prefix: str, key: str, default=None):
@@ -348,84 +394,72 @@ class RuleEngine:
         self.codes.add(code)
     
     def _check_8xxx(self, p: str):
+        if self.debug:
+            print(f"\n[RULES] Checking {p}:")
+            print(f"[RULES]   has_bic={self._get(p, 'has_bic')}, has_iban={self._get(p, 'has_iban')}, has_nch={self._get(p, 'has_nch')}")
+        
         # 8001: Invalid BIC
         if self._get(p, 'has_bic'):
             if not self._get(p, 'bic_valid_format', True):
-                if self.debug: print(f"  [8001 {p}] bic_valid_format=False")
+                if self.debug: print(f"[RULES]   8001: bic_valid_format=False")
                 self._emit('8001')
             elif not self._get(p, 'bic_valid_country', True):
-                if self.debug: print(f"  [8001 {p}] bic_valid_country=False")
+                if self.debug: print(f"[RULES]   8001: bic_valid_country=False")
                 self._emit('8001')
         
-        # 8022: BIC/IBAN country mismatch
+        # 8022: BIC/IBAN mismatch
         if self._get(p, 'has_bic') and self._get(p, 'has_iban'):
-            if self._get(p, 'bic_iban_match') == False:
-                if self.debug: print(f"  [8022 {p}] bic_iban_match=False")
+            match = self._get(p, 'bic_iban_match')
+            if self.debug: print(f"[RULES]   bic_iban_match={match}")
+            if match == False:
+                if self.debug: print(f"[RULES]   -> EMIT 8022")
                 self._emit('8022')
         
-        # 8022/8026: BIC vs NCH type mismatch
+        # 8022/8026: BIC vs NCH type
         if self._get(p, 'has_bic') and self._get(p, 'has_nch'):
             bic_country = self._get(p, 'bic_country', '')
             nch_type = self._get(p, 'nch_type', '')
-            if self.debug: print(f"  [8022/8026 {p}] bic_country={bic_country}, nch_type={nch_type}")
+            if self.debug: print(f"[RULES]   bic_country={bic_country}, nch_type={nch_type}")
             
             if nch_type == 'FEDABA' and bic_country and bic_country != 'US':
-                if self.debug: print(f"  [8022 {p}] FEDABA with non-US BIC")
+                if self.debug: print(f"[RULES]   -> EMIT 8022, 8026 (FEDABA + non-US BIC)")
                 self._emit('8022')
                 self._emit('8026')
             elif nch_type == 'BSB' and bic_country and bic_country != 'AU':
-                if self.debug: print(f"  [8022 {p}] BSB with non-AU BIC ({bic_country})")
+                if self.debug: print(f"[RULES]   -> EMIT 8022, 8026 (BSB + non-AU BIC: {bic_country})")
                 self._emit('8022')
                 self._emit('8026')
         
         # 8894: Invalid IBAN
         if self._get(p, 'has_iban'):
+            if self.debug:
+                print(f"[RULES]   iban_valid_format={self._get(p, 'iban_valid_format', True)}")
+                print(f"[RULES]   iban_checksum_valid={self._get(p, 'iban_checksum_valid', True)}")
+            
             if not self._get(p, 'iban_valid_format', True):
-                if self.debug: print(f"  [8894 {p}] iban_valid_format=False")
+                if self.debug: print(f"[RULES]   -> EMIT 8894 (format)")
                 self._emit('8894')
             elif not self._get(p, 'iban_checksum_valid', True):
-                if self.debug: print(f"  [8894 {p}] iban_checksum_valid=False")
+                if self.debug: print(f"[RULES]   -> EMIT 8894 (checksum)")
                 self._emit('8894')
             else:
-                # Check IBAN bank code vs NCH mismatch
+                # IBAN bank code vs NCH
                 iban = self._get(p, 'iban', '')
                 nch = self._get(p, 'nch', '')
+                if self.debug: print(f"[RULES]   iban={iban}, nch={nch}")
+                
                 if iban and nch and len(iban) >= 7 and len(nch) == 3:
                     iban_bank = iban[4:7]
+                    if self.debug: print(f"[RULES]   iban_bank_code={iban_bank}, nch={nch}")
                     if iban_bank != nch:
-                        if self.debug: print(f"  [8894 {p}] IBAN bank code {iban_bank} != NCH {nch}")
+                        if self.debug: print(f"[RULES]   -> EMIT 8894 (IBAN bank != NCH)")
                         self._emit('8894')
-    
-    def _check_9xxx(self, p: str):
-        if self._get(p, 'account_has_dirty_chars'): self._emit('9002')
-        if self._get(p, 'iban_needs_formatting'): self._emit('9006')
-        if self._get(p, 'has_multiple_ids'): self._emit('9017')
-        if self._get(p, 'has_duplicate_info'): self._emit('9018')
-    
-    def _check_directory(self, p: str):
-        if self._get(p, 'has_bic'):
-            self.directory_eligible.append(('8022', p, 'BIC→NCH derivation → IF INCONSISTENT: 8022'))
-            self.directory_eligible.append(('8026', p, 'NCH derivation → IF INCONSISTENT: 8026'))
-        if self._get(p, 'has_iban'):
-            self.directory_eligible.append(('8894', p, 'IBAN→NCH derivation → IF INVALID: 8894'))
-    
-    def get_directory_eligible(self):
-        return self.directory_eligible
-
-# =============================================================================
-# RESPONSE PARSING
-# =============================================================================
 
 def extract_actual_codes(response: Dict, include_dir: bool = False) -> Set[str]:
     codes = set()
     
-    # Find AuditTrail
     audit = None
-    for path in [
-        ['AuditTrail'],
-        ['IFML', 'File', 'Message', 'AuditTrail'],
-        ['IFML', 'File', 'AuditTrail'],
-    ]:
+    for path in [['AuditTrail'], ['IFML', 'File', 'Message', 'AuditTrail'], ['IFML', 'File', 'AuditTrail']]:
         current = response
         for key in path:
             if isinstance(current, dict):
@@ -467,22 +501,15 @@ def get_transaction_id(data: Dict) -> str:
             return current
     return "UNKNOWN"
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
 def process_payment(pid: str, request: Dict, response: Dict, debug: bool = False) -> VerificationResult:
-    if debug:
-        print(f"\n=== DEBUG: {pid} ===")
-    
     extractor = FeatureExtractor(debug=debug)
     features = extractor.extract(request)
     
     if debug:
-        print("  Features:")
+        print(f"\n[DEBUG] === FINAL FEATURES ===")
         for k, v in sorted(features.items()):
             if v is not None and v != False and v != 0 and v != '':
-                print(f"    {k}: {v}")
+                print(f"  {k}: {v}")
     
     engine = RuleEngine(features, debug=debug)
     predicted = engine.predict()
@@ -492,14 +519,13 @@ def process_payment(pid: str, request: Dict, response: Dict, debug: bool = False
     
     result = VerificationResult(trn_id=pid, predicted=predicted, actual=actual)
     result.directory_codes = all_actual - actual
-    result.directory_eligible = engine.get_directory_eligible()
     result.features = features
     
     if debug:
-        print(f"\n  Predicted: {sorted(predicted)}")
-        print(f"  Actual: {sorted(actual)}")
-        print(f"  FN: {sorted(actual - predicted)}")
-        print(f"  FP: {sorted(predicted - actual)}")
+        print(f"\n[RESULT] Predicted: {sorted(predicted)}")
+        print(f"[RESULT] Actual: {sorted(actual)}")
+        print(f"[RESULT] FN (missing): {sorted(actual - predicted)}")
+        print(f"[RESULT] FP (extra): {sorted(predicted - actual)}")
     
     return result
 
@@ -508,13 +534,23 @@ def process_file(filepath: Path, verbose: bool = False, debug: bool = False) -> 
     with open(filepath) as f:
         data = json.load(f)
     
+    if debug:
+        print(f"\n[FILE] Loading {filepath}")
+        print(f"[FILE] Top-level type: {type(data).__name__}")
+        if isinstance(data, dict):
+            print(f"[FILE] Top-level keys: {list(data.keys())}")
+    
     if isinstance(data, dict):
         if 'Request' in data and 'Response' in data:
             pid = get_transaction_id(data)
+            if debug:
+                print(f"[FILE] Single payment: {pid}")
             results.append(process_payment(pid, data, data.get('Response', {}), debug))
         else:
             for key, val in data.items():
                 if isinstance(val, dict) and 'Request' in val and 'Response' in val:
+                    if debug:
+                        print(f"[FILE] Payment by ID: {key}")
                     results.append(process_payment(key, val, val.get('Response', {}), debug))
     return results
 
@@ -530,9 +566,9 @@ def print_results(results: List[VerificationResult]):
             print(f"  PREDICTED: {sorted(r.predicted)}")
             print(f"  ACTUAL: {sorted(r.actual)}")
             if r.actual - r.predicted:
-                print(f"  FN: {sorted(r.actual - r.predicted)}")
+                print(f"  FN (missing): {sorted(r.actual - r.predicted)}")
             if r.predicted - r.actual:
-                print(f"  FP: {sorted(r.predicted - r.actual)}")
+                print(f"  FP (extra): {sorted(r.predicted - r.actual)}")
     
     print(f"\n{'='*60}")
     print(f"SUMMARY: {passed}/{len(results)} passed ({100*passed/len(results):.1f}%), {failed} failed")
