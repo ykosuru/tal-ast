@@ -1636,7 +1636,22 @@ Examples:
             output['raw_prediction_count'] = len(raw_predicted)
             output['filtered_prediction_count'] = len(filtered_codes)
         
+        # ==================================================================
+        # DIRECTORY LOOKUP HINTS (heuristics, not predictions)
+        # ==================================================================
+        from prediction_utils import generate_directory_lookup_hints, format_lookup_hints_for_display
+        
+        lookup_hints = generate_directory_lookup_hints(feature_dict)
+        if lookup_hints:
+            output['directory_lookups'] = lookup_hints
+        
         print(json.dumps(output, indent=2))
+        
+        # Also print formatted lookup hints to stderr for developer visibility
+        if lookup_hints:
+            import sys
+            print("\n", file=sys.stderr)
+            print(format_lookup_hints_for_display(lookup_hints), file=sys.stderr)
     
     elif args.command == 'analyze':
         analysis = analyze(args.model_dir, args.input, args.code)
