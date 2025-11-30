@@ -107,6 +107,11 @@
     "require_false": [],
     "description": "Name cleaned - party present with name"
   },
+  "9019": {
+    "require_true": ["present", "any_id_needs_cleaning"],
+    "require_false": [],
+    "description": "Party identifier cleaned - ID/IBAN contains non-alphanumeric chars (spaces, dashes, etc.)"
+  },
   "9021": {
     "require_true": ["present", "has_nch"],
     "require_false": [],
