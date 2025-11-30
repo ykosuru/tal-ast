@@ -198,6 +198,7 @@ class FeatureExtractor:
             if isinstance(id_field, dict):
                 id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
                 id_text = id_field.get('text') or id_field.get('#text') or ''
+                self.features[f'{prefix}_id_raw'] = id_text  # Store raw ID
                 
                 if id_type in ('S', 'SWIFT', 'BIC'):
                     bic = id_text
@@ -209,6 +210,7 @@ class FeatureExtractor:
                     iban = id_text
             else:
                 id_text = str(id_field)
+                self.features[f'{prefix}_id_raw'] = id_text  # Store raw ID
                 if looks_like_iban(id_text):
                     iban = id_text
                 elif looks_like_bic(id_text):
@@ -256,10 +258,14 @@ class FeatureExtractor:
             basic = basic[0] if basic else {}
         
         id_field = basic.get('ID')
-        if id_field and not self.features.get(f'{prefix}_has_iban'):
+        if id_field:
             id_text = id_field.get('text') or id_field.get('#text') or str(id_field) if isinstance(id_field, dict) else str(id_field)
             
-            if looks_like_iban(id_text):
+            # Store raw ID if not already stored
+            if not self.features.get(f'{prefix}_id_raw'):
+                self.features[f'{prefix}_id_raw'] = id_text
+            
+            if not self.features.get(f'{prefix}_has_iban') and looks_like_iban(id_text):
                 self.features[f'{prefix}_has_iban'] = True
                 self.features[f'{prefix}_iban'] = id_text
                 self.features[f'{prefix}_iban_raw'] = id_text  # Keep raw for cleaning detection
@@ -460,11 +466,12 @@ def print_results(results: List[VerificationResult], verbose: bool = False):
                     has_bic = r.features.get(f'{prefix}_has_bic')
                     has_nch = r.features.get(f'{prefix}_has_nch')
                     has_id = r.features.get(f'{prefix}_has_id')
+                    raw_id = r.features.get(f'{prefix}_id_raw', '')
                     
                     if has_iban or has_bic or has_nch or has_id:
                         parts = []
                         if has_id:
-                            parts.append(f"ID=yes")
+                            parts.append(f"ID_RAW='{raw_id}'")
                         if has_iban:
                             iban_raw = r.features.get(f'{prefix}_iban_raw', r.features.get(f'{prefix}_iban', '?'))
                             needs_clean = r.features.get(f'{prefix}_iban_needs_cleaning', False)
