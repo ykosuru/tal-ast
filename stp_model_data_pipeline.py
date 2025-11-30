@@ -13,7 +13,7 @@ from collections import defaultdict
 import glob
 import re
 
-from ifml_parser import IFMLParser, IFMLResponseParser, IFMLFeatures
+from ifml_parser_updated import IFMLParser, IFMLResponseParser, IFMLFeatures
 from feature_engineering import IFMLFeatureEngineer, ErrorCodeLabelEncoder
 
 
