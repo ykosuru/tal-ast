@@ -421,6 +421,8 @@ def process_directory(dirpath: Path, verbose: bool = False, debug: bool = False)
 
 def print_results(results: List[VerificationResult], verbose: bool = False):
     passed = failed = 0
+    failure_codes = {}
+    
     for r in results:
         if r.passed:
             passed += 1
@@ -429,20 +431,63 @@ def print_results(results: List[VerificationResult], verbose: bool = False):
                 print(f"{r.trn_id} PASS{dir_info}")
         else:
             failed += 1
+            fp = r.predicted - r.actual
+            fn = r.actual - r.predicted
+            
+            # Track failure codes
+            for code in fp:
+                failure_codes[code] = failure_codes.get(code, {'fp': 0, 'fn': 0})
+                failure_codes[code]['fp'] += 1
+            for code in fn:
+                failure_codes[code] = failure_codes.get(code, {'fp': 0, 'fn': 0})
+                failure_codes[code]['fn'] += 1
+            
             print(f"\n{r.trn_id} FAIL")
             print(f"  PREDICTED: {sorted(r.predicted)}")
             print(f"  ACTUAL: {sorted(r.actual)}")
-            if r.actual - r.predicted:
-                print(f"  FN: {sorted(r.actual - r.predicted)}")
-            if r.predicted - r.actual:
-                print(f"  FP: {sorted(r.predicted - r.actual)}")
+            if fn:
+                print(f"  FN: {sorted(fn)}")
+            if fp:
+                print(f"  FP: {sorted(fp)}")
             if r.directory_codes:
                 print(f"  [Dir excluded: {sorted(r.directory_codes)}]")
+            
+            # Extra debug for 9015 and 9019 failures
+            if '9015' in fp or '9015' in fn or '9019' in fp or '9019' in fn:
+                print(f"  --- DEBUG 9015/9019 ---")
+                for prefix in PARTY_PREFIXES:
+                    has_iban = r.features.get(f'{prefix}_has_iban')
+                    has_bic = r.features.get(f'{prefix}_has_bic')
+                    has_nch = r.features.get(f'{prefix}_has_nch')
+                    has_id = r.features.get(f'{prefix}_has_id')
+                    
+                    if has_iban or has_bic or has_nch or has_id:
+                        parts = []
+                        if has_id:
+                            parts.append(f"ID=yes")
+                        if has_iban:
+                            iban_raw = r.features.get(f'{prefix}_iban_raw', r.features.get(f'{prefix}_iban', '?'))
+                            needs_clean = r.features.get(f'{prefix}_iban_needs_cleaning', False)
+                            parts.append(f"IBAN='{iban_raw}' clean={needs_clean}")
+                        if has_bic:
+                            bic = r.features.get(f'{prefix}_bic', '?')
+                            parts.append(f"BIC='{bic}'")
+                        if has_nch:
+                            nch = r.features.get(f'{prefix}_nch', '?')
+                            nch_type = r.features.get(f'{prefix}_nch_type', '?')
+                            parts.append(f"NCH='{nch}'({nch_type})")
+                        print(f"  {prefix}: {', '.join(parts)}")
     
     total = len(results)
     print(f"\n{'='*60}")
     print(f"SUMMARY: {passed}/{total} passed ({100*passed/total:.1f}%), {failed} failed")
     print(f"(Directory-dependent codes excluded: {sorted(DIRECTORY_DEPENDENT_CODES)})")
+    
+    if failure_codes:
+        print(f"\nFAILURE BREAKDOWN:")
+        for code in sorted(failure_codes.keys()):
+            stats = failure_codes[code]
+            print(f"  {code}: FP={stats['fp']}, FN={stats['fn']}")
     print(f"{'='*60}")
 
 def main():
