@@ -34,20 +34,20 @@ from sklearn.multioutput import MultiOutputClassifier
 try:
     import lightgbm as lgb
     HAS_LIGHTGBM = True
-except ImportError:
+except (ImportError, OSError) as e:
     HAS_LIGHTGBM = False
-    print("LightGBM not available. Using sklearn alternatives.")
+    print(f"LightGBM not available ({type(e).__name__}). Using sklearn alternatives.")
 
 try:
     import xgboost as xgb
     HAS_XGBOOST = True
-except ImportError:
+except (ImportError, OSError) as e:
     HAS_XGBOOST = False
 
 try:
     import shap
     HAS_SHAP = True
-except ImportError:
+except (ImportError, OSError) as e:
     HAS_SHAP = False
     print("SHAP not available. Explainability features limited.")
 
