@@ -157,6 +157,24 @@ class IFMLFeatureEngineer:
         'orig_any_id_needs_cleaning', 'send_any_id_needs_cleaning', 'dbt_any_id_needs_cleaning',
         'cdt_any_id_needs_cleaning', 'intm_any_id_needs_cleaning', 'bnf_any_id_needs_cleaning',
         'ordi_any_id_needs_cleaning', 'acwi_any_id_needs_cleaning',
+        # === INTERMEDIARY REDUNDANCY FEATURES (for 9018, 9024) ===
+        'intm_has_multiple',
+        'intm_entries_share_adr_bank_id',
+        'intm_entries_share_country',
+        'intm_entries_share_bic_prefix',
+        'intm_has_redundant_info',
+        'intm_has_multiple_types',
+        # === COMPOUND ID FEATURES (for 8026, 8022) ===
+        'orig_id_has_slash', 'send_id_has_slash', 'dbt_id_has_slash',
+        'cdt_id_has_slash', 'intm_id_has_slash', 'bnf_id_has_slash',
+        'orig_id_is_compound', 'send_id_is_compound', 'dbt_id_is_compound',
+        'cdt_id_is_compound', 'intm_id_is_compound', 'bnf_id_is_compound',
+        'orig_id_has_bic_pattern', 'send_id_has_bic_pattern', 'dbt_id_has_bic_pattern',
+        'cdt_id_has_bic_pattern', 'intm_id_has_bic_pattern', 'bnf_id_has_bic_pattern',
+        'orig_id_has_nch_pattern', 'send_id_has_nch_pattern', 'dbt_id_has_nch_pattern',
+        'cdt_id_has_nch_pattern', 'intm_id_has_nch_pattern', 'bnf_id_has_nch_pattern',
+        'orig_id_has_bic_and_nch', 'send_id_has_bic_and_nch', 'dbt_id_has_bic_and_nch',
+        'cdt_id_has_bic_and_nch', 'intm_id_has_bic_and_nch', 'bnf_id_has_bic_and_nch',
     ]
     
     # Numeric columns
@@ -173,6 +191,11 @@ class IFMLFeatureEngineer:
         # NCH source count (for 8026 - inconsistency detection)
         'orig_nch_sources', 'send_nch_sources', 'dbt_nch_sources',
         'cdt_nch_sources', 'intm_nch_sources', 'bnf_nch_sources',
+        # Intermediary count
+        'intm_count',
+        # Compound ID part counts
+        'orig_id_compound_parts', 'send_id_compound_parts', 'dbt_id_compound_parts',
+        'cdt_id_compound_parts', 'intm_id_compound_parts', 'bnf_id_compound_parts',
     ]
     
     # Account type columns (categorical)
