@@ -40,8 +40,8 @@ DIRECTORY_DEPENDENT_CODES = {
     '8852',   # ACE-specific validation
     '8894',   # Often fired on derived NCH mismatch, not just IBAN format
     '8896',   # ACE-specific validation
-    # 9xxx repair codes (9019 removed - now predicted)
-    '9004', '9005', '9007', '9008', '9013', '9017', '9018', '9024',
+    # 9xxx repair codes (9019 removed - now predicted based on ID cleaning)
+    '9004', '9005', '9007', '9008', '9013', '9015', '9017', '9018', '9024',
     '9476', '9477', '9479', '9480', '9961', '9970', '9985', '9999',
 }
 
@@ -318,12 +318,15 @@ class RuleEngine:
     def _check_static_9xxx(self, p: str):
         """Check for 9xxx repair codes that are statically detectable."""
         
-        # 9019: Party Identifier will be cleaned of non-alphanumeric characters
-        # Fires when ID contains spaces, dashes, or special chars
-        if self._get(p, 'iban_needs_cleaning'):
-            if self.debug:
-                print(f"[RULES] {p}: 9019 - IBAN needs cleaning: {self._get(p, 'iban_raw')}")
-            self._emit('9019')
+        # 9019: Party Identifier Cleaned Of Non Alpha Numeric
+        # Fires when ANY ID contains spaces, dashes, colons, or other special chars
+        raw_id = self._get(p, 'id_raw', '')
+        if raw_id:
+            cleaned = re.sub(r'[^A-Za-z0-9]', '', raw_id)
+            if cleaned != raw_id:
+                if self.debug:
+                    print(f"[RULES] {p}: 9019 - ID needs cleaning: '{raw_id}' -> '{cleaned}'")
+                self._emit('9019')
 
 # =============================================================================
 # RESPONSE PARSING
