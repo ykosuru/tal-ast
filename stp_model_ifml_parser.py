@@ -300,6 +300,7 @@ class PartyInfo:
     id_type: Optional[str] = None
     has_bic: bool = False
     bic: Optional[str] = None
+    bic_value: Optional[str] = None  # Alias for bic for cross-party comparison
     bic_length: int = 0  # 4, 8, or 11 chars typically
     bic_country: Optional[str] = None  # Country code from BIC (chars 5-6)
     bic_valid_format: bool = False  # Is BIC format valid (8 or 11 alphanumeric)?
@@ -323,6 +324,7 @@ class PartyInfo:
     mailing_country: Optional[str] = None
     residence_country: Optional[str] = None
     address_line_count: int = 0
+    address_lines: List[str] = None  # Actual address text for duplicate detection
     has_name: bool = False
     bank_flag: Optional[str] = None
     charge_flag: Optional[str] = None
@@ -375,6 +377,13 @@ class PartyInfo:
     
     # 9006, 9012: IBAN formatting features
     iban_needs_formatting: bool = False  # IBAN present but needs cleanup/formatting
+    
+    def __post_init__(self):
+        if self.address_lines is None:
+            self.address_lines = []
+        # Ensure bic_value is set from bic
+        if self.bic and not self.bic_value:
+            self.bic_value = self.bic
 
 
 @dataclass 
@@ -724,6 +733,7 @@ class IFMLParser:
                 elif self._looks_like_bic(party.id_value):
                     party.has_bic = True
                     party.bic = party.id_value
+                    party.bic_value = party.id_value
         
         # Check for BIC in ID type (legacy check)
         if isinstance(id_field, dict):
@@ -731,6 +741,7 @@ class IFMLParser:
             if id_type and id_type.upper() in ('BIC', 'S', 'SWIFT'):
                 party.has_bic = True
                 party.bic = id_field.get('#text') or id_field.get('text')
+                party.bic_value = party.bic
         
         # Extract account info - handle both AcctIDInfo and AcctIDInf
         acct_info = basic_info.get('AcctIDInfo') or basic_info.get('AcctIDInf')
@@ -774,6 +785,15 @@ class IFMLParser:
             if isinstance(address_info, list):
                 party.address_line_count = len(address_info)
                 party.has_name = len(address_info) > 0
+                # Store address lines for duplicate detection
+                party.address_lines = []
+                for addr in address_info:
+                    if isinstance(addr, dict):
+                        text = addr.get('text') or addr.get('#text') or ''
+                        if text:
+                            party.address_lines.append(text)
+                    elif isinstance(addr, str):
+                        party.address_lines.append(addr)
                 # Extract country from address line 3
                 addr_country, is_dom, is_intl = extract_country_from_address(address_info)
                 party.address_country = addr_country
@@ -782,6 +802,9 @@ class IFMLParser:
             elif isinstance(address_info, dict):
                 party.address_line_count = 1
                 party.has_name = True
+                text = address_info.get('text') or address_info.get('#text') or ''
+                if text:
+                    party.address_lines = [text]
         
         # Extract flags
         party.bank_flag = basic_info.get('BankFlag')
@@ -1085,6 +1108,60 @@ class IFMLParser:
         # Check for intermediary
         features.has_intermediary = 'IntermediaryBankInfo' in features.parties
         features.has_beneficiary_bank = 'BeneficiaryBankInfo' in features.parties
+        
+        # ==================================================================
+        # 9017/9018: Cross-party duplicate detection
+        # ==================================================================
+        self._detect_cross_party_duplicates(features)
+    
+    def _detect_cross_party_duplicates(self, features: IFMLFeatures):
+        """
+        Detect duplicate information across parties for 9017/9018.
+        
+        9017 = Multiple party information present
+        9018 = Duplicate party information removed
+        
+        Key pattern: When IntermediaryBankInf and BeneficiaryBankInf both exist
+        and share similar info (BIC, address), ACE removes duplicate from beneficiary.
+        """
+        intm = features.parties.get('IntermediaryBankInfo')
+        bnf = features.parties.get('BeneficiaryBankInfo')
+        
+        # Pattern 1: Intermediary and Beneficiary Bank both present
+        # This is the main trigger for 9018
+        if intm and bnf:
+            # Check for overlapping BICs
+            if intm.bic_value and bnf.bic_value:
+                if intm.bic_value == bnf.bic_value:
+                    bnf.has_duplicate_info = True
+                    intm.has_duplicate_info = True
+            
+            # Check for overlapping addresses (same country + similar address)
+            if intm.country and bnf.country and intm.country == bnf.country:
+                # Same country - likely duplicate routing info
+                bnf.has_duplicate_info = True
+            
+            # Check for overlapping address text
+            intm_addr = getattr(intm, 'address_lines', []) or []
+            bnf_addr = getattr(bnf, 'address_lines', []) or []
+            if intm_addr and bnf_addr:
+                # Check if any address line matches
+                intm_addr_set = set(str(a).upper().strip() for a in intm_addr if a)
+                bnf_addr_set = set(str(a).upper().strip() for a in bnf_addr if a)
+                if intm_addr_set & bnf_addr_set:  # Intersection
+                    bnf.has_duplicate_info = True
+            
+            # If both have address info and intermediary exists, 
+            # beneficiary bank info is often duplicate
+            if intm.has_name and bnf.has_name:
+                bnf.has_duplicate_info = True
+        
+        # Pattern 2: Check CreditParty vs BeneficiaryBank overlap
+        cdt = features.parties.get('CreditPartyInfo')
+        if cdt and bnf:
+            if cdt.bic_value and bnf.bic_value and cdt.bic_value == bnf.bic_value:
+                # Same BIC in both - one is duplicate
+                bnf.has_duplicate_info = True
     
     def to_dict(self, features: IFMLFeatures) -> dict:
         """Convert features to a flat dictionary for ML consumption."""
