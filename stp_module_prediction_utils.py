@@ -38,6 +38,7 @@ FEATURE_EXPLANATIONS = {
     'iban_valid_format': 'IBAN format is valid',
     'iban_checksum_valid': 'IBAN checksum passes',
     'missing_required_iban': 'Required IBAN is missing',
+    'iban_needs_formatting': 'IBAN contains spaces/dashes that need cleaning',
     
     # BIC related
     'has_bic': 'BIC is provided',
@@ -59,6 +60,9 @@ FEATURE_EXPLANATIONS = {
     'is_iban': 'Account is IBAN format',
     'is_clabe': 'Account is CLABE format (Mexico)',
     'is_fedaba': 'Account is FEDABA format',
+    'account_has_dirty_chars': 'Account contains non-alphanumeric characters',
+    'account_has_spaces': 'Account contains spaces',
+    'account_has_special_chars': 'Account contains special characters (-/.)',
     
     # Party presence
     'present': 'Party is present in message',
@@ -213,9 +217,10 @@ CODE_TRIGGERS = {
         'description': 'Duplicate info resolved for intermediary'
     },
     '9019': {
-        'require_true': [],
+        'require_true': ['present'],
         'require_false': [],
-        'description': 'Party information consolidated'
+        'description': 'Party identifier cleaned - removed non-alphanumeric chars (spaces, dashes, colons)',
+        'soft_require': ['iban_needs_formatting', 'account_has_dirty_chars', 'account_has_spaces']
     },
     
     # --- Intermediary/Routing ---
