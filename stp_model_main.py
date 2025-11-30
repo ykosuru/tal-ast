@@ -1502,15 +1502,89 @@ Examples:
     
     elif args.command == 'predict':
         result = predict(args.model_dir, args.input, threshold=args.threshold)
-        # Add descriptions to output
+        
+        # Get features for trigger analysis
+        from ifml_parser import IFMLParser
+        from prediction_utils import CODE_TRIGGERS, FEATURE_EXPLANATIONS
+        
+        with open(args.input, 'r') as f:
+            input_json = json.load(f)
+        parser = IFMLParser()
+        features_obj = parser.parse(input_json)
+        feature_dict = parser.to_dict(features_obj)
+        
+        # Add descriptions and triggers to output
         predictions_with_desc = []
         for code in result.predicted_codes:
-            predictions_with_desc.append({
+            pred_info = {
                 'code': code,
                 'description': get_code_description(code),
                 'category': get_code_category(code),
                 'probability': round(result.probabilities.get(code, 0), 4)
-            })
+            }
+            
+            # Add trigger rules for 8XXX codes
+            base_code = code.split('_')[0] if '_' in code else code
+            if base_code.startswith('8') and base_code in CODE_TRIGGERS:
+                triggers = CODE_TRIGGERS[base_code]
+                triggered_features = []
+                
+                # Extract party prefix from composite code (e.g., 8895_BNFBNK -> bnf)
+                party_prefix = None
+                if '_' in code:
+                    party_hint = code.split('_')[1]
+                    party_map = {
+                        'BNFBNK': 'bnf', 'BNFPTY': 'bnf', 'BNPPTY': 'bnf',
+                        'CDTPTY': 'cdt', 'DBTPTY': 'dbt', 'ORGPTY': 'orig',
+                        'INTBNK': 'intm', 'SNDBNK': 'send', 'ACWBNK': 'acwi', 'ORDBNK': 'ordi'
+                    }
+                    party_prefix = party_map.get(party_hint)
+                
+                # Check require_true conditions
+                for feat in triggers.get('require_true', []):
+                    if party_prefix:
+                        full_feat = f'{party_prefix}_{feat}'
+                    else:
+                        full_feat = feat
+                    
+                    # Try with prefix first, then without
+                    val = feature_dict.get(full_feat)
+                    if val is None:
+                        val = feature_dict.get(feat)
+                    
+                    if val:
+                        triggered_features.append({
+                            'feature': full_feat if feature_dict.get(full_feat) is not None else feat,
+                            'value': val,
+                            'condition': 'must be True',
+                            'explanation': FEATURE_EXPLANATIONS.get(feat, feat)
+                        })
+                
+                # Check require_false conditions (validation failures)
+                for feat in triggers.get('require_false', []):
+                    if party_prefix:
+                        full_feat = f'{party_prefix}_{feat}'
+                    else:
+                        full_feat = feat
+                    
+                    val = feature_dict.get(full_feat)
+                    if val is None:
+                        val = feature_dict.get(feat)
+                    
+                    if val is False or val is None:
+                        triggered_features.append({
+                            'feature': full_feat if feature_dict.get(full_feat) is not None else feat,
+                            'value': val,
+                            'condition': 'must be False (validation failed)',
+                            'explanation': FEATURE_EXPLANATIONS.get(feat, feat)
+                        })
+                
+                if triggered_features:
+                    pred_info['triggers'] = triggered_features
+                    pred_info['rule_description'] = triggers.get('description', '')
+            
+            predictions_with_desc.append(pred_info)
+        
         print(json.dumps({
             'transaction_id': result.transaction_id,
             'predictions': predictions_with_desc,
