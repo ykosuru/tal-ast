@@ -15,21 +15,21 @@
   
   "high_threshold_codes": {
     "_comment_8xxx": "Validation errors - higher threshold for codes prone to false positives",
-    "8022": 0.70,
-    "8026": 0.70,
-    "8894": 0.70,
-    "8895": 0.70,
+    "8022": 0.80,
+    "8026": 0.80,
+    "8894": 0.80,
+    "8895": 0.80,
     
     "_comment_9xxx": "Repair codes - higher threshold for directory-dependent or complex codes",
-    "9004": 0.70,
-    "9005": 0.70,
-    "9007": 0.70,
-    "9008": 0.70,
-    "9018": 0.65,
-    "9024": 0.70,
-    "9477": 0.70,
+    "9004": 0.80,
+    "9005": 0.80,
+    "9007": 0.80,
+    "9008": 0.80,
+    "9018": 0.85,
+    "9024": 0.80,
+    "9477": 0.80,
     "9479": 0.80,
-    "9480": 0.75
+    "9480": 0.85
   },
   
   "apply_precondition_filter": true,
