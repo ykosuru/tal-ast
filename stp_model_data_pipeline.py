@@ -450,7 +450,8 @@ class IFMLDataPipeline:
                        only_with_codes: bool = True,
                        code_series_filter: Optional[List[str]] = None,
                        include_negative_cases: bool = True,
-                       max_negative_ratio: int = 3) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                       max_negative_ratio: int = 3,
+                       trainable_codes_filter: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Create ML-ready dataset from loaded records.
         
@@ -469,6 +470,8 @@ class IFMLDataPipeline:
                                    These get labeled as '__NO_XXXX__' (e.g., '__NO_8XXX__').
             max_negative_ratio: Maximum ratio of negative to positive samples (default 3:1).
                                Set to 0 or None to disable downsampling.
+            trainable_codes_filter: If provided, only include these specific codes.
+                                   Used for 9XXX to filter to trainable codes only.
         
         Returns:
             Tuple of (X_raw, X_transformed, y_multilabel)
@@ -516,6 +519,15 @@ class IFMLDataPipeline:
                     # Create label like '__NO_8XXX__' for transactions without any 8XXX codes
                     series_label = f"__NO_{'_'.join(code_series_filter)}XXX__"
                     codes = [series_label]
+            
+            # Filter to specific trainable codes only (for 9XXX trainable-only mode)
+            if trainable_codes_filter:
+                filtered_codes = []
+                for code in codes:
+                    base_code = code.split('_')[0] if '_' in code else code
+                    if base_code in trainable_codes_filter:
+                        filtered_codes.append(code)
+                codes = filtered_codes
             
             code_lists.append(codes)
         
