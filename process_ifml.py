@@ -233,6 +233,8 @@ class FeatureExtractor:
             cleaned = re.sub(r'[^A-Za-z0-9]', '', iban)
             if cleaned != iban:
                 self.features[f'{prefix}_iban_needs_cleaning'] = True
+                if self.debug:
+                    print(f"[DEBUG] {prefix}: IBAN needs cleaning - raw: '{iban}' -> cleaned: '{cleaned}'")
             fmt, cksum = is_valid_iban(iban)
             self.features[f'{prefix}_iban_valid_format'] = fmt
             self.features[f'{prefix}_iban_checksum_valid'] = cksum
@@ -260,6 +262,13 @@ class FeatureExtractor:
             if looks_like_iban(id_text):
                 self.features[f'{prefix}_has_iban'] = True
                 self.features[f'{prefix}_iban'] = id_text
+                self.features[f'{prefix}_iban_raw'] = id_text  # Keep raw for cleaning detection
+                # Check if IBAN needs cleaning
+                cleaned = re.sub(r'[^A-Za-z0-9]', '', id_text)
+                if cleaned != id_text:
+                    self.features[f'{prefix}_iban_needs_cleaning'] = True
+                    if self.debug:
+                        print(f"[DEBUG] {prefix} (merge): IBAN needs cleaning - raw: '{id_text}' -> cleaned: '{cleaned}'")
                 fmt, cksum = is_valid_iban(id_text)
                 self.features[f'{prefix}_iban_valid_format'] = fmt
                 self.features[f'{prefix}_iban_checksum_valid'] = cksum
