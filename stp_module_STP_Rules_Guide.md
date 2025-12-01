@@ -137,6 +137,13 @@ All 8XXX codes are **fully deterministic** from input features - no directory lo
 
 ### 8XXX Decision Trees - Complete Reference
 
+> **⚠️ Implementation Note**: Decision trees below describe the *logical rules* for each code. 
+> However, our ML model may not have all features implemented. See Section 7 for actual feature availability.
+> 
+> **Fully Implemented**: 8001, 8004, 8022, 8026, 8030, 8894, 8895, 8898
+> **Partially Implemented**: 8005, 8006, 8007, 8852, 8892, 8896, 8897
+> **Not Implemented (ML only)**: 8023, 8024, 8025, 8027, 8028, 8029 (no cross-party aggregation)
+
 ---
 
 #### 8001: Invalid BIC
@@ -829,15 +836,26 @@ has_iban = True?
 
 ### ⚠️ Important Cross-Reference Correction
 
-> **9477**: Previously documented as "BIC expanded 8→11"
+> **9477**: Our precondition_rules.json has `require_true: ["present", "has_bic"]`
 > 
-> **Official Definition**: "D-A using FED ABA from Name and Address"
+> **Official Definition**: "D-A using FED ABA from Name and Address" (requires Fedwire lookup)
 > 
-> This code requires Fedwire Directory lookup, NOT a simple BIC expansion rule.
+> **Current Implementation**: We predict 9477 as BIC enrichment (has_bic → enriched)
+> This is a simplification - actual 9477 extracts FEDABA from address and looks it up.
+> 
+> **Impact**: Our 9477 predictions are for BIC-based enrichment, not FEDABA extraction.
 
 ---
 
 ### 9XXX Decision Trees - Complete Reference (No Directory)
+
+> **⚠️ Implementation Note**: Decision trees below describe *logical rules*. 
+> See Section 7 for actual feature availability.
+>
+> **Fully Implemented**: 9002, 9006, 9017, 9018, 9019, 9021, 9022, 9024
+> **Partially Implemented**: 9000, 9015, 9025
+> **Directory Dependent** (predict eligibility only): 9004, 9005, 9007, 9008, 9477, 9479, 9480
+> **Not Implemented**: 9001, 9009, 9012, 9014, 9026, 9027, 9028, 9483, 9487, 9488, 9918, 9938, 9987, 9990-9992
 
 ---
 
@@ -1579,84 +1597,215 @@ PHASE 3: ENRICHMENT (Directory Required)
 
 ## 7. Feature Reference
 
-### Global Features (Transaction Level)
+### ⚠️ Implementation Status
 
-| Feature | Type | Description | Used By |
-|---------|------|-------------|---------|
-| `has_intermediary` | bool | Intermediary exists | 9024 |
-| `intm_count` | int | Number of intermediary entries | 9018, 9024 |
-| `intm_has_multiple` | bool | More than one intermediary | 9018 |
-| `intm_has_redundant_info` | bool | 2+ redundancy signals | 9018, 9024 |
-| `intm_entries_share_adr_bank_id` | bool | Same AdrBankID | 9018 |
-| `intm_entries_share_country` | bool | Same country | 9018 |
-| `intm_entries_share_bic_prefix` | bool | Same BIC prefix | 9018 |
-| `intm_has_multiple_types` | bool | Different Type values | 9024 |
-| `is_cross_border` | bool | International payment | Multiple |
-| `iban_count` | int | IBANs across all parties | 8023 |
-| `nch_count` | int | NCH values across parties | 8026 |
-| `bic4_count` | int | BIC4 values across parties | 8028 |
+This section documents features **actually implemented** in our ML model. Some features in decision trees above are theoretical - check this section for what's available.
 
-### Party-Level Features
+### Global Features (Transaction Level) - IMPLEMENTED ✅
+
+| Feature | Type | Description | Used By | Status |
+|---------|------|-------------|---------|--------|
+| `has_intermediary` | bool | Intermediary exists | 9024 | ✅ |
+| `has_beneficiary_bank` | bool | Beneficiary bank exists | Multiple | ✅ |
+| `has_bank_info` | bool | Bank info block exists | Multiple | ✅ |
+| `is_cross_border` | bool | International payment | Multiple | ✅ |
+| `has_instructed_amount` | bool | Instructed amount present | Amount validation | ✅ |
+| `amount_mismatch` | bool | Amount values don't match | Amount validation | ✅ |
+| `intm_count` | int | Number of intermediary entries | 9018, 9024 | ✅ |
+| `intm_has_multiple` | bool | More than one intermediary | 9018 | ✅ |
+| `intm_has_redundant_info` | bool | 2+ redundancy signals | 9018, 9024 | ✅ |
+| `intm_entries_share_adr_bank_id` | bool | Same AdrBankID | 9018 | ✅ |
+| `intm_entries_share_country` | bool | Same country | 9018 | ✅ |
+| `intm_entries_share_bic_prefix` | bool | Same BIC prefix | 9018 | ✅ |
+| `intm_has_multiple_types` | bool | Different Type values | 9024 | ✅ |
+
+### Global Features - NOT IMPLEMENTED ⚠️
+
+| Feature | Description | Why Not Implemented |
+|---------|-------------|-------------------|
+| `iban_count` | IBANs across parties | Cross-party aggregation not in parser |
+| `bban_count` | BBANs across parties | Cross-party aggregation not in parser |
+| `nch_count` | NCH values across parties | Cross-party aggregation not in parser |
+| `bic4_count` | BIC4 values across parties | Cross-party aggregation not in parser |
+| `account_count` | Accounts across parties | Cross-party aggregation not in parser |
+| `*_consistent` | Consistency flags | Requires cross-party comparison |
+
+**Impact**: 8023, 8024, 8025, 8027, 8028, 8029 consistency codes rely on ML model pattern learning rather than deterministic rules.
+
+### Party-Level Features - IMPLEMENTED ✅
 
 | Feature | Type | Description | Used By |
 |---------|------|-------------|---------|
 | `{party}_present` | bool | Party exists | All |
+| `{party}_has_id` | bool | Party has identifier | 9017, 9019 |
 | `{party}_has_bic` | bool | BIC provided | 8001, 8005, 8022 |
+| `{party}_has_account` | bool | Account provided | 8892, 9002 |
+| `{party}_has_name` | bool | Name provided | 9015 |
+| `{party}_has_iban` | bool | IBAN provided | 8022, 8894, 9006 |
+| `{party}_has_nch` | bool | NCH/routing provided | 8895, 9000, 9005 |
+| `{party}_has_adr_bank_id` | bool | AdrBankID present | 9018 |
 | `{party}_bic_valid_format` | bool | BIC format valid | 8001 |
 | `{party}_bic_valid_country` | bool | BIC country valid | 8001 |
-| `{party}_bic_length` | int | BIC length (4/8/11) | 8005 |
-| `{party}_has_iban` | bool | IBAN provided | 8022, 8894, 9006 |
+| `{party}_bic_iban_match` | bool | BIC/IBAN countries match | 8022 |
+| `{party}_bic_party_country_match` | bool | BIC/party countries match | 8027 |
 | `{party}_iban_valid_format` | bool | IBAN format valid | 8894 |
 | `{party}_iban_checksum_valid` | bool | IBAN mod-97 passes | 8894, 8898 |
-| `{party}_bic_iban_match` | bool | Countries match | 8022 |
 | `{party}_needs_iban` | bool | Country requires IBAN | 8004, 9004 |
-| `{party}_has_nch` | bool | NCH/routing provided | 8895, 9000, 9005 |
 | `{party}_nch_valid` | bool | NCH format valid | 8895 |
 | `{party}_fedaba_checksum_valid` | bool | ABA checksum valid | 8895 |
 | `{party}_nch_validation_applicable` | bool | US domestic | 8895 |
-| `{party}_has_account` | bool | Account provided | 8892, 9002 |
-| `{party}_account_has_dirty_chars` | bool | Needs cleaning | 9002, 9015 |
+| `{party}_is_clabe` | bool | Mexican CLABE | 8033 |
+| `{party}_is_fedaba` | bool | US FEDABA routing | 9021 |
+| `{party}_is_chips_aba` | bool | CHIPS ABA | 9476 |
+| `{party}_is_chips_uid` | bool | CHIPS UID | 9478 |
+| `{party}_account_numeric` | bool | Account all digits | 8892 |
+| `{party}_is_domestic` | bool | Domestic party | Multiple |
+| `{party}_is_international` | bool | International party | Multiple |
+| `{party}_account_has_dirty_chars` | bool | Needs cleaning | 9002 |
+| `{party}_account_has_spaces` | bool | Has spaces | 9002 |
+| `{party}_account_has_special_chars` | bool | Has special chars | 9002 |
+| `{party}_name_has_dirty_chars` | bool | Name needs cleaning | 9015 |
 | `{party}_account_needs_length_fix` | bool | Wrong length | 9022 |
-| `{party}_id_has_slash` | bool | ID contains '/' | 8026 |
-| `{party}_id_is_compound` | bool | ID has multiple parts | 8026 |
-| `{party}_id_has_bic_and_nch` | bool | Compound BIC+NCH | 8022, 8026 |
+| `{party}_iban_needs_formatting` | bool | IBAN needs cleanup | 9006 |
+| `{party}_nch_has_dirty_chars` | bool | NCH needs cleaning | 9000 |
+| `{party}_nch_needs_formatting` | bool | NCH needs format fix | 9021 |
+| `{party}_is_iban_derivable` | bool | Can derive IBAN | 9004 |
+| `{party}_has_bban_in_iban_country` | bool | BBAN in IBAN country | 9004 |
+| `{party}_is_bic_derivable` | bool | Can derive BIC | 9005, 9008 |
+| `{party}_has_nch_no_bic` | bool | Has NCH but no BIC | 9005 |
+| `{party}_has_iban_no_bic` | bool | Has IBAN but no BIC | 9008 |
 | `{party}_has_multiple_ids` | bool | Multiple IDs present | 9017 |
 | `{party}_has_duplicate_info` | bool | Duplicate detected | 9018 |
+| `{party}_id_needs_cleaning` | bool | ID needs cleaning | 9019 |
+| `{party}_iban_needs_cleaning` | bool | IBAN needs cleaning | 9019 |
+| `{party}_any_id_needs_cleaning` | bool | Any ID needs cleaning | 9019 |
+
+### Compound ID Features - IMPLEMENTED ✅ (November 2025)
+
+| Feature | Type | Description | Used By |
+|---------|------|-------------|---------|
+| `{party}_id_has_slash` | bool | ID contains '/' | 8026 |
+| `{party}_id_is_compound` | bool | ID has multiple parts | 8026 |
+| `{party}_id_has_bic_pattern` | bool | Part matches BIC format | 8026 |
+| `{party}_id_has_nch_pattern` | bool | Part matches NCH format | 8026 |
+| `{party}_id_has_bic_and_nch` | bool | Compound BIC+NCH | 8022, 8026 |
+| `{party}_id_compound_parts` | int | Number of parts | 8026 |
+
+### Numeric Features - IMPLEMENTED ✅
+
+| Feature | Type | Description |
+|---------|------|-------------|
+| `primary_amount` | float | Primary transaction amount |
+| `instructed_amount` | float | Instructed amount |
+| `bank_info_count` | int | Number of bank info blocks |
+| `amount_count` | int | Number of amount fields |
+| `{party}_address_lines` | int | Number of address lines |
+| `{party}_bic_length` | int | BIC length (4/8/11) |
+| `{party}_account_length` | int | Account length |
+| `{party}_nch_sources` | int | NCH source count |
+| `intm_count` | int | Intermediary entry count |
+| `{party}_id_compound_parts` | int | Compound ID parts |
 
 ### Party Prefixes
 
-| Prefix | Party Type |
-|--------|------------|
-| `orig` | Originating Party |
-| `send` | Sending Bank |
-| `dbt` | Debit Party |
-| `cdt` | Credit Party |
-| `intm` | Intermediary Bank |
-| `bnf` | Beneficiary Bank |
-| `ordi` | Ordering Institution |
-| `acwi` | Account With Institution |
+| Prefix | Party Type | IFML Path |
+|--------|------------|-----------|
+| `orig` | Originating Party | OriginatingPartyInf |
+| `send` | Sending Bank | SendingBankInf |
+| `dbt` | Debit Party | DebitPartyInf |
+| `cdt` | Credit Party | CreditPartyInf |
+| `intm` | Intermediary Bank | IntermediaryBankInf |
+| `bnf` | Beneficiary Bank | BeneficiaryBankInf |
+| `ordi` | Ordering Institution | OrderingBankInf |
+| `acwi` | Account With Institution | AccountWithInf |
 
 ---
 
 ## 8. ML Model Strategy
 
-### Summary
+### Actual Model Performance
 
-| Category | Codes | Method | Predictability |
-|----------|-------|--------|----------------|
-| **8XXX Validation** | All deterministic | Rules | **100%** |
-| **9XXX Cleaning** | 9000, 9002, 9006, 9014-9022, 9028 | Rules | **100%** |
-| **9XXX Derivation** | 9004, 9005, 9007, 9008, 9013, 9961 | Predict eligibility | ~70-85% |
-| **9XXX D-A Extraction** | 9475-9478, 9485 | Predict eligibility | ~50-70% |
-| **9XXX Enrichment** | 9479-9486, 9985, 9986 | Predict eligibility | ~80-95% |
-| **9999 Fallback** | 9999 | Predict when lookup fails | Inverse |
+| Model | Test Accuracy | Notes |
+|-------|---------------|-------|
+| **8XXX Validation** | **~90%** | High accuracy - most codes are structurally deterministic |
+| **9XXX Repair** | **~70%** | Lower accuracy due to directory-dependent codes |
 
-### Recommended Approach
+### Why 9XXX Accuracy is Lower
 
-1. **Deterministic codes**: Use rule-based decision trees (no ML needed)
-2. **Directory-dependent codes**: Predict eligibility with ML, not outcome
-3. **9999**: Predict as inverse of directory lookup success probability
-4. **Suppressed codes**: Exclude from prediction entirely
+The 70% accuracy for 9XXX codes is expected because:
+
+1. **Directory-Dependent Codes**: 9004, 9005, 9007, 9008, 9477, 9479, 9480, 9485, 9961 require external lookups
+   - We can predict **eligibility** (preconditions met) but not **outcome** (lookup success/failure)
+   - These codes fire ~70-90% of the time when eligible, explaining the gap
+
+2. **9999 Suppressed**: The generic "Field Repaired" code is unpredictable and excluded
+
+3. **Cross-Party Consistency Not Implemented**: 
+   - 8023, 8024, 8025, 8027, 8028, 8029 rely on ML pattern learning
+   - We don't have `iban_count`, `nch_count`, etc. aggregation features
+
+### Prediction Strategy Summary
+
+| Category | Codes | Method | Expected Accuracy |
+|----------|-------|--------|-------------------|
+| **8XXX Validation** | 8001, 8004, 8005, 8022, 8026, 8894, 8895, 8898 | Precondition + ML | **~90%** |
+| **8XXX Consistency** | 8023, 8024, 8025, 8027, 8028, 8029 | ML only (no cross-party features) | **~75-85%** |
+| **9XXX Cleaning** | 9000, 9002, 9006, 9015, 9019, 9021, 9022 | Precondition + ML | **~85%** |
+| **9XXX Duplicate** | 9017, 9018, 9024 | Precondition + ML | **~80%** |
+| **9XXX Derivation** | 9004, 9005, 9007, 9008, 9477, 9479 | Predict eligibility | **~60-70%** |
+| **Suppressed** | 9999, 9490 | Do not predict | N/A |
+
+### Recommended Improvements for 9XXX Accuracy
+
+1. **Add Cross-Party Aggregation Features**:
+   - `iban_count`, `nch_count`, `bic4_count`
+   - `ibans_consistent`, `nchs_consistent`
+   - Would improve 8023-8029 predictions
+
+2. **Directory Lookup Success Modeling**:
+   - Train separate model to predict lookup success probability
+   - Could improve 9004, 9005, 9007, 9008 predictions
+
+3. **Historical Success Rate Features**:
+   - Add features for bank/country lookup success rates
+   - e.g., "IBAN derivation success rate for country X"
+
+### Current Precondition Rules (from precondition_rules.json)
+
+| Code | require_true | require_false | Global? |
+|------|--------------|---------------|---------|
+| 8001 | `has_bic` | `bic_valid_format`, `bic_valid_country` | No |
+| 8004 | `needs_iban` | `has_iban` | No |
+| 8022 | `has_iban`, `has_bic` | `bic_iban_match` | No |
+| 8026 | `has_nch` | - | No |
+| 8894 | `has_iban` | `iban_valid_format`, `iban_checksum_valid` | No |
+| 8895 | `has_nch` | `nch_valid`, `fedaba_checksum_valid` | No |
+| 8898 | `has_iban` | `iban_checksum_valid` | No |
+| 9004 | `present`, `needs_iban` | `has_iban` | No |
+| 9005 | `present`, `has_nch` | `has_bic` | No |
+| 9006 | `present`, `has_iban` | - | No |
+| 9008 | `present`, `has_iban` | `has_bic` | No |
+| 9018 | `intm_has_multiple`, `intm_has_redundant_info` | - | **Yes** |
+| 9019 | `present`, `any_id_needs_cleaning` | - | No |
+| 9024 | `intm_present` | - | **Yes** |
+
+### Threshold Configuration (from prediction_config.json)
+
+| Code | Threshold | Reason |
+|------|-----------|--------|
+| 8022 | 0.70 | Country mismatch must be certain |
+| 8026 | 0.70 | NCH inconsistency needs confidence |
+| 8894 | 0.70 | IBAN validation - avoid false positives |
+| 8895 | 0.70 | NCH validation - avoid false positives |
+| 9004 | 0.70 | Directory dependent |
+| 9005 | 0.70 | Directory dependent |
+| 9007 | 0.70 | Directory dependent |
+| 9008 | 0.70 | Directory dependent |
+| 9018 | 0.65 | Redundancy detection |
+| 9024 | 0.70 | Push-up complexity |
+| 9477 | 0.70 | BIC enrichment |
+| 9479 | 0.80 | Party enrichment |
+| 9480 | 0.75 | Credit party enrichment |
 
 ---
 
@@ -1678,65 +1827,94 @@ PHASE 3: ENRICHMENT (Directory Required)
 
 ## 10. Quick Reference Card
 
-### 8XXX - When to Emit
+### 8XXX - When to Emit (✅ = Implemented, ⚠️ = Partial, ❌ = ML Only)
 
-| Code | Condition |
-|------|-----------|
-| 8001 | `has_bic AND (NOT bic_valid_format OR NOT bic_valid_country)` |
-| 8005 | `has_bic AND NOT bic4_valid` |
-| 8006 | `has_country AND NOT country_valid` |
-| 8022 | `has_iban AND has_bic AND NOT bic_iban_match` |
-| 8023 | `iban_count > 1 AND NOT ibans_consistent` |
-| 8026 | `(nch_count > 1 AND NOT nchs_consistent) OR id_has_bic_and_nch` |
-| 8028 | `bic4_count > 1 AND NOT bic4s_consistent` |
-| 8029 | `account_count > 1 AND NOT accounts_consistent` |
-| 8030 | `needs_iban AND NOT has_iban AND NOT iban_derivation_supported` |
-| 8894 | `has_iban AND (NOT iban_valid_format OR NOT iban_checksum_valid)` |
-| 8895 | `has_nch AND nch_validation_applicable AND NOT nch_valid` |
-| 8898 | `has_iban AND iban_valid_format AND NOT iban_checksum_valid` |
+| Code | Condition | Status |
+|------|-----------|--------|
+| 8001 | `has_bic AND (NOT bic_valid_format OR NOT bic_valid_country)` | ✅ |
+| 8004 | `needs_iban AND NOT has_iban` | ✅ |
+| 8005 | `has_bic AND NOT bic4_valid` | ⚠️ |
+| 8006 | `has_country AND NOT country_valid` | ⚠️ |
+| 8022 | `has_iban AND has_bic AND NOT bic_iban_match` | ✅ |
+| 8023 | `iban_count > 1 AND NOT ibans_consistent` | ❌ |
+| 8026 | `has_nch AND (nch_sources > 1 OR id_has_bic_and_nch)` | ✅ |
+| 8027 | `country_count > 1 AND NOT countries_consistent` | ❌ |
+| 8028 | `bic4_count > 1 AND NOT bic4s_consistent` | ❌ |
+| 8029 | `account_count > 1 AND NOT accounts_consistent` | ❌ |
+| 8030 | `needs_iban AND NOT has_iban AND NOT iban_derivation_supported` | ✅ |
+| 8894 | `has_iban AND (NOT iban_valid_format OR NOT iban_checksum_valid)` | ✅ |
+| 8895 | `has_nch AND nch_validation_applicable AND (NOT nch_valid OR NOT fedaba_checksum_valid)` | ✅ |
+| 8898 | `has_iban AND iban_valid_format AND NOT iban_checksum_valid` | ✅ |
 
 ### 9XXX No Directory - When to Emit
 
-| Code | Condition |
-|------|-----------|
-| 9000 | `has_nch AND nch_has_dirty_chars` |
-| 9002 | `has_account AND account_has_dirty_chars` |
-| 9006 | `has_iban AND iban_needs_formatting` |
-| 9017 | `has_multiple_ids` |
-| 9018 | `intm_has_multiple AND intm_has_redundant_info` |
-| 9021 | `is_fedaba AND nch_needs_formatting` |
-| 9022 | `has_account AND account_needs_length_fix` |
-| 9024 | `has_intermediary` (confidence increases with `intm_has_redundant_info`) |
-| 9028 | `has_nch AND nch_in_wrong_field` |
+| Code | Condition | Status |
+|------|-----------|--------|
+| 9000 | `has_nch AND nch_has_dirty_chars` | ⚠️ |
+| 9002 | `has_account AND account_has_dirty_chars` | ✅ |
+| 9006 | `has_iban AND iban_needs_formatting` | ✅ |
+| 9015 | `has_name AND name_has_dirty_chars` | ✅ |
+| 9017 | `has_multiple_ids` | ✅ |
+| 9018 | `intm_has_multiple AND intm_has_redundant_info` | ✅ |
+| 9019 | `any_id_needs_cleaning` | ✅ |
+| 9021 | `is_fedaba AND nch_needs_formatting` | ✅ |
+| 9022 | `has_account AND account_needs_length_fix` | ✅ |
+| 9024 | `intm_present` (confidence ↑ with `intm_has_redundant_info`) | ✅ |
 
-### 9XXX Directory - When Eligible
+### 9XXX Directory - When Eligible (Predict Eligibility Only)
 
-| Code | Eligible When |
-|------|---------------|
-| 9004 | `needs_iban AND NOT has_iban AND has_account AND iban_derivation_supported` |
-| 9005 | `has_nch AND NOT has_bic` |
-| 9008 | `has_iban AND NOT has_bic` |
-| 9477 | `has_fedaba_in_address` |
-| 9961 | `has_name AND NOT has_bic AND address_lines >= 2` |
+| Code | Eligible When | Status |
+|------|---------------|--------|
+| 9004 | `needs_iban AND NOT has_iban AND has_account` | ✅ |
+| 9005 | `has_nch AND NOT has_bic` | ✅ |
+| 9007 | `needs_iban AND NOT has_iban` | ✅ |
+| 9008 | `has_iban AND NOT has_bic` | ✅ |
+| 9477 | `has_bic` (for enrichment) | ✅ |
+| 9479 | `has_bic` (party enrichment) | ✅ |
+| 9480 | `has_bic` (credit party enrichment) | ✅ |
+| 9961 | `has_name AND NOT has_bic` | ❌ |
 
 ### Validation Algorithms
 
-**IBAN Mod-97**:
+**IBAN Mod-97** (Implemented ✅):
 ```
 Rearrange: move first 4 chars to end
 Convert letters: A=10, B=11, ... Z=35
 Calculate: number mod 97 must equal 1
 ```
 
-**FEDABA Checksum**:
+**FEDABA Checksum** (Implemented ✅):
 ```
 Weights: [3, 7, 1, 3, 7, 1, 3, 7, 1]
 Sum: Σ(digit × weight)
 Valid: sum mod 10 = 0
 ```
 
+### Suppressed Codes
+
+| Code | Description | Reason |
+|------|-------------|--------|
+| **9999** | Field Repaired | Generic catch-all, unpredictable |
+| **9490** | Fee Code Updated | Requires fee directory |
+
+---
+
+## Summary: Model Accuracy Explanation
+
+| Accuracy | Reason |
+|----------|--------|
+| **8XXX ~90%** | Most validation rules are structurally deterministic with implemented features |
+| **9XXX ~70%** | Directory-dependent codes (9004-9008, 9477-9480) can only predict eligibility, not outcome |
+
+### To Improve 9XXX Accuracy
+
+1. Add cross-party aggregation features (`iban_count`, `nch_count`, etc.)
+2. Model directory lookup success probability separately
+3. Use historical success rates by bank/country as features
+
 ---
 
 *ACE Pelican Error Code Prediction System*
 *Cross-referenced with official ACE definitions*
+*Model Accuracy: 8XXX ~90%, 9XXX ~70%*
 *Last updated: November 2025*
