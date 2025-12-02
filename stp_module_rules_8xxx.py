@@ -1185,6 +1185,9 @@ def extract_actual_codes(response: Dict, filter_prefix: str = None) -> Set[str]:
     """
     codes = set()
     
+    # Known party suffixes for extraction from InformationalData
+    KNOWN_PARTIES = {'ORGPTY', 'SNDBNK', 'DBTPTY', 'CDTPTY', 'INTBNK', 'BNFBNK', 'BNPPTY', 'ACWI', 'ORDI'}
+    
     # Find AuditTrail
     audit = None
     paths = [
@@ -1217,11 +1220,20 @@ def extract_actual_codes(response: Dict, filter_prefix: str = None) -> Set[str]:
     for item in msg_status:
         code = item.get('Code', '')
         party = item.get('Party', '')
+        info_data = item.get('InformationalData', '')
         
         if code:
             # Filter by prefix if specified
             if filter_prefix and not code.startswith(filter_prefix):
                 continue
+            
+            # Try to get party from Party field first
+            if not party and info_data:
+                # Extract party from InformationalData
+                # Format: "BNPPTY IBAN cannot be derived" -> extract "BNPPTY"
+                first_word = info_data.split()[0] if info_data.split() else ''
+                if first_word.upper() in KNOWN_PARTIES:
+                    party = first_word.upper()
             
             # Include party suffix if present
             if party:
@@ -1470,30 +1482,90 @@ def print_result(result: PaymentResult, verbose: bool = False):
                 print(f"  {detail.code_with_party}: {detail.reason}")
 
 
-def print_accuracy(report: AccuracyReport):
+def print_accuracy(report: AccuracyReport, results: List[PaymentResult] = None):
     """Print accuracy report."""
     print(f"\n{'='*60}")
     print("ACCURACY REPORT")
     print(f"{'='*60}")
-    print(f"Total Payments: {report.total_payments}")
-    print(f"Payments Correct: {report.payments_correct} ({100*report.payments_correct/report.total_payments:.1f}%)")
-    print(f"\nCode-Level Metrics:")
-    print(f"  True Positives: {report.true_positives}")
-    print(f"  False Positives: {report.false_positives}")
-    print(f"  False Negatives: {report.false_negatives}")
+    print(f"Total IFMLs Processed: {report.total_payments}")
+    print(f"IFMLs Fully Correct: {report.payments_correct} ({100*report.payments_correct/report.total_payments:.1f}%)")
+    
+    print(f"\nOverall Code-Level Metrics:")
+    print(f"  True Positives (correctly predicted): {report.true_positives}")
+    print(f"  False Positives (predicted but didn't occur): {report.false_positives}")
+    print(f"  False Negatives (occurred but not predicted): {report.false_negatives}")
     print(f"\n  Precision: {report.precision:.3f}")
     print(f"  Recall: {report.recall:.3f}")
     print(f"  F1 Score: {report.f1:.3f}")
     
     if report.code_breakdown:
-        print(f"\nBreakdown by Code:")
+        print(f"\n{'='*60}")
+        print("BREAKDOWN BY ERROR CODE")
+        print(f"{'='*60}")
+        print(f"{'Code':<8} {'Actual':<8} {'Pred':<8} {'TP':<6} {'FP':<6} {'FN':<6} {'Prec':<8} {'Recall':<8}")
+        print("-" * 60)
+        
         for code in sorted(report.code_breakdown.keys()):
             stats = report.code_breakdown[code]
-            total = stats['tp'] + stats['fp'] + stats['fn']
-            if total > 0:
-                p = stats['tp'] / (stats['tp'] + stats['fp']) if (stats['tp'] + stats['fp']) > 0 else 0
-                r = stats['tp'] / (stats['tp'] + stats['fn']) if (stats['tp'] + stats['fn']) > 0 else 0
-                print(f"  {code}: TP={stats['tp']}, FP={stats['fp']}, FN={stats['fn']} (P={p:.2f}, R={r:.2f})")
+            tp = stats['tp']
+            fp = stats['fp']
+            fn = stats['fn']
+            
+            actual_count = tp + fn  # How many times this code actually occurred
+            pred_count = tp + fp    # How many times we predicted this code
+            
+            p = tp / (tp + fp) if (tp + fp) > 0 else 0
+            r = tp / (tp + fn) if (tp + fn) > 0 else 0
+            
+            print(f"{code:<8} {actual_count:<8} {pred_count:<8} {tp:<6} {fp:<6} {fn:<6} {p:<8.2f} {r:<8.2f}")
+        
+        print("-" * 60)
+        
+        # Summary
+        total_actual = sum(stats['tp'] + stats['fn'] for stats in report.code_breakdown.values())
+        total_pred = sum(stats['tp'] + stats['fp'] for stats in report.code_breakdown.values())
+        print(f"{'TOTAL':<8} {total_actual:<8} {total_pred:<8} {report.true_positives:<6} {report.false_positives:<6} {report.false_negatives:<6}")
+    
+    # Additional frequency analysis if results provided
+    if results:
+        print(f"\n{'='*60}")
+        print("FREQUENCY ANALYSIS")
+        print(f"{'='*60}")
+        
+        # Count actual code occurrences
+        actual_freq = defaultdict(int)
+        predicted_freq = defaultdict(int)
+        
+        for r in results:
+            for code in r.actual_codes:
+                base = code.split('_')[0]
+                actual_freq[base] += 1
+            for code in r.predicted_codes:
+                base = code.split('_')[0]
+                predicted_freq[base] += 1
+        
+        all_codes = sorted(set(actual_freq.keys()) | set(predicted_freq.keys()))
+        
+        print(f"\n{'Code':<8} {'Actual Freq':<12} {'Predicted Freq':<14} {'Difference':<12}")
+        print("-" * 50)
+        for code in all_codes:
+            actual = actual_freq.get(code, 0)
+            pred = predicted_freq.get(code, 0)
+            diff = pred - actual
+            diff_str = f"+{diff}" if diff > 0 else str(diff)
+            print(f"{code:<8} {actual:<12} {pred:<14} {diff_str:<12}")
+        
+        # IFMLs with no codes vs IFMLs with codes
+        ifmls_with_actual_codes = sum(1 for r in results if r.actual_codes)
+        ifmls_with_predicted_codes = sum(1 for r in results if r.predicted_codes)
+        ifmls_clean = sum(1 for r in results if not r.actual_codes and not r.predicted_codes)
+        
+        print(f"\n{'='*60}")
+        print("IFML SUMMARY")
+        print(f"{'='*60}")
+        print(f"IFMLs with actual codes: {ifmls_with_actual_codes}")
+        print(f"IFMLs with predicted codes: {ifmls_with_predicted_codes}")
+        print(f"Clean IFMLs (no codes actual or predicted): {ifmls_clean}")
 
 
 def main():
@@ -1587,7 +1659,7 @@ def main():
             print_result(result, args.verbose)
         
         report = validator.compute_accuracy(results)
-        print_accuracy(report)
+        print_accuracy(report, results)
         
         if args.output:
             with open(args.output, 'w') as f:
@@ -1615,7 +1687,7 @@ def main():
             results = validator.validate_directory(path)
         
         report = validator.compute_accuracy(results)
-        print_accuracy(report)
+        print_accuracy(report, results)
 
 
 if __name__ == '__main__':
