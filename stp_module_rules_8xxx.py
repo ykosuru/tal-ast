@@ -1056,27 +1056,46 @@ class ValidationEngine:
         # Our format-based validation produces too many false positives
         
         # 8004: IBAN cannot be derived (only for party accounts, not banks)
-        # Fires when: needs IBAN but either no IBAN present OR IBAN is garbage (not a real attempt)
+        # ACE fires 8004 when:
+        # 1. Needs IBAN but no IBAN present
+        # 2. IBAN is garbage (not a real attempt)
+        # 3. IBAN has wrong length for country (format invalid)
+        # ACE treats wrong-length IBANs as "cannot derive" not "invalid"
         if suffix not in BANK_SUFFIXES:  # Banks don't need IBANs
             needs_iban = get('needs_iban')
             has_iban = get('has_iban')
             iban_is_attempt = get('iban_is_attempt', False)
+            fmt_valid = get('iban_valid_format', True)
             
-            # 8004 fires if: needs IBAN AND (no IBAN OR IBAN is garbage)
-            if needs_iban and (not has_iban or not iban_is_attempt):
-                iban_value = get('iban', '')
+            # 8004 fires if:
+            # - needs IBAN AND no IBAN present
+            # - OR IBAN is garbage (not a real attempt)
+            # - OR IBAN has wrong length (format invalid)
+            should_fire_8004 = False
+            reason = ""
+            iban_value = get('iban', '')
+            
+            if needs_iban and not has_iban:
+                should_fire_8004 = True
                 reason = "Party in IBAN country but no IBAN present"
-                if has_iban and not iban_is_attempt:
-                    reason = f"Party has garbage IBAN '{iban_value}' (not a valid IBAN attempt)"
+            elif has_iban and not iban_is_attempt:
+                should_fire_8004 = True
+                reason = f"Party has garbage IBAN '{iban_value}' (not a valid IBAN attempt)"
+            elif has_iban and iban_is_attempt and not fmt_valid:
+                should_fire_8004 = True
+                reason = f"IBAN '{iban_value}' has wrong length for country (expected different length)"
+            
+            if should_fire_8004:
                 results.append(ValidationResult(
                     code='8004',
                     party=suffix,
                     fires=True,
                     reason=reason,
                     features_checked={
-                        'needs_iban': True,
+                        'needs_iban': needs_iban,
                         'has_iban': has_iban,
-                        'iban_is_attempt': iban_is_attempt
+                        'iban_is_attempt': iban_is_attempt,
+                        'iban_valid_format': fmt_valid
                     }
                 ))
         
@@ -1096,22 +1115,23 @@ class ValidationEngine:
             ))
         
         # 8894: Invalid IBAN
-        # Only fires if the IBAN is a real attempt (proper format structure)
-        # Garbage values like '"!3' trigger 8004 (no IBAN), not 8894 (invalid IBAN)
+        # ACE Logic: Only fires if IBAN has CORRECT LENGTH but bad checksum
+        # If IBAN has wrong length (format invalid), ACE returns 8004 instead
         if get('has_iban') and get('iban_is_attempt'):
             fmt_valid = get('iban_valid_format', True)
             cksum_valid = get('iban_checksum_valid', True)
-            if not fmt_valid or not cksum_valid:
+            # Only fire 8894 if format is valid but checksum fails
+            if fmt_valid and not cksum_valid:
                 results.append(ValidationResult(
                     code='8894',
                     party=suffix,
                     fires=True,
-                    reason=f"IBAN invalid: format_valid={fmt_valid}, checksum_valid={cksum_valid}",
+                    reason=f"IBAN has correct length but checksum failed",
                     features_checked={
                         'has_iban': True,
                         'iban_is_attempt': True,
-                        'iban_valid_format': fmt_valid,
-                        'iban_checksum_valid': cksum_valid
+                        'iban_valid_format': True,
+                        'iban_checksum_valid': False
                     }
                 ))
         
