@@ -45,9 +45,11 @@
   },
 
   "8022": {
-    "require_true": ["has_iban", "has_bic"],
-    "require_false": ["bic_iban_match"],
-    "description": "IBAN inconsistent with Account With Institution BIC - countries do not match"
+    "require_true": [],
+    "require_false": ["wirekey_bic_bnp_iban_match"],
+    "description": "IBAN inconsistent with Account With Institution BIC - countries do not match",
+    "global_feature": true,
+    "_note": "Fires when WireKey BIC country doesn't match BNP IBAN country. Tagged to BNFBNK."
   },
 
   "8023": {
@@ -75,11 +77,11 @@
   },
 
   "8026": {
-    "require_true": ["has_nch", "has_multiple_nchs"],
-    "require_false": ["nchs_consistent"],
-    "description": "NCH inconsistency found in message - multiple different NCH/routing codes",
-    "global_feature": true,
-    "_note": "Only fires when multiple NCHs exist AND they're different"
+    "require_true": ["has_adr_bank_id", "has_bic"],
+    "require_false": ["nch_consistent_with_bic"],
+    "description": "NCH inconsistency found in message - AdrBankID conflicts with BIC-derived NCH",
+    "global_feature": false,
+    "_note": "Fires when party has AdrBankID AND BIC from different sources that conflict"
   },
 
   "8027": {
