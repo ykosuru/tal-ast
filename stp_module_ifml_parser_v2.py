@@ -496,13 +496,31 @@ class IFMLParser:
         return bool(re.match(r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2,5}$', s))
     
     def _looks_like_iban(self, s: str) -> bool:
-        """Quick check if string looks like an IBAN (handles spaces)."""
+        """
+        Quick check if string looks like an IBAN (handles spaces).
+        Only returns True if the IBAN checksum is valid to avoid false positives.
+        """
         if not s:
             return False
         cleaned = s.upper().replace(' ', '').replace('-', '')
         if len(cleaned) < 15 or len(cleaned) > 34:
             return False
-        return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned))
+        # Must start with 2 letters + 2 digits
+        if not re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned):
+            return False
+        # Validate IBAN checksum (mod-97) to avoid false positives
+        # Move first 4 chars to end and convert letters to numbers (A=10, B=11, etc.)
+        rearranged = cleaned[4:] + cleaned[:4]
+        numeric = ''
+        for char in rearranged:
+            if char.isdigit():
+                numeric += char
+            else:
+                numeric += str(ord(char) - ord('A') + 10)
+        try:
+            return int(numeric) % 97 == 1
+        except (ValueError, OverflowError):
+            return False
     
     def _analyze_compound_id(self, id_text: str) -> dict:
         """
@@ -1116,7 +1134,15 @@ class IFMLParser:
             party.address_country
         )
         if party_country and party_country.upper() in iban_countries:
-            party.needs_iban = True
+            # Only set needs_iban if we don't already have IBAN AND
+            # we don't have account info that could be used to derive IBAN
+            # ACE can derive IBAN from: account + BIC, account + NCH, or just account in some countries
+            has_derivation_info = (
+                party.has_iban or  # Already has IBAN
+                party.has_account  # Has account info (ACE may be able to derive)
+            )
+            if not has_derivation_info:
+                party.needs_iban = True
         
         # Count NCH sources for inconsistency detection (8026)
         nch_sources = 0
