@@ -1,7 +1,7 @@
 {
   "_comment": "Precondition rules for ACE Pelican error codes - COMPLETE VERSION",
   "_logic": "require_true: ALL must be True. require_false: at least ONE must be False (validation failed)",
-  "_version": "2.0 - Added all 8XXX validation codes",
+  "_version": "2.1 - Updated with complete error code list",
 
   "_section_8xxx": "8XXX VALIDATION ERRORS",
 
@@ -11,10 +11,18 @@
     "description": "Invalid BIC - BIC present but format or country code invalid"
   },
 
+  "8003": {
+    "require_true": [],
+    "require_false": [],
+    "description": "File name derivation failed - system/config issue, not predictable from message",
+    "_note": "Unpredictable - depends on system configuration"
+  },
+
   "8004": {
     "require_true": ["needs_iban"],
     "require_false": ["has_iban"],
-    "description": "IBAN cannot be derived - IBAN required but missing and cannot be derived from available data"
+    "description": "IBAN cannot be derived - IBAN required but missing and cannot be derived from available data",
+    "_note": "Only applies to party accounts (BNPPTY, CDTPTY, etc), not banks. needs_iban only set if no account info exists."
   },
 
   "8005": {
@@ -32,76 +40,98 @@
   "8007": {
     "require_true": ["has_amount"],
     "require_false": ["amount_decimals_valid"],
-    "description": "Fractional digits exceed maximum - amount has more decimal places than currency allows",
+    "description": "Number of fractional digits of amount exceeds maximum allowable",
     "global_feature": true
   },
 
   "8022": {
     "require_true": ["has_iban", "has_bic"],
     "require_false": ["bic_iban_match"],
-    "description": "IBAN inconsistent with BIC - IBAN country does not match BIC country"
+    "description": "IBAN inconsistent with Account With Institution BIC - countries do not match"
   },
 
   "8023": {
     "require_true": ["has_iban"],
     "require_false": ["ibans_consistent"],
-    "description": "IBAN inconsistency - multiple different IBANs found across parties in message",
+    "description": "IBAN inconsistency found in message - multiple different IBANs across parties",
     "global_feature": true
   },
 
   "8024": {
     "require_true": ["has_bban"],
     "require_false": ["bbans_consistent"],
-    "description": "BBAN inconsistency - multiple different BBANs found across parties in message",
+    "description": "BBAN inconsistency found in message - multiple different BBANs across parties",
     "global_feature": true
   },
 
   "8025": {
     "require_true": ["has_account", "is_domestic"],
     "require_false": ["domestic_accounts_consistent"],
-    "description": "Domestic account inconsistency - domestic account numbers are inconsistent across parties",
+    "description": "Domestic Account Number inconsistency found in message",
     "global_feature": true
   },
 
   "8026": {
     "require_true": ["has_nch"],
     "require_false": ["nchs_consistent"],
-    "description": "NCH inconsistency - multiple different NCH/routing codes found across parties. Compound IDs (BIC+NCH) increase likelihood.",
+    "description": "NCH inconsistency found in message - multiple different NCH/routing codes",
     "global_feature": true
   },
 
   "8027": {
     "require_true": ["has_country"],
     "require_false": ["countries_consistent"],
-    "description": "ISO country code inconsistency - conflicting country codes across parties in message",
+    "description": "ISO Country Code inconsistency found in message - conflicting country codes",
     "global_feature": true
   },
 
   "8028": {
     "require_true": ["has_bic"],
     "require_false": ["bic4s_consistent"],
-    "description": "BIC4 inconsistency - first 4 characters of BICs are inconsistent across parties",
+    "description": "BIC4 inconsistency found in message - first 4 chars of BICs inconsistent",
     "global_feature": true
   },
 
   "8029": {
     "require_true": ["has_account"],
     "require_false": ["accounts_consistent"],
-    "description": "Account number inconsistency - account numbers are inconsistent across parties",
+    "description": "Account Number inconsistency found in message",
     "global_feature": true
   },
 
   "8030": {
     "require_true": ["needs_iban"],
     "require_false": ["iban_derivation_supported"],
-    "description": "IBAN derivation not supported - country requires IBAN but derivation is not supported for this country"
+    "description": "IBAN derivation not supported for the country",
+    "_note": "Only applies to party accounts, not banks"
   },
 
   "8033": {
     "require_true": ["has_clabe"],
     "require_false": ["clabes_consistent"],
-    "description": "CLABE inconsistency - Mexican CLABE numbers are inconsistent across parties",
+    "description": "CLABE inconsistency found in message - Mexican CLABE numbers inconsistent",
     "global_feature": true
+  },
+
+  "8034": {
+    "require_true": [],
+    "require_false": [],
+    "description": "Forced Debit is not allowed and hence message cannot be processed",
+    "_note": "Business rule - not predictable from message content alone"
+  },
+
+  "8035": {
+    "require_true": [],
+    "require_false": [],
+    "description": "FCDA account validation failed",
+    "_note": "Requires directory lookup - not predictable"
+  },
+
+  "8036": {
+    "require_true": [],
+    "require_false": [],
+    "description": "FCDA account name matching failed",
+    "_note": "Requires directory lookup - not predictable"
   },
 
   "8124": {
@@ -111,30 +141,58 @@
     "global_feature": true
   },
 
+  "8464": {
+    "require_true": [],
+    "require_false": [],
+    "description": "Target Channel not derived",
+    "_note": "Requires routing/config lookup - not predictable"
+  },
+
+  "8465": {
+    "require_true": [],
+    "require_false": [],
+    "description": "Product code not found",
+    "_note": "Requires product directory lookup - not predictable"
+  },
+
+  "8472": {
+    "require_true": [],
+    "require_false": [],
+    "description": "Fee code not derived",
+    "_note": "Requires fee directory lookup - not predictable"
+  },
+
   "8851": {
     "require_true": [],
     "require_false": [],
-    "description": "Incorrect field size - XML schema validation error, field exceeds maximum length",
-    "_note": "Schema-level error - cannot reliably predict from parsed features"
+    "description": "Incorrect field size - XML schema validation error",
+    "_note": "Schema-level error - unpredictable from parsed features"
   },
 
   "8852": {
     "require_true": [],
     "require_false": [],
     "description": "Incorrect length of attribute - XML attribute length validation error",
-    "_note": "Schema-level error - cannot reliably predict from parsed features"
+    "_note": "Schema-level error - unpredictable from parsed features"
+  },
+
+  "8853": {
+    "require_true": [],
+    "require_false": [],
+    "description": "Incorrect number format",
+    "_note": "Schema-level error - unpredictable from parsed features"
   },
 
   "8892": {
     "require_true": ["has_account"],
     "require_false": ["account_valid"],
-    "description": "Invalid account number format - account number fails format validation"
+    "description": "Invalid Account number - account number fails format validation"
   },
 
   "8894": {
     "require_true": ["has_iban"],
     "require_false": ["iban_valid_format", "iban_checksum_valid"],
-    "description": "Invalid IBAN - IBAN format invalid or checksum failed"
+    "description": "Invalid IBAN - format invalid or checksum failed"
   },
 
   "8895": {
@@ -146,7 +204,7 @@
   "8896": {
     "require_true": ["has_account", "is_domestic"],
     "require_false": ["account_valid"],
-    "description": "Invalid domestic account number - domestic account fails validation"
+    "description": "Invalid Domestic Account Number"
   },
 
   "8897": {
@@ -158,7 +216,21 @@
   "8898": {
     "require_true": ["has_iban"],
     "require_false": ["iban_checksum_valid"],
-    "description": "IBAN check digit failed - IBAN mod-97 checksum validation failed"
+    "description": "IBAN Check Digit calculation/validation failed"
+  },
+
+  "8905": {
+    "require_true": [],
+    "require_false": [],
+    "description": "Hash code Mismatch",
+    "_note": "Security/integrity check - not predictable"
+  },
+
+  "8906": {
+    "require_true": [],
+    "require_false": [],
+    "description": "Message in wrong flow",
+    "_note": "Workflow/routing issue - not predictable from message content"
   },
 
   "_section_9xxx": "9XXX REPAIR/ENRICHMENT CODES",
@@ -220,7 +292,7 @@
   "9018": {
     "require_true": ["intm_has_multiple", "intm_has_redundant_info"],
     "require_false": [],
-    "description": "Duplicate party removed - redundant intermediary entry removed based on shared AdrBankID, country, or BIC",
+    "description": "Duplicate party removed - redundant intermediary entry removed",
     "global_feature": true
   },
 
@@ -252,7 +324,7 @@
   "9477": {
     "require_true": ["present", "has_bic", "bic_length_8"],
     "require_false": [],
-    "description": "BIC enriched 8->11 chars - 8-character BIC expanded to 11-character format with branch code"
+    "description": "BIC enriched 8->11 chars - 8-character BIC expanded to 11-character format"
   },
 
   "9479": {
@@ -269,22 +341,20 @@
 
   "_section_suppress": "CODES TO SUPPRESS (unpredictable or directory-dependent)",
 
-  "_note_8851": "8851 (Incorrect field size) is schema-level validation - unpredictable from parsed features",
-  "_note_8852": "8852 (Incorrect length) is schema-level validation - unpredictable from parsed features", 
-  "_note_9490": "9490 (Fee Code Updated) requires fee directory lookup - cannot predict from message alone",
-  "_note_9999": "9999 (Field Repair) is generic catch-all for manual/misc repairs - not predictable",
-
-  "_feature_requirements": {
-    "_comment": "Features that must be computed by ifml_parser for rules to work correctly",
-    "bic_features": ["has_bic", "bic_valid_format", "bic_valid_country", "bic4_valid", "bic_length_8"],
-    "iban_features": ["has_iban", "iban_valid_format", "iban_checksum_valid", "iban_needs_formatting", "needs_iban"],
-    "account_features": ["has_account", "account_valid", "account_has_dirty_chars", "account_needs_length_fix"],
-    "nch_features": ["has_nch", "nch_valid", "fedaba_checksum_valid", "nch_has_dirty_chars", "nch_needs_formatting", "nch_validation_applicable"],
-    "country_features": ["has_country", "country_valid"],
-    "currency_features": ["has_currency", "currency_valid", "has_amount", "amount_decimals_valid"],
-    "consistency_features": ["ibans_consistent", "bbans_consistent", "nchs_consistent", "countries_consistent", "bic4s_consistent", "accounts_consistent", "clabes_consistent", "domestic_accounts_consistent"],
-    "cleaning_features": ["name_has_dirty_chars", "any_id_needs_cleaning", "has_multiple_ids"],
-    "party_features": ["present", "is_domestic", "has_bban", "has_clabe", "has_name"],
-    "intermediary_features": ["intm_present", "intm_has_multiple", "intm_has_redundant_info"]
+  "_suppressed_codes": {
+    "8003": "File name derivation - system config",
+    "8034": "Forced Debit business rule",
+    "8035": "FCDA validation - directory",
+    "8036": "FCDA name matching - directory",
+    "8464": "Target Channel - routing config",
+    "8465": "Product code - product directory",
+    "8472": "Fee code - fee directory",
+    "8851": "Field size - schema validation",
+    "8852": "Attribute length - schema validation",
+    "8853": "Number format - schema validation",
+    "8905": "Hash mismatch - security check",
+    "8906": "Wrong flow - workflow routing",
+    "9490": "Fee Code Updated - fee directory",
+    "9999": "Field Repair - generic catch-all"
   }
 }
