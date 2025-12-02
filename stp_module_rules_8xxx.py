@@ -836,6 +836,11 @@ class FeatureExtractor:
                         if routing:
                             party_routing[f'intm_{i}'] = routing
         
+        # Debug: Show what BICs and routing numbers were found
+        if self.debug:
+            print(f"[DEBUG] 9018 Party BICs found: {party_bics if party_bics else 'None'}")
+            print(f"[DEBUG] 9018 Party routing found: {party_routing if party_routing else 'None'}")
+        
         # Check for cross-party duplicates
         # If intermediary BIC matches beneficiary bank BIC, that's a duplicate
         intm_matches_bnf_bank = False
@@ -879,6 +884,29 @@ class FeatureExtractor:
         
         if self.debug and has_cross_party_dup:
             print(f"[DEBUG] 9018: Cross-party duplicate detected (intm=bnf_bank)")
+        
+        # =====================================================================
+        # WARNING: Potential directory-derived 9018
+        # If one party has a BIC and another doesn't, ACE may derive the missing
+        # BIC from directory lookup, potentially creating a duplicate we can't predict
+        # =====================================================================
+        if self.debug and not has_cross_party_dup:
+            intm_bics = [bic for key, bic in party_bics.items() if key.startswith('intm_')]
+            bnf_bank_bic = party_bics.get('bnf_bank')
+            
+            # Case 1: Intermediary has BIC, BeneficiaryBank doesn't
+            if intm_bics and not bnf_bank_bic:
+                print(f"[DEBUG] 9018 WARNING: IntermediaryBank has BIC {intm_bics}, but BeneficiaryBank has NO BIC")
+                print(f"[DEBUG]   -> ACE may derive BeneficiaryBank BIC from directory lookup")
+                print(f"[DEBUG]   -> If derived BIC matches IntermediaryBank, 9018_BNFBNK will fire")
+                print(f"[DEBUG]   -> We CANNOT predict this without directory access")
+            
+            # Case 2: BeneficiaryBank has BIC, Intermediary doesn't
+            if bnf_bank_bic and not intm_bics and intm_data:
+                print(f"[DEBUG] 9018 WARNING: BeneficiaryBank has BIC {bnf_bank_bic}, but IntermediaryBank has NO BIC")
+                print(f"[DEBUG]   -> ACE may derive IntermediaryBank BIC from directory lookup")
+                print(f"[DEBUG]   -> If derived BIC matches BeneficiaryBank, 9018_INTBNK will fire")
+                print(f"[DEBUG]   -> We CANNOT predict this without directory access")
         
         # =====================================================================
         # 8022: WireKey BIC vs BNP IBAN country match (removed - now directory-dependent)
