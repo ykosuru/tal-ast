@@ -467,6 +467,7 @@ class IFMLParser:
         'CreditPartyInfo',
         'IntermediaryBankInfo',
         'BeneficiaryBankInfo',
+        'BeneficiaryPartyInfo',  # Added for BNPPTY
         'AccountWithInstitution',
         'OrderingInstitution'
     ]
@@ -740,19 +741,15 @@ class IFMLParser:
                         parsed_party = self._parse_single_party(standard_type, party_data)
                         features.parties[standard_type] = parsed_party
         
-        # FIX: Merge BeneficiaryPartyInf into BeneficiaryBankInfo (for IBAN extraction)
+        # FIX: Parse BeneficiaryPartyInf as a separate party (BeneficiaryPartyInfo -> bnp_)
+        # This is distinct from BeneficiaryBankInfo and maps to BNPPTY in ACE responses
         bnf_party_inf = party_info.get('BeneficiaryPartyInf')
         if bnf_party_inf:
             if isinstance(bnf_party_inf, list):
                 bnf_party_inf = bnf_party_inf[0] if bnf_party_inf else None
             if bnf_party_inf and isinstance(bnf_party_inf, dict):
-                if 'BeneficiaryBankInfo' in features.parties:
-                    # Merge into existing
-                    self._merge_party_data(features.parties['BeneficiaryBankInfo'], bnf_party_inf)
-                else:
-                    # Create new
-                    parsed_party = self._parse_single_party('BeneficiaryBankInfo', bnf_party_inf)
-                    features.parties['BeneficiaryBankInfo'] = parsed_party
+                parsed_party = self._parse_single_party('BeneficiaryPartyInfo', bnf_party_inf)
+                features.parties['BeneficiaryPartyInfo'] = parsed_party
         
         # Parse intermediary array for redundancy detection (9018, 9024)
         self._parse_intermediary_array(party_info, features)
@@ -907,10 +904,12 @@ class IFMLParser:
                 # Handle both @Type/#text and Type/text formats
                 party.id_type = id_field.get('@Type') or id_field.get('Type')
                 party.id_value = id_field.get('#text') or id_field.get('text')
-                # FIX: Type="S" means SWIFT/BIC
+                # FIX: Type="S" means SWIFT/BIC, but only if value looks like a BIC
                 if party.id_type and party.id_type.upper() in ('BIC', 'S', 'SWIFT'):
-                    party.has_bic = True
-                    party.bic = party.id_value
+                    # Only treat as BIC if value actually looks like one (8-11 alphanumeric chars)
+                    if party.id_value and self._looks_like_bic(party.id_value):
+                        party.has_bic = True
+                        party.bic = party.id_value
                 elif party.id_type and party.id_type.upper() == 'IBAN':
                     party.has_iban = True
                     party.account_type = 'IBAN'
@@ -939,13 +938,15 @@ class IFMLParser:
             party.id_has_nch_pattern = compound_info['has_nch_pattern']
             party.id_has_bic_and_nch = compound_info['has_bic_pattern'] and compound_info['has_nch_pattern']
         
-        # Check for BIC in ID type (legacy check)
+        # Check for BIC in ID type (legacy check) - only if value looks like a BIC
         if isinstance(id_field, dict):
             id_type = id_field.get('@Type') or id_field.get('Type')
+            id_val = id_field.get('#text') or id_field.get('text')
             if id_type and id_type.upper() in ('BIC', 'S', 'SWIFT'):
-                party.has_bic = True
-                party.bic = id_field.get('#text') or id_field.get('text')
-                party.bic_value = party.bic
+                if id_val and self._looks_like_bic(id_val):
+                    party.has_bic = True
+                    party.bic = id_val
+                    party.bic_value = party.bic
         
         # Extract account info - handle both AcctIDInfo and AcctIDInf
         acct_info = basic_info.get('AcctIDInfo') or basic_info.get('AcctIDInf')
@@ -1110,6 +1111,8 @@ class IFMLParser:
             party.bic_country or 
             party.iban_country or 
             party.country or 
+            party.mailing_country or
+            party.residence_country or
             party.address_country
         )
         if party_country and party_country.upper() in iban_countries:
@@ -1734,6 +1737,7 @@ class IFMLParser:
             'CreditPartyInfo': 'cdt',
             'IntermediaryBankInfo': 'intm',
             'BeneficiaryBankInfo': 'bnf',
+            'BeneficiaryPartyInfo': 'bnp',  # Added for BNPPTY
             'AccountWithInstitution': 'acwi',
             'OrderingInstitution': 'ordi'
         }
@@ -1787,7 +1791,7 @@ class IFMLParser:
             'NO', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK'
         }
         
-        country = party.country or party.bic_country
+        country = party.country or party.bic_country or party.mailing_country or party.residence_country
         if not country:
             return False
         
