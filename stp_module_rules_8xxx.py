@@ -1,59 +1,119 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-8XXX VALIDATION RULES - Deterministic Error Code Checks
+ACE 8XXX CODE VALIDATOR
 ================================================================================
 
-PURPOSE:
-    Implements deterministic decision trees for 8XXX ACE validation errors.
-    These codes indicate something is WRONG with the input data.
-    All 8XXX codes are fully deterministic - no directory lookups required.
+Validates rule-based predictions against actual ACE response codes.
 
-CODES IMPLEMENTED:
-    8001 - Invalid BIC (format or country)
-    8004 - IBAN cannot be derived
-    8005 - Invalid BIC4 (first 4 chars)
-    8006 - Invalid country code
-    8007 - Fractional digits exceed maximum
-    8022 - IBAN inconsistent with BIC (country mismatch)
-    8023 - IBAN inconsistency in message (multiple different IBANs)
-    8024 - BBAN inconsistency in message
-    8025 - Domestic account inconsistency
-    8026 - NCH inconsistency in message
-    8027 - ISO country code inconsistency
-    8028 - BIC4 inconsistency in message
-    8029 - Account number inconsistency
-    8030 - IBAN derivation not supported for country
-    8033 - CLABE inconsistency (Mexico)
-    8124 - Invalid currency
-    8851 - Incorrect field size
-    8852 - Incorrect length of attribute
-    8894 - Invalid IBAN (format or checksum)
-    8895 - Invalid NCH code (routing number)
-    8898 - IBAN check digit failed
+This tool:
+1. Parses IFML payments using ifml_parser_v3.py
+2. Applies deterministic validation rules to predict 8XXX codes
+3. Compares predictions with actual ACE response codes
+4. Reports accuracy metrics (precision, recall, F1)
 
-USAGE:
-    from rules_8xxx import Rules8XXX
+PREDICTABLE CODES (deterministic validation):
+- 8001: Invalid BIC (format or country code)
+- 8004: IBAN cannot be derived (needs IBAN but missing)
+- 8005: Invalid BIC4 (first 4 chars)
+- 8006: Invalid country code
+- 8007: Amount decimal places exceeded
+- 8022: IBAN/BIC country mismatch
+- 8124: Invalid currency code
+- 8894: Invalid IBAN (format or checksum)
+- 8895: Invalid NCH/FEDABA (checksum)
+- 8898: IBAN checksum failed
+
+UNPREDICTABLE CODES (require directory/config):
+- 8003, 8034-8036, 8464-8472, 8851-8853, 8905, 8906
+
+Usage:
+    # Validate single payment
+    python ace_8xxx_validator.py single -r request.json -s response.json
     
-    rules = Rules8XXX()
-    results = rules.check_all(features_dict, parties_dict)
+    # Validate directory of payments
+    python ace_8xxx_validator.py validate -i /path/to/data -o report.json
     
-    # Or check individual codes:
-    result = rules.check_8001(party_features, party_name)
+    # Show accuracy summary
+    python ace_8xxx_validator.py accuracy -i /path/to/data
 
-AUTHOR: ACE Pelican ML Team
-VERSION: 1.0 (December 2025)
+Author: ACE Pelican Team
+Version: 1.0 (December 2025)
 ================================================================================
 """
 
+import json
+import argparse
 import re
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
+import sys
+from pathlib import Path
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Set, Tuple, Any
+from collections import defaultdict
+import csv
 
 
 # =============================================================================
-# REFERENCE DATA
+# CONSTANTS
 # =============================================================================
+
+# Party suffixes in ACE responses
+PARTY_SUFFIXES = ['ORGPTY', 'SNDBNK', 'DBTPTY', 'CDTPTY', 'INTBNK', 'BNFBNK', 'BNPPTY']
+
+# Map ACE party suffix to parser prefix
+SUFFIX_TO_PREFIX = {
+    'ORGPTY': 'orig',
+    'SNDBNK': 'send',
+    'DBTPTY': 'dbt',
+    'CDTPTY': 'cdt',
+    'INTBNK': 'intm',
+    'BNFBNK': 'bnf',
+    'BNPPTY': 'bnp',
+    'ACWI': 'acwi',
+    'ORDI': 'ordi',
+}
+
+# Codes that are deterministically predictable
+PREDICTABLE_CODES = {
+    '8001',  # Invalid BIC
+    '8004',  # IBAN cannot be derived
+    '8005',  # Invalid BIC4
+    '8006',  # Invalid country code
+    '8007',  # Amount decimal places
+    '8022',  # IBAN/BIC inconsistency
+    '8124',  # Invalid currency
+    '8852',  # Attribute length violation
+    '8894',  # Invalid IBAN
+    '8895',  # Invalid NCH
+    '8898',  # IBAN checksum failed
+}
+
+# Codes that require directory lookup - can predict eligibility but not certainty
+DIRECTORY_DEPENDENT = {
+    '8003',  # File name derivation
+    '8034',  # Forced debit
+    '8035',  # FCDA validation
+    '8036',  # FCDA name match
+    '8464',  # Target channel
+    '8465',  # Product code
+    '8472',  # Fee code
+    '8851',  # Field size (schema)
+    '8853',  # Number format (schema)
+    '8905',  # Hash mismatch
+    '8906',  # Wrong flow
+}
+
+# Global codes (not party-specific)
+GLOBAL_CODES = {'8007', '8022', '8023', '8024', '8025', '8027', '8028', '8029', '8033', '8124'}
+
+# Bank party types - don't need IBANs
+BANK_SUFFIXES = {'SNDBNK', 'INTBNK', 'BNFBNK'}
+
+# Party account types - may need IBANs
+PARTY_SUFFIXES_ACCOUNT = {'ORGPTY', 'DBTPTY', 'CDTPTY', 'BNPPTY'}
+
+# Codes that only apply to party accounts, not banks
+PARTY_ONLY_CODES = {'8004', '8030'}
 
 # Valid ISO 3166-1 alpha-2 country codes
 VALID_COUNTRY_CODES = {
@@ -75,38 +135,23 @@ VALID_COUNTRY_CODES = {
     'VN', 'VU', 'WF', 'WS', 'XK', 'YE', 'YT', 'ZA', 'ZM', 'ZW'
 }
 
-# Valid ISO 4217 currency codes
+# Valid ISO 4217 currency codes (common ones)
 VALID_CURRENCY_CODES = {
-    'AED', 'AFN', 'ALL', 'AMD', 'ANG', 'AOA', 'ARS', 'AUD', 'AWG', 'AZN',
-    'BAM', 'BBD', 'BDT', 'BGN', 'BHD', 'BIF', 'BMD', 'BND', 'BOB', 'BRL',
-    'BSD', 'BTN', 'BWP', 'BYN', 'BZD', 'CAD', 'CDF', 'CHF', 'CLP', 'CNY',
-    'COP', 'CRC', 'CUC', 'CUP', 'CVE', 'CZK', 'DJF', 'DKK', 'DOP', 'DZD',
-    'EGP', 'ERN', 'ETB', 'EUR', 'FJD', 'FKP', 'GBP', 'GEL', 'GHS', 'GIP',
-    'GMD', 'GNF', 'GTQ', 'GYD', 'HKD', 'HNL', 'HRK', 'HTG', 'HUF', 'IDR',
-    'ILS', 'INR', 'IQD', 'IRR', 'ISK', 'JMD', 'JOD', 'JPY', 'KES', 'KGS',
-    'KHR', 'KMF', 'KPW', 'KRW', 'KWD', 'KYD', 'KZT', 'LAK', 'LBP', 'LKR',
-    'LRD', 'LSL', 'LYD', 'MAD', 'MDL', 'MGA', 'MKD', 'MMK', 'MNT', 'MOP',
-    'MRU', 'MUR', 'MVR', 'MWK', 'MXN', 'MYR', 'MZN', 'NAD', 'NGN', 'NIO',
-    'NOK', 'NPR', 'NZD', 'OMR', 'PAB', 'PEN', 'PGK', 'PHP', 'PKR', 'PLN',
-    'PYG', 'QAR', 'RON', 'RSD', 'RUB', 'RWF', 'SAR', 'SBD', 'SCR', 'SDG',
-    'SEK', 'SGD', 'SHP', 'SLL', 'SOS', 'SRD', 'SSP', 'STN', 'SVC', 'SYP',
-    'SZL', 'THB', 'TJS', 'TMT', 'TND', 'TOP', 'TRY', 'TTD', 'TWD', 'TZS',
-    'UAH', 'UGX', 'USD', 'UYU', 'UZS', 'VES', 'VND', 'VUV', 'WST', 'XAF',
-    'XCD', 'XOF', 'XPF', 'YER', 'ZAR', 'ZMW', 'ZWL'
+    'AED', 'AFN', 'ALL', 'AMD', 'ANG', 'AOA', 'ARS', 'AUD', 'AWG', 'AZN', 'BAM', 'BBD', 'BDT', 'BGN',
+    'BHD', 'BIF', 'BMD', 'BND', 'BOB', 'BRL', 'BSD', 'BTN', 'BWP', 'BYN', 'BZD', 'CAD', 'CDF', 'CHF',
+    'CLP', 'CNY', 'COP', 'CRC', 'CUP', 'CVE', 'CZK', 'DJF', 'DKK', 'DOP', 'DZD', 'EGP', 'ERN', 'ETB',
+    'EUR', 'FJD', 'FKP', 'GBP', 'GEL', 'GHS', 'GIP', 'GMD', 'GNF', 'GTQ', 'GYD', 'HKD', 'HNL', 'HRK',
+    'HTG', 'HUF', 'IDR', 'ILS', 'INR', 'IQD', 'IRR', 'ISK', 'JMD', 'JOD', 'JPY', 'KES', 'KGS', 'KHR',
+    'KMF', 'KPW', 'KRW', 'KWD', 'KYD', 'KZT', 'LAK', 'LBP', 'LKR', 'LRD', 'LSL', 'LYD', 'MAD', 'MDL',
+    'MGA', 'MKD', 'MMK', 'MNT', 'MOP', 'MRU', 'MUR', 'MVR', 'MWK', 'MXN', 'MYR', 'MZN', 'NAD', 'NGN',
+    'NIO', 'NOK', 'NPR', 'NZD', 'OMR', 'PAB', 'PEN', 'PGK', 'PHP', 'PKR', 'PLN', 'PYG', 'QAR', 'RON',
+    'RSD', 'RUB', 'RWF', 'SAR', 'SBD', 'SCR', 'SDG', 'SEK', 'SGD', 'SHP', 'SLL', 'SOS', 'SRD', 'SSP',
+    'STN', 'SVC', 'SYP', 'SZL', 'THB', 'TJS', 'TMT', 'TND', 'TOP', 'TRY', 'TTD', 'TWD', 'TZS', 'UAH',
+    'UGX', 'USD', 'UYU', 'UZS', 'VES', 'VND', 'VUV', 'WST', 'XAF', 'XCD', 'XOF', 'XPF', 'YER', 'ZAR',
+    'ZMW', 'ZWL'
 }
 
-# Currency decimal places (ISO 4217)
-CURRENCY_DECIMALS = {
-    # 0 decimal places
-    'BIF': 0, 'CLP': 0, 'DJF': 0, 'GNF': 0, 'ISK': 0, 'JPY': 0, 'KMF': 0,
-    'KRW': 0, 'PYG': 0, 'RWF': 0, 'UGX': 0, 'VND': 0, 'VUV': 0, 'XAF': 0,
-    'XOF': 0, 'XPF': 0,
-    # 3 decimal places
-    'BHD': 3, 'IQD': 3, 'JOD': 3, 'KWD': 3, 'LYD': 3, 'OMR': 3, 'TND': 3,
-    # Default is 2 decimal places
-}
-
-# IBAN lengths by country (ISO 13616)
+# IBAN lengths by country
 IBAN_LENGTHS = {
     'AL': 28, 'AD': 24, 'AT': 20, 'AZ': 28, 'BH': 22, 'BY': 28, 'BE': 16, 'BA': 20,
     'BR': 29, 'BG': 22, 'CR': 22, 'HR': 21, 'CY': 28, 'CZ': 24, 'DK': 18, 'DO': 28,
@@ -120,14 +165,11 @@ IBAN_LENGTHS = {
     'UA': 29,
 }
 
-# Countries that require IBAN (SEPA + others)
-IBAN_REQUIRED_COUNTRIES = set(IBAN_LENGTHS.keys())
-
-# Countries that support IBAN derivation from domestic account
-IBAN_DERIVATION_SUPPORTED = {
-    'AT', 'BE', 'CH', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GB', 'GR',
-    'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'NL', 'NO', 'PL', 'PT', 'RO',
-    'SE', 'SI', 'SK'
+# IBAN-requiring countries
+IBAN_COUNTRIES = {
+    'DE', 'FR', 'GB', 'ES', 'IT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI',
+    'PL', 'PT', 'IE', 'GR', 'CZ', 'HU', 'RO', 'SK', 'LU', 'HR', 'SI', 'BG', 'LT',
+    'LV', 'EE', 'CY', 'MT', 'AE', 'SA', 'QA', 'KW', 'BH', 'IL', 'TR', 'EG', 'MA'
 }
 
 
@@ -136,1624 +178,1035 @@ IBAN_DERIVATION_SUPPORTED = {
 # =============================================================================
 
 @dataclass
-class CodeCheckResult:
-    """
-    Result of checking a single error code.
-    
-    Attributes:
-        code: The error code (e.g., "8001")
-        fires: True if code WILL fire (deterministic)
-        eligible: True if eligible for directory lookup (9XXX only)
-        cannot_fire: True if preconditions not met
-        confidence: 1.0 for deterministic, 0.7-0.9 for directory-dependent
-        decision_path: List of decision steps taken
-        party: Which party triggered the code (if applicable)
-        features_used: Feature values that influenced the decision
-        description: Human-readable description of what the code means
-    """
+class ValidationResult:
+    """Result for a single code check."""
     code: str
-    fires: bool = False
-    eligible: bool = False
-    cannot_fire: bool = False
-    confidence: float = 1.0
-    decision_path: List[str] = field(default_factory=list)
-    party: Optional[str] = None
-    features_used: Dict[str, Any] = field(default_factory=dict)
-    description: str = ""
+    party: Optional[str]
+    fires: bool
+    reason: str
+    features_checked: Dict[str, Any] = field(default_factory=dict)
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            'code': self.code,
-            'fires': self.fires,
-            'eligible': self.eligible,
-            'cannot_fire': self.cannot_fire,
-            'confidence': self.confidence,
-            'decision_path': self.decision_path,
-            'party': self.party,
-            'features_used': self.features_used,
-            'description': self.description
-        }
+    @property
+    def code_with_party(self) -> str:
+        if self.party:
+            return f"{self.code}_{self.party}"
+        return self.code
+
+
+@dataclass
+class PaymentResult:
+    """Result of validating a single payment."""
+    payment_id: str
+    predicted_codes: Set[str]
+    actual_codes: Set[str]
+    correct: Set[str]
+    missed: Set[str]  # False negatives
+    false_positives: Set[str]
+    details: List[ValidationResult]
+    excluded_codes: Set[str]  # Codes excluded from comparison (directory-dependent)
+    
+    @property
+    def passed(self) -> bool:
+        return len(self.missed) == 0 and len(self.false_positives) == 0
+
+
+@dataclass
+class AccuracyReport:
+    """Accuracy metrics across multiple payments."""
+    total_payments: int
+    payments_correct: int
+    total_predictions: int
+    true_positives: int
+    false_positives: int
+    false_negatives: int
+    precision: float
+    recall: float
+    f1: float
+    code_breakdown: Dict[str, Dict[str, int]]
 
 
 # =============================================================================
-# 8XXX VALIDATION RULES CLASS
+# VALIDATION FUNCTIONS
 # =============================================================================
 
-class Rules8XXX:
+def validate_bic(bic: str) -> Tuple[bool, bool]:
     """
-    Deterministic rules for 8XXX validation error codes.
-    
-    All 8XXX codes are fully deterministic from input features.
-    No directory lookups required.
-    
-    Usage:
-        rules = Rules8XXX()
-        
-        # Check all codes for all parties
-        results = rules.check_all(features_dict, parties_dict)
-        
-        # Check single code for single party
-        result = rules.check_8001(party_features, "BNFBNK")
+    Validate BIC format and country code.
+    Returns (format_valid, country_valid)
     """
+    if not bic:
+        return False, False
     
-    # Party type to code suffix mapping
-    PARTY_SUFFIXES = {
-        'OriginatingParty': 'ORGPTY',
-        'SendingBank': 'SNDBNK',
-        'DebitParty': 'DBTPTY',
-        'CreditParty': 'CDTPTY',
-        'IntermediaryBank': 'INTMBNK',
-        'BeneficiaryBank': 'BNFBNK',
-        'BeneficiaryParty': 'BNPPTY',
-        'AccountWithInstitution': 'ACWI',
-        'OrderingInstitution': 'ORDI',
-    }
+    bic = bic.upper().strip()
     
-    # Feature prefix mapping (short prefixes used in flat feature dict)
-    # NOTE: Using only the short form names to avoid duplicates
-    PARTY_PREFIXES = {
-        'OriginatingParty': 'orig',
-        'SendingBank': 'send',
-        'DebitParty': 'dbt',
-        'CreditParty': 'cdt',
-        'IntermediaryBank': 'intm',
-        'BeneficiaryBank': 'bnf',
-        'BeneficiaryParty': 'bnp',
+    # BIC must be 8 or 11 characters
+    if len(bic) not in (8, 11):
+        return False, False
+    
+    # Format: 4 letters (bank) + 2 letters (country) + 2 alphanum (location) + optional 3 alphanum (branch)
+    pattern = r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$'
+    format_valid = bool(re.match(pattern, bic))
+    
+    # Country validation
+    country_code = bic[4:6] if len(bic) >= 6 else ''
+    country_valid = country_code in VALID_COUNTRY_CODES
+    
+    return format_valid, country_valid
+
+
+def validate_bic4(bic: str) -> bool:
+    """Validate first 4 characters of BIC (must be letters A-Z)."""
+    if not bic or len(bic) < 4:
+        return False
+    return bic[:4].upper().isalpha()
+
+
+def validate_iban(iban: str) -> Tuple[bool, bool]:
+    """
+    Validate IBAN format and checksum.
+    Returns (format_valid, checksum_valid)
+    """
+    if not iban:
+        return False, False
+    
+    # Clean IBAN
+    iban = iban.upper().replace(' ', '').replace('-', '')
+    
+    if len(iban) < 5:
+        return False, False
+    
+    # Check country code
+    country_code = iban[:2]
+    if not country_code.isalpha():
+        return False, False
+    
+    # Check length for known countries
+    expected_length = IBAN_LENGTHS.get(country_code)
+    if expected_length:
+        format_valid = len(iban) == expected_length
+    else:
+        # Generic IBAN length range
+        format_valid = 15 <= len(iban) <= 34
+    
+    # Mod-97 checksum validation
+    try:
+        # Rearrange: move first 4 chars to end
+        rearranged = iban[4:] + iban[:4]
+        # Convert letters to numbers (A=10, B=11, etc.)
+        numeric = ''
+        for char in rearranged:
+            if char.isdigit():
+                numeric += char
+            elif char.isalpha():
+                numeric += str(ord(char) - ord('A') + 10)
+            else:
+                return format_valid, False
+        checksum_valid = int(numeric) % 97 == 1
+    except (ValueError, OverflowError):
+        checksum_valid = False
+    
+    return format_valid, checksum_valid
+
+
+def validate_fedaba(aba: str) -> Tuple[bool, bool]:
+    """
+    Validate US ABA routing number.
+    Returns (format_valid, checksum_valid)
+    """
+    if not aba:
+        return False, False
+    
+    aba = aba.strip()
+    
+    # Must be exactly 9 digits
+    if len(aba) != 9 or not aba.isdigit():
+        return False, False
+    
+    format_valid = True
+    
+    # Checksum: 3*d1 + 7*d2 + 1*d3 + 3*d4 + 7*d5 + 1*d6 + 3*d7 + 7*d8 + 1*d9 = 0 mod 10
+    try:
+        weights = [3, 7, 1, 3, 7, 1, 3, 7, 1]
+        total = sum(int(d) * w for d, w in zip(aba, weights))
+        checksum_valid = (total % 10 == 0)
+    except (ValueError, TypeError):
+        checksum_valid = False
+    
+    return format_valid, checksum_valid
+
+
+def validate_currency(currency: str) -> bool:
+    """Validate ISO 4217 currency code."""
+    if not currency:
+        return False
+    return currency.upper().strip() in VALID_CURRENCY_CODES
+
+
+def validate_country(country: str) -> bool:
+    """Validate ISO 3166-1 alpha-2 country code."""
+    if not country:
+        return False
+    return country.upper().strip() in VALID_COUNTRY_CODES
+
+
+# =============================================================================
+# FEATURE EXTRACTOR (Simplified from ifml_parser_v3)
+# =============================================================================
+
+class FeatureExtractor:
+    """Extract validation-relevant features from IFML data."""
+    
+    PARTY_MAPPING = {
+        'OriginatingPartyInf': 'orig', 'OriginatingPartyInfo': 'orig',
+        'SendingBankInf': 'send', 'SendingBankInfo': 'send',
+        'DebitPartyInf': 'dbt', 'DebitPartyInfo': 'dbt',
+        'CreditPartyInf': 'cdt', 'CreditPartyInfo': 'cdt',
+        'IntermediaryBankInf': 'intm', 'IntermediaryBankInfo': 'intm',
+        'BeneficiaryBankInf': 'bnf', 'BeneficiaryBankInfo': 'bnf',
+        'BeneficiaryPartyInf': 'bnp', 'BeneficiaryPartyInfo': 'bnp',
         'AccountWithInstitution': 'acwi',
         'OrderingInstitution': 'ordi',
     }
     
-    def __init__(self):
-        """Initialize the 8XXX rules engine."""
-        pass
+    def __init__(self, debug: bool = False):
+        self.features = {}
+        self.debug = debug
     
-    # =========================================================================
-    # HELPER METHODS
-    # =========================================================================
+    def extract(self, data: Dict) -> Dict:
+        """Extract all features from IFML data."""
+        self.features = {}
+        
+        # Find Message node
+        message = self._find_message(data)
+        if not message:
+            return self.features
+        
+        basic_payment = message.get('BasicPayment', {})
+        if not basic_payment:
+            return self.features
+        
+        # Parse basic transaction info
+        self._parse_basic_info(basic_payment)
+        
+        # Parse monetary amounts
+        self._parse_amounts(basic_payment)
+        
+        # Parse parties
+        self._parse_parties(basic_payment)
+        
+        # Parse cross-party features
+        self._parse_cross_party(basic_payment)
+        
+        return self.features
     
-    def _get_party_features(self, features: Dict, party_type: str) -> Dict:
-        """
-        Extract features for a specific party from flat feature dict.
+    def _find_message(self, data: Dict) -> Optional[Dict]:
+        """Navigate to Message node."""
+        paths = [
+            ['Request', 'IFML', 'File', 'Message'],
+            ['IFML', 'File', 'Message'],
+            ['File', 'Message'],
+            ['Message'],
+        ]
         
-        Args:
-            features: Flat feature dictionary with prefixed keys
-            party_type: Party type name (e.g., "BeneficiaryBankInfo")
-            
-        Returns:
-            Dict with party-specific features (prefix removed)
-        """
-        prefix = self.PARTY_PREFIXES.get(party_type, '')
-        if not prefix:
-            return {}
-        
-        prefix_with_underscore = f"{prefix}_"
-        party_features = {}
-        
-        for key, value in features.items():
-            if key.startswith(prefix_with_underscore):
-                # Remove prefix to get base feature name
-                base_key = key[len(prefix_with_underscore):]
-                party_features[base_key] = value
-            # Also include non-prefixed keys (global features)
-            elif '_' not in key or not any(key.startswith(p + '_') for p in self.PARTY_PREFIXES.values()):
-                party_features[key] = value
-        
-        return party_features
-    
-    def _get_suffix(self, party_type: str) -> str:
-        """Get code suffix for party type."""
-        return self.PARTY_SUFFIXES.get(party_type, 'UNKNOWN')
-    
-    def _validate_bic_format(self, bic: str) -> Tuple[bool, bool, str]:
-        """
-        Validate BIC format and country.
-        
-        Returns:
-            Tuple of (format_valid, country_valid, country_code)
-        """
-        if not bic:
-            return False, False, ''
-        
-        bic = bic.upper().strip()
-        
-        # Check length (8 or 11)
-        if len(bic) not in (8, 11):
-            return False, False, ''
-        
-        # Check format pattern
-        pattern = r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$'
-        format_valid = bool(re.match(pattern, bic))
-        
-        # Extract and validate country
-        country_code = bic[4:6] if len(bic) >= 6 else ''
-        country_valid = country_code in VALID_COUNTRY_CODES
-        
-        return format_valid, country_valid, country_code
-    
-    def _validate_iban(self, iban: str) -> Tuple[bool, bool, str]:
-        """
-        Validate IBAN format and checksum.
-        
-        Returns:
-            Tuple of (format_valid, checksum_valid, country_code)
-        """
-        if not iban:
-            return False, False, ''
-        
-        iban = iban.upper().replace(' ', '').replace('-', '')
-        
-        if len(iban) < 5:
-            return False, False, ''
-        
-        country_code = iban[:2]
-        if not country_code.isalpha():
-            return False, False, ''
-        
-        # Check length for country
-        expected_length = IBAN_LENGTHS.get(country_code)
-        if expected_length:
-            format_valid = len(iban) == expected_length
-        else:
-            format_valid = 15 <= len(iban) <= 34
-        
-        # Validate checksum (mod-97)
-        try:
-            rearranged = iban[4:] + iban[:4]
-            numeric = ''
-            for char in rearranged:
-                if char.isdigit():
-                    numeric += char
-                elif char.isalpha():
-                    numeric += str(ord(char) - ord('A') + 10)
+        for path in paths:
+            current = data
+            for key in path:
+                if isinstance(current, dict):
+                    current = current.get(key)
                 else:
-                    return format_valid, False, country_code
+                    current = None
+                    break
+            if current and isinstance(current, dict):
+                return current
+        
+        # Try with transaction ID wrapper
+        if isinstance(data, dict) and len(data) == 1:
+            key = list(data.keys())[0]
+            nested = data[key]
+            for path in paths:
+                current = nested
+                for key in path:
+                    if isinstance(current, dict):
+                        current = current.get(key)
+                    else:
+                        current = None
+                        break
+                if current and isinstance(current, dict):
+                    return current
+        
+        return None
+    
+    def _parse_basic_info(self, basic_payment: Dict):
+        """Parse basic transaction info."""
+        self.features['transaction_id'] = basic_payment.get('TransactionID')
+        self.features['transaction_uid'] = basic_payment.get('TransactionUID')
+        self.features['source_code'] = basic_payment.get('SourceCode')
+        self.features['incoming_msg_type'] = basic_payment.get('IncomingMsgType')
+    
+    def _parse_amounts(self, basic_payment: Dict):
+        """Parse monetary amounts."""
+        amounts = basic_payment.get('MonetaryAmount', [])
+        if isinstance(amounts, dict):
+            amounts = [amounts]
+        
+        for amt in amounts:
+            amt_type = amt.get('@Type') or amt.get('Type') or 'Unknown'
+            currency = amt.get('@Currency') or amt.get('Currency')
+            amount_str = str(amt.get('Amount', '0'))
             
-            checksum_valid = int(numeric) % 97 == 1
-        except (ValueError, OverflowError):
-            checksum_valid = False
-        
-        return format_valid, checksum_valid, country_code
+            if amt_type == 'Amount':
+                self.features['primary_currency'] = currency
+                self.features['has_currency'] = currency is not None
+                self.features['currency_valid'] = validate_currency(currency) if currency else False
+                
+                # Check decimal places
+                if '.' in amount_str:
+                    decimals = len(amount_str.split('.')[1])
+                    self.features['amount_decimals'] = decimals
+                    self.features['amount_decimals_valid'] = decimals <= 2  # Most currencies
+                else:
+                    self.features['amount_decimals'] = 0
+                    self.features['amount_decimals_valid'] = True
     
-    def _validate_fedaba(self, aba: str) -> Tuple[bool, bool]:
-        """
-        Validate US ABA routing number.
+    def _parse_parties(self, basic_payment: Dict):
+        """Parse all party information."""
+        party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
         
-        Returns:
-            Tuple of (format_valid, checksum_valid)
-        """
-        if not aba:
-            return False, False
+        if not isinstance(party_info, dict):
+            return
         
-        aba = aba.strip().replace('-', '').replace(' ', '')
-        
-        # Must be 9 digits
-        if len(aba) != 9 or not aba.isdigit():
-            return False, False
-        
-        format_valid = True
-        
-        # ABA checksum: weights [3,7,1,3,7,1,3,7,1], sum mod 10 = 0
-        try:
-            weights = [3, 7, 1, 3, 7, 1, 3, 7, 1]
-            total = sum(int(d) * w for d, w in zip(aba, weights))
-            checksum_valid = (total % 10 == 0)
-        except (ValueError, TypeError):
-            checksum_valid = False
-        
-        return format_valid, checksum_valid
+        processed = set()
+        for ifml_name, prefix in self.PARTY_MAPPING.items():
+            party_data = party_info.get(ifml_name)
+            if party_data:
+                if isinstance(party_data, list):
+                    party_data = party_data[0] if party_data else None
+                if party_data and isinstance(party_data, dict):
+                    if prefix not in processed:
+                        self._extract_party(party_data, prefix)
+                        processed.add(prefix)
     
-    # =========================================================================
-    # INDIVIDUAL CODE CHECKS
-    # =========================================================================
-    
-    def check_8001(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8001: Invalid BIC
+    def _extract_party(self, party_data: Dict, prefix: str):
+        """Extract features from a single party."""
+        self.features[f'{prefix}_present'] = True
         
-        Decision Tree:
-            has_bic = True?
-            ├─ NO → Cannot fire
-            └─ YES → bic_valid_format?
-                      ├─ NO → 8001 FIRES
-                      └─ YES → bic_valid_country?
-                                ├─ NO → 8001 FIRES
-                                └─ YES → Cannot fire
-        """
-        result = CodeCheckResult(
-            code='8001',
-            party=party,
-            description='Invalid BIC - format or country code invalid'
+        # Get basic info section
+        basic = (
+            party_data.get('BasicPartyInfo') or
+            party_data.get('BasicPartyInf') or
+            party_data.get('BasicIDInfo') or
+            party_data.get('AccountPartyInfo') or
+            party_data.get('AccountPartyInf') or
+            party_data.get('BasicPartyBankInfo') or
+            party_data.get('BasicPartyBankInf') or
+            party_data
         )
         
-        has_bic = features.get('has_bic', False)
-        bic_value = features.get('bic') or features.get('bic_value', '')
-        
-        result.features_used = {
-            'has_bic': has_bic,
-            'bic_value': bic_value
-        }
-        
-        # Step 1: Check if BIC present
-        if not has_bic or not bic_value:
-            result.cannot_fire = True
-            result.decision_path = ['has_bic=False', '→ Cannot fire (no BIC to validate)']
-            return result
-        
-        result.decision_path.append(f'has_bic=True (bic={bic_value})')
-        
-        # Step 2: Validate BIC
-        format_valid, country_valid, country_code = self._validate_bic_format(bic_value)
-        
-        result.features_used['bic_valid_format'] = format_valid
-        result.features_used['bic_valid_country'] = country_valid
-        result.features_used['bic_country'] = country_code
-        
-        if not format_valid:
-            result.fires = True
-            result.decision_path.append(f'bic_valid_format=False')
-            result.decision_path.append('→ 8001 FIRES (invalid BIC format)')
-            return result
-        
-        result.decision_path.append(f'bic_valid_format=True')
-        
-        if not country_valid:
-            result.fires = True
-            result.decision_path.append(f'bic_valid_country=False (country={country_code})')
-            result.decision_path.append('→ 8001 FIRES (invalid country in BIC)')
-            return result
-        
-        result.decision_path.append(f'bic_valid_country=True (country={country_code})')
-        result.cannot_fire = True
-        result.decision_path.append('→ Cannot fire (BIC is valid)')
-        
-        return result
-    
-    def check_8004(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8004: IBAN Cannot Be Derived
-        
-        ACTUAL ACE BEHAVIOR:
-        8004 fires when:
-        1. Destination country requires IBAN (is an IBAN country)
-        2. No valid IBAN is provided
-        3. ACE cannot derive IBAN from available account info
-        
-        Decision Tree:
-            is_iban_country? (destination requires IBAN)
-            ├─ NO → Cannot fire
-            └─ YES → has_valid_iban?
-                      ├─ YES → Cannot fire
-                      └─ NO → can_derive_iban? (has account + BIC/NCH for lookup)
-                               ├─ YES → ELIGIBLE (directory lookup needed)
-                               └─ NO → 8004 FIRES
-        
-        NOTE: This is directory-dependent. We can predict eligibility but 
-              not the final outcome since derivation may fail.
-        """
-        result = CodeCheckResult(
-            code='8004',
-            party=party,
-            description='IBAN cannot be derived - required but not provided or derivable'
-        )
-        
-        # Get country - check multiple sources
-        country = (features.get('country') or 
-                   features.get('address_country') or 
-                   features.get('iban_country') or
-                   features.get('bic_country') or '')
-        
-        has_iban = features.get('has_iban', False)
-        iban_value = features.get('iban') or features.get('account_value', '')
-        iban_valid = features.get('iban_valid_format', False) and features.get('iban_checksum_valid', False)
-        
-        has_account = features.get('has_account', False)
-        account_value = features.get('account_value', '')
-        
-        has_bic = features.get('has_bic', False)
-        has_nch = features.get('has_nch', False)
-        
-        # Check if IBAN is actually present and valid
-        if has_iban and iban_value:
-            # Validate IBAN format
-            iban_clean = iban_value.upper().replace(' ', '').replace('-', '')
-            if len(iban_clean) >= 15 and iban_clean[:2].isalpha():
-                iban_valid = True
-        
-        # Check if country requires IBAN
-        is_iban_country = country.upper() in IBAN_REQUIRED_COUNTRIES if country else False
-        
-        result.features_used = {
-            'country': country,
-            'is_iban_country': is_iban_country,
-            'has_iban': has_iban,
-            'iban_valid': iban_valid,
-            'has_account': has_account,
-            'has_bic': has_bic,
-            'has_nch': has_nch
-        }
-        
-        # Step 1: Check if destination requires IBAN
-        if not is_iban_country:
-            result.cannot_fire = True
-            result.decision_path = [f'is_iban_country=False (country={country})', 
-                                    '→ Cannot fire (IBAN not required for this country)']
-            return result
-        
-        result.decision_path.append(f'is_iban_country=True (country={country})')
-        
-        # Step 2: Check if valid IBAN already present
-        if has_iban and iban_valid:
-            result.cannot_fire = True
-            result.decision_path.append('has_valid_iban=True')
-            result.decision_path.append('→ Cannot fire (valid IBAN present)')
-            return result
-        
-        result.decision_path.append(f'has_valid_iban=False')
-        
-        # Step 3: Check if IBAN can be derived
-        # Derivation requires: account number + (BIC or NCH) for directory lookup
-        can_derive = has_account and (has_bic or has_nch)
-        derivation_supported = country.upper() in IBAN_DERIVATION_SUPPORTED if country else False
-        
-        result.features_used['can_derive'] = can_derive
-        result.features_used['derivation_supported'] = derivation_supported
-        
-        if can_derive and derivation_supported:
-            # Has the ingredients for derivation - outcome depends on directory
-            result.eligible = True
-            result.confidence = 0.70  # ~70% of eligible cases result in 8004
-            result.decision_path.append(f'can_derive=True, derivation_supported=True')
-            result.decision_path.append('→ ELIGIBLE (directory lookup will determine outcome)')
-            return result
-        
-        # Cannot derive - 8004 will fire
-        result.fires = True
-        if not has_account:
-            result.decision_path.append('has_account=False')
-            result.decision_path.append('→ 8004 FIRES (no account to derive IBAN from)')
-        elif not derivation_supported:
-            result.decision_path.append(f'derivation_supported=False (country={country})')
-            result.decision_path.append('→ 8004 FIRES (IBAN derivation not supported for country)')
-        else:
-            result.decision_path.append('can_derive=False (missing BIC/NCH for lookup)')
-            result.decision_path.append('→ 8004 FIRES (cannot perform directory lookup)')
-        
-        return result
-    
-    def check_8005(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8005: Invalid BIC4 (first 4 characters)
-        
-        Decision Tree:
-            has_bic = True?
-            ├─ NO → Cannot fire
-            └─ YES → bic_length >= 4?
-                      ├─ NO → 8005 FIRES
-                      └─ YES → bic4_valid? (first 4 chars are letters)
-                                ├─ NO → 8005 FIRES
-                                └─ YES → Cannot fire
-        """
-        result = CodeCheckResult(
-            code='8005',
-            party=party,
-            description='Invalid BIC4 - first 4 characters of BIC invalid'
-        )
-        
-        has_bic = features.get('has_bic', False)
-        bic_value = features.get('bic') or features.get('bic_value', '')
-        
-        result.features_used = {
-            'has_bic': has_bic,
-            'bic_value': bic_value
-        }
-        
-        if not has_bic or not bic_value:
-            result.cannot_fire = True
-            result.decision_path = ['has_bic=False', '→ Cannot fire (no BIC)']
-            return result
-        
-        result.decision_path.append(f'has_bic=True (bic={bic_value})')
-        
-        bic = bic_value.upper().strip()
-        bic_length = len(bic)
-        
-        result.features_used['bic_length'] = bic_length
-        
-        if bic_length < 4:
-            result.fires = True
-            result.decision_path.append(f'bic_length={bic_length} < 4')
-            result.decision_path.append('→ 8005 FIRES (BIC too short for BIC4)')
-            return result
-        
-        result.decision_path.append(f'bic_length={bic_length} >= 4')
-        
-        # Check if first 4 chars are letters
-        bic4 = bic[:4]
-        bic4_valid = bic4.isalpha()
-        
-        result.features_used['bic4'] = bic4
-        result.features_used['bic4_valid'] = bic4_valid
-        
-        if not bic4_valid:
-            result.fires = True
-            result.decision_path.append(f'bic4_valid=False (bic4={bic4})')
-            result.decision_path.append('→ 8005 FIRES (BIC4 contains non-letters)')
-            return result
-        
-        result.decision_path.append(f'bic4_valid=True (bic4={bic4})')
-        result.cannot_fire = True
-        result.decision_path.append('→ Cannot fire (BIC4 is valid)')
-        
-        return result
-    
-    def check_8006(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8006: Invalid Country Code
-        
-        Decision Tree:
-            has_country? (any country field)
-            ├─ NO → Cannot fire
-            └─ YES → country in ISO 3166-1?
-                      ├─ YES → Cannot fire
-                      └─ NO → 8006 FIRES
-        """
-        result = CodeCheckResult(
-            code='8006',
-            party=party,
-            description='Invalid country code - not a valid ISO 3166-1 alpha-2 code'
-        )
-        
-        # Check all possible country sources
-        country = features.get('country', '')
-        bic_country = features.get('bic_country', '')
-        iban_country = features.get('iban_country', '')
-        address_country = features.get('address_country', '')
-        
-        result.features_used = {
-            'country': country,
-            'bic_country': bic_country,
-            'iban_country': iban_country,
-            'address_country': address_country
-        }
-        
-        # Collect all country values
-        countries = [c for c in [country, bic_country, iban_country, address_country] if c]
-        
-        if not countries:
-            result.cannot_fire = True
-            result.decision_path = ['has_country=False', '→ Cannot fire (no country to validate)']
-            return result
-        
-        result.decision_path.append(f'has_country=True (countries={countries})')
-        
-        # Check each country for validity
-        invalid_countries = [c for c in countries if c not in VALID_COUNTRY_CODES]
-        
-        if invalid_countries:
-            result.fires = True
-            result.decision_path.append(f'invalid_countries={invalid_countries}')
-            result.decision_path.append('→ 8006 FIRES (invalid country code found)')
-            result.features_used['invalid_countries'] = invalid_countries
-            return result
-        
-        result.cannot_fire = True
-        result.decision_path.append('all_countries_valid=True')
-        result.decision_path.append('→ Cannot fire (all country codes valid)')
-        
-        return result
-    
-    def check_8007(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8007: Fractional Digits Exceed Maximum
-        
-        Decision Tree:
-            has_amount = True?
-            ├─ NO → Cannot fire
-            └─ YES → Get allowed decimals for currency
-                      └─ actual_decimals > allowed_decimals?
-                                ├─ NO → Cannot fire
-                                └─ YES → 8007 FIRES
-        """
-        result = CodeCheckResult(
-            code='8007',
-            party=party,
-            description='Fractional digits exceed maximum allowed for currency'
-        )
-        
-        has_amount = features.get('has_amount', False) or features.get('primary_amount', 0) > 0
-        currency = features.get('primary_currency', '')
-        amount = features.get('primary_amount', 0)
-        
-        result.features_used = {
-            'has_amount': has_amount,
-            'currency': currency,
-            'amount': amount
-        }
-        
-        if not has_amount or not amount:
-            result.cannot_fire = True
-            result.decision_path = ['has_amount=False', '→ Cannot fire (no amount)']
-            return result
-        
-        result.decision_path.append(f'has_amount=True (amount={amount}, currency={currency})')
-        
-        if not currency:
-            result.cannot_fire = True
-            result.decision_path.append('currency=None')
-            result.decision_path.append('→ Cannot fire (no currency to check decimals)')
-            return result
-        
-        # Get allowed decimals for currency
-        allowed_decimals = CURRENCY_DECIMALS.get(currency.upper(), 2)
-        result.features_used['allowed_decimals'] = allowed_decimals
-        
-        # Count actual decimal places
-        amount_str = str(amount)
-        if '.' in amount_str:
-            actual_decimals = len(amount_str.split('.')[1])
-        else:
-            actual_decimals = 0
-        
-        result.features_used['actual_decimals'] = actual_decimals
-        result.decision_path.append(f'allowed_decimals={allowed_decimals}, actual_decimals={actual_decimals}')
-        
-        if actual_decimals > allowed_decimals:
-            result.fires = True
-            result.decision_path.append('→ 8007 FIRES (too many decimal places)')
-            return result
-        
-        result.cannot_fire = True
-        result.decision_path.append('→ Cannot fire (decimal places within limit)')
-        
-        return result
-    
-    def check_8022(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8022: IBAN Inconsistent with BIC
-        
-        Decision Tree:
-            has_iban = True?
-            ├─ NO → Cannot fire
-            └─ YES → has_bic = True?
-                      ├─ NO → Cannot fire
-                      └─ YES → Extract countries:
-                                iban_country = iban[0:2]
-                                bic_country = bic[4:6]
-                                └─ countries match?
-                                     ├─ YES → Cannot fire
-                                     └─ NO → 8022 FIRES
-        """
-        result = CodeCheckResult(
-            code='8022',
-            party=party,
-            description='IBAN inconsistent with BIC - country codes do not match'
-        )
-        
-        has_iban = features.get('has_iban', False)
-        has_bic = features.get('has_bic', False)
-        iban_value = features.get('iban') or features.get('account_value', '')
-        bic_value = features.get('bic') or features.get('bic_value', '')
-        
-        result.features_used = {
-            'has_iban': has_iban,
-            'has_bic': has_bic,
-            'iban_value': iban_value,
-            'bic_value': bic_value
-        }
-        
-        # Step 1: Check IBAN present
-        if not has_iban:
-            result.cannot_fire = True
-            result.decision_path = ['has_iban=False', '→ Cannot fire (no IBAN)']
-            return result
-        
-        result.decision_path.append('has_iban=True')
-        
-        # Step 2: Check BIC present
-        if not has_bic:
-            result.cannot_fire = True
-            result.decision_path.append('has_bic=False')
-            result.decision_path.append('→ Cannot fire (no BIC to compare)')
-            return result
-        
-        result.decision_path.append('has_bic=True')
-        
-        # Step 3: Extract and compare countries
-        iban_country = features.get('iban_country', '')
-        bic_country = features.get('bic_country', '')
-        
-        # If not in features, extract from values
-        if not iban_country and iban_value:
-            iban_clean = iban_value.upper().replace(' ', '').replace('-', '')
-            if len(iban_clean) >= 2:
-                iban_country = iban_clean[:2]
-        
-        if not bic_country and bic_value:
-            bic_clean = bic_value.upper().strip()
-            if len(bic_clean) >= 6:
-                bic_country = bic_clean[4:6]
-        
-        result.features_used['iban_country'] = iban_country
-        result.features_used['bic_country'] = bic_country
-        
-        result.decision_path.append(f'iban_country={iban_country}, bic_country={bic_country}')
-        
-        # Check if both countries are valid before comparing
-        if not iban_country or not bic_country:
-            result.cannot_fire = True
-            result.decision_path.append('→ Cannot fire (missing country code)')
-            return result
-        
-        # Compare countries
-        if iban_country == bic_country:
-            result.cannot_fire = True
-            result.decision_path.append('bic_iban_match=True')
-            result.decision_path.append('→ Cannot fire (countries match)')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('bic_iban_match=False')
-        result.decision_path.append(f'→ 8022 FIRES ({iban_country} != {bic_country})')
-        
-        return result
-    
-    def check_8023(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8023: IBAN Inconsistency in Message
-        
-        Decision Tree:
-            Count IBANs across all parties
-            └─ iban_count > 1?
-                ├─ NO → Cannot fire
-                └─ YES → All IBAN values identical?
-                          ├─ YES → Cannot fire
-                          └─ NO → 8023 FIRES
-        
-        Note: This is a cross-party check requiring aggregated features.
-        """
-        result = CodeCheckResult(
-            code='8023',
-            party=None,  # Cross-party check
-            description='IBAN inconsistency - multiple different IBANs in message'
-        )
-        
-        gf = global_features or features
-        
-        iban_count = gf.get('iban_count', 0)
-        ibans_consistent = gf.get('ibans_consistent', True)
-        iban_values = gf.get('iban_values', [])
-        
-        result.features_used = {
-            'iban_count': iban_count,
-            'ibans_consistent': ibans_consistent,
-            'iban_values': iban_values
-        }
-        
-        if iban_count <= 1:
-            result.cannot_fire = True
-            result.decision_path = [f'iban_count={iban_count} <= 1', '→ Cannot fire (0 or 1 IBAN)']
-            return result
-        
-        result.decision_path.append(f'iban_count={iban_count} > 1')
-        
-        if ibans_consistent:
-            result.cannot_fire = True
-            result.decision_path.append('ibans_consistent=True')
-            result.decision_path.append('→ Cannot fire (all IBANs identical)')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('ibans_consistent=False')
-        result.decision_path.append('→ 8023 FIRES (different IBANs in message)')
-        
-        return result
-    
-    def check_8024(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8024: BBAN Inconsistency in Message
-        
-        Similar logic to 8023 but for BBAN values.
-        """
-        result = CodeCheckResult(
-            code='8024',
-            party=None,
-            description='BBAN inconsistency - multiple different BBANs in message'
-        )
-        
-        gf = global_features or features
-        
-        bban_count = gf.get('bban_count', 0)
-        bbans_consistent = gf.get('bbans_consistent', True)
-        
-        result.features_used = {
-            'bban_count': bban_count,
-            'bbans_consistent': bbans_consistent
-        }
-        
-        if bban_count <= 1:
-            result.cannot_fire = True
-            result.decision_path = [f'bban_count={bban_count} <= 1', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'bban_count={bban_count} > 1')
-        
-        if bbans_consistent:
-            result.cannot_fire = True
-            result.decision_path.append('bbans_consistent=True')
-            result.decision_path.append('→ Cannot fire')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('bbans_consistent=False')
-        result.decision_path.append('→ 8024 FIRES')
-        
-        return result
-    
-    def check_8025(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8025: Domestic Account Number Inconsistency
-        """
-        result = CodeCheckResult(
-            code='8025',
-            party=None,
-            description='Domestic account inconsistency - multiple different accounts'
-        )
-        
-        gf = global_features or features
-        
-        account_count = gf.get('domestic_account_count', 0)
-        accounts_consistent = gf.get('domestic_accounts_consistent', True)
-        
-        result.features_used = {
-            'domestic_account_count': account_count,
-            'domestic_accounts_consistent': accounts_consistent
-        }
-        
-        if account_count <= 1:
-            result.cannot_fire = True
-            result.decision_path = [f'domestic_account_count={account_count} <= 1', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'domestic_account_count={account_count} > 1')
-        
-        if accounts_consistent:
-            result.cannot_fire = True
-            result.decision_path.append('→ Cannot fire (accounts consistent)')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('→ 8025 FIRES')
-        
-        return result
-    
-    def check_8026(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8026: NCH Inconsistency in Message
-        
-        Decision Tree:
-            has_nch = True?
-            ├─ NO → Cannot fire
-            └─ YES → Check inconsistency sources:
-                      │
-                      │  SOURCE 1: Multiple NCH values across parties
-                      │  nch_count > 1 AND NOT nchs_consistent → FIRES
-                      │
-                      │  SOURCE 2: Compound ID with embedded NCH
-                      │  id_has_bic_and_nch = True → HIGH RISK
-                      │
-                      │  SOURCE 3: Multiple NCH sources within party
-                      │  nch_sources > 1 → ELEVATED RISK
-        """
-        result = CodeCheckResult(
-            code='8026',
-            party=None,
-            description='NCH inconsistency - conflicting routing codes in message'
-        )
-        
-        gf = global_features or features
-        
-        has_nch = gf.get('has_nch', False)
-        nch_count = gf.get('nch_count', 0)
-        nchs_consistent = gf.get('nchs_consistent', True)
-        id_has_bic_and_nch = gf.get('id_has_bic_and_nch', False)
-        nch_sources = gf.get('nch_sources', 0)
-        id_is_compound = gf.get('id_is_compound', False)
-        
-        result.features_used = {
-            'has_nch': has_nch,
-            'nch_count': nch_count,
-            'nchs_consistent': nchs_consistent,
-            'id_has_bic_and_nch': id_has_bic_and_nch,
-            'nch_sources': nch_sources,
-            'id_is_compound': id_is_compound
-        }
-        
-        # Check if any NCH present
-        if not has_nch and nch_count == 0:
-            result.cannot_fire = True
-            result.decision_path = ['has_nch=False', '→ Cannot fire (no NCH)']
-            return result
-        
-        result.decision_path.append('has_nch=True')
-        
-        # Source 1: Multiple NCH values not consistent
-        if nch_count > 1 and not nchs_consistent:
-            result.fires = True
-            result.decision_path.append(f'nch_count={nch_count} > 1')
-            result.decision_path.append('nchs_consistent=False')
-            result.decision_path.append('→ 8026 FIRES (multiple inconsistent NCH values)')
-            return result
-        
-        # Source 2: Compound ID with both BIC and NCH (high risk)
-        if id_has_bic_and_nch:
-            result.fires = True
-            result.confidence = 0.9  # High confidence but not 100%
-            result.decision_path.append('id_has_bic_and_nch=True')
-            result.decision_path.append('→ 8026 FIRES (compound ID with BIC and NCH)')
-            return result
-        
-        # Source 3: Multiple NCH sources within party
-        if nch_sources > 1:
-            result.fires = True
-            result.confidence = 0.8  # Elevated risk
-            result.decision_path.append(f'nch_sources={nch_sources} > 1')
-            result.decision_path.append('→ 8026 FIRES (multiple NCH sources)')
-            return result
-        
-        result.cannot_fire = True
-        result.decision_path.append('No inconsistency detected')
-        result.decision_path.append('→ Cannot fire')
-        
-        return result
-    
-    def check_8027(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8027: ISO Country Code Inconsistency
-        """
-        result = CodeCheckResult(
-            code='8027',
-            party=None,
-            description='ISO country code inconsistency in message'
-        )
-        
-        gf = global_features or features
-        
-        country_count = gf.get('country_count', 0)
-        countries_consistent = gf.get('countries_consistent', True)
-        
-        result.features_used = {
-            'country_count': country_count,
-            'countries_consistent': countries_consistent
-        }
-        
-        if country_count <= 1:
-            result.cannot_fire = True
-            result.decision_path = [f'country_count={country_count} <= 1', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'country_count={country_count} > 1')
-        
-        if countries_consistent:
-            result.cannot_fire = True
-            result.decision_path.append('→ Cannot fire (countries consistent)')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('→ 8027 FIRES')
-        
-        return result
-    
-    def check_8028(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8028: BIC4 Inconsistency in Message
-        """
-        result = CodeCheckResult(
-            code='8028',
-            party=None,
-            description='BIC4 inconsistency - multiple different BIC4 values'
-        )
-        
-        gf = global_features or features
-        
-        bic4_count = gf.get('bic4_count', 0)
-        bic4s_consistent = gf.get('bic4s_consistent', True)
-        
-        result.features_used = {
-            'bic4_count': bic4_count,
-            'bic4s_consistent': bic4s_consistent
-        }
-        
-        if bic4_count <= 1:
-            result.cannot_fire = True
-            result.decision_path = [f'bic4_count={bic4_count} <= 1', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'bic4_count={bic4_count} > 1')
-        
-        if bic4s_consistent:
-            result.cannot_fire = True
-            result.decision_path.append('→ Cannot fire')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('→ 8028 FIRES')
-        
-        return result
-    
-    def check_8029(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8029: Account Number Inconsistency
-        """
-        result = CodeCheckResult(
-            code='8029',
-            party=None,
-            description='Account number inconsistency in message'
-        )
-        
-        gf = global_features or features
-        
-        account_count = gf.get('account_count', 0)
-        accounts_consistent = gf.get('accounts_consistent', True)
-        
-        result.features_used = {
-            'account_count': account_count,
-            'accounts_consistent': accounts_consistent
-        }
-        
-        if account_count <= 1:
-            result.cannot_fire = True
-            result.decision_path = [f'account_count={account_count} <= 1', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'account_count={account_count} > 1')
-        
-        if accounts_consistent:
-            result.cannot_fire = True
-            result.decision_path.append('→ Cannot fire')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('→ 8029 FIRES')
-        
-        return result
-    
-    def check_8030(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8030: IBAN Derivation Not Supported for Country
-        
-        Decision Tree:
-            needs_iban = True?
-            ├─ NO → Cannot fire
-            └─ YES → has_iban?
-                      ├─ YES → Cannot fire
-                      └─ NO → iban_derivation_supported?
-                                ├─ YES → Cannot fire (8004 may fire if fails)
-                                └─ NO → 8030 FIRES
-        """
-        result = CodeCheckResult(
-            code='8030',
-            party=party,
-            description='IBAN derivation not supported for country'
-        )
-        
-        needs_iban = features.get('needs_iban', False)
-        has_iban = features.get('has_iban', False)
-        country = features.get('country') or features.get('address_country', '')
-        
-        result.features_used = {
-            'needs_iban': needs_iban,
-            'has_iban': has_iban,
-            'country': country
-        }
-        
-        if not needs_iban:
-            result.cannot_fire = True
-            result.decision_path = ['needs_iban=False', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append('needs_iban=True')
-        
-        if has_iban:
-            result.cannot_fire = True
-            result.decision_path.append('has_iban=True')
-            result.decision_path.append('→ Cannot fire (IBAN present)')
-            return result
-        
-        result.decision_path.append('has_iban=False')
-        
-        derivation_supported = country in IBAN_DERIVATION_SUPPORTED if country else False
-        result.features_used['iban_derivation_supported'] = derivation_supported
-        
-        if derivation_supported:
-            result.cannot_fire = True
-            result.decision_path.append(f'iban_derivation_supported=True (country={country})')
-            result.decision_path.append('→ Cannot fire (8004 handles derivation failure)')
-            return result
-        
-        result.fires = True
-        result.decision_path.append(f'iban_derivation_supported=False (country={country})')
-        result.decision_path.append('→ 8030 FIRES')
-        
-        return result
-    
-    def check_8033(self, features: Dict, global_features: Dict = None) -> CodeCheckResult:
-        """
-        Check 8033: CLABE Inconsistency (Mexico)
-        """
-        result = CodeCheckResult(
-            code='8033',
-            party=None,
-            description='CLABE inconsistency - multiple different CLABE values (Mexico)'
-        )
-        
-        gf = global_features or features
-        
-        clabe_count = gf.get('clabe_count', 0)
-        clabes_consistent = gf.get('clabes_consistent', True)
-        is_clabe = gf.get('is_clabe', False)
-        
-        result.features_used = {
-            'clabe_count': clabe_count,
-            'clabes_consistent': clabes_consistent,
-            'is_clabe': is_clabe
-        }
-        
-        if clabe_count <= 1 and not is_clabe:
-            result.cannot_fire = True
-            result.decision_path = ['clabe_count <= 1', '→ Cannot fire']
-            return result
-        
-        if clabe_count <= 1:
-            result.cannot_fire = True
-            result.decision_path = [f'clabe_count={clabe_count} <= 1', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'clabe_count={clabe_count} > 1')
-        
-        if clabes_consistent:
-            result.cannot_fire = True
-            result.decision_path.append('→ Cannot fire (CLABEs consistent)')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('→ 8033 FIRES')
-        
-        return result
-    
-    def check_8124(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8124: Invalid Currency
-        
-        Decision Tree:
-            has_currency = True?
-            ├─ NO → Cannot fire
-            └─ YES → currency in ISO 4217?
-                      ├─ YES → Cannot fire
-                      └─ NO → 8124 FIRES
-        """
-        result = CodeCheckResult(
-            code='8124',
-            party=party,
-            description='Invalid currency code - not a valid ISO 4217 code'
-        )
-        
-        currency = features.get('primary_currency') or features.get('currency', '')
-        has_currency = bool(currency)
-        
-        result.features_used = {
-            'has_currency': has_currency,
-            'currency': currency
-        }
-        
-        if not has_currency:
-            result.cannot_fire = True
-            result.decision_path = ['has_currency=False', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'has_currency=True (currency={currency})')
-        
-        currency_upper = currency.upper().strip()
-        currency_valid = currency_upper in VALID_CURRENCY_CODES
-        
-        result.features_used['currency_valid'] = currency_valid
-        
-        if currency_valid:
-            result.cannot_fire = True
-            result.decision_path.append('currency_valid=True')
-            result.decision_path.append('→ Cannot fire')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('currency_valid=False')
-        result.decision_path.append('→ 8124 FIRES')
-        
-        return result
-    
-    def check_8852(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8852: Incorrect Length of Attribute
-        
-        Decision Tree:
-            has_account = True?
-            ├─ NO → Cannot fire
-            └─ YES → Determine expected length by type
-                      └─ account_length in expected range?
-                           ├─ YES → Cannot fire
-                           └─ NO → 8852 FIRES
-        """
-        result = CodeCheckResult(
-            code='8852',
-            party=party,
-            description='Incorrect length of attribute'
-        )
-        
-        has_account = features.get('has_account', False)
-        account_value = features.get('account_value', '')
-        account_type = features.get('account_type', '')
-        is_clabe = features.get('is_clabe', False)
-        is_fedaba = features.get('is_fedaba', False)
-        has_iban = features.get('has_iban', False)
-        
-        result.features_used = {
-            'has_account': has_account,
-            'account_value': account_value,
-            'account_type': account_type,
-            'is_clabe': is_clabe,
-            'is_fedaba': is_fedaba,
-            'has_iban': has_iban
-        }
-        
-        if not has_account and not account_value:
-            result.cannot_fire = True
-            result.decision_path = ['has_account=False', '→ Cannot fire']
-            return result
-        
-        account_length = len(account_value) if account_value else 0
-        result.features_used['account_length'] = account_length
-        result.decision_path.append(f'has_account=True (length={account_length})')
-        
-        # Determine expected length
-        length_valid = True
-        expected_range = None
-        
-        if is_clabe:
-            expected_range = (18, 18)
-            length_valid = account_length == 18
-        elif is_fedaba:
-            expected_range = (9, 9)
-            length_valid = account_length == 9
-        elif has_iban or account_type == 'IBAN':
-            expected_range = (15, 34)
-            length_valid = 15 <= account_length <= 34
-        else:
-            # Generic account - wide range
-            expected_range = (1, 50)
-            length_valid = 1 <= account_length <= 50
-        
-        result.features_used['expected_range'] = expected_range
-        result.features_used['length_valid'] = length_valid
-        
-        result.decision_path.append(f'expected_range={expected_range}')
-        
-        if length_valid:
-            result.cannot_fire = True
-            result.decision_path.append('length_valid=True')
-            result.decision_path.append('→ Cannot fire')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('length_valid=False')
-        result.decision_path.append('→ 8852 FIRES')
-        
-        return result
-    
-    def check_8894(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8894: Invalid IBAN
-        
-        Decision Tree:
-            has_iban = True?
-            ├─ NO → Cannot fire
-            └─ YES → iban_valid_format?
-                      ├─ NO → 8894 FIRES
-                      └─ YES → iban_checksum_valid?
-                                ├─ NO → 8894 FIRES (or 8898)
-                                └─ YES → Cannot fire
-        """
-        result = CodeCheckResult(
-            code='8894',
-            party=party,
-            description='Invalid IBAN - format or checksum error'
-        )
-        
-        has_iban = features.get('has_iban', False)
-        iban_value = features.get('iban') or features.get('account_value', '')
-        
-        # Check if it looks like an IBAN
-        if iban_value:
-            iban_clean = iban_value.upper().replace(' ', '').replace('-', '')
-            if len(iban_clean) >= 4 and iban_clean[:2].isalpha():
-                has_iban = True
-        
-        result.features_used = {
-            'has_iban': has_iban,
-            'iban_value': iban_value
-        }
-        
-        if not has_iban or not iban_value:
-            result.cannot_fire = True
-            result.decision_path = ['has_iban=False', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'has_iban=True (iban={iban_value})')
-        
-        # Validate IBAN
-        format_valid, checksum_valid, country = self._validate_iban(iban_value)
-        
-        result.features_used['iban_valid_format'] = format_valid
-        result.features_used['iban_checksum_valid'] = checksum_valid
-        result.features_used['iban_country'] = country
-        
-        if not format_valid:
-            result.fires = True
-            result.decision_path.append('iban_valid_format=False')
-            result.decision_path.append('→ 8894 FIRES (invalid IBAN format)')
-            return result
-        
-        result.decision_path.append('iban_valid_format=True')
-        
-        if not checksum_valid:
-            result.fires = True
-            result.decision_path.append('iban_checksum_valid=False')
-            result.decision_path.append('→ 8894 FIRES (IBAN checksum failed)')
-            return result
-        
-        result.decision_path.append('iban_checksum_valid=True')
-        result.cannot_fire = True
-        result.decision_path.append('→ Cannot fire (IBAN is valid)')
-        
-        return result
-    
-    def check_8895(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8895: Invalid NCH Code (Routing Number)
-        
-        Decision Tree:
-            has_nch = True?
-            ├─ NO → Cannot fire
-            └─ YES → nch_validation_applicable?
-                      ├─ NO → Cannot fire (international)
-                      └─ YES → Validate by type:
-                                FEDABA: 9 digits + checksum
-                                CHIPS: 6 digits
-                                etc.
-        """
-        result = CodeCheckResult(
-            code='8895',
-            party=party,
-            description='Invalid NCH code - routing number format or checksum error'
-        )
-        
-        has_nch = features.get('has_nch', False)
-        nch_value = features.get('nch_value') or features.get('adr_bank_id', '')
-        nch_type = features.get('nch_type', '')
-        nch_validation_applicable = features.get('nch_validation_applicable', False)
-        is_fedaba = features.get('is_fedaba', False)
-        country = features.get('country') or features.get('address_country', '')
-        
-        # Determine if NCH validation applies
-        if not nch_validation_applicable:
-            # Check if it should apply (US domestic)
-            if country == 'US' or is_fedaba:
-                nch_validation_applicable = True
-        
-        result.features_used = {
-            'has_nch': has_nch,
-            'nch_value': nch_value,
-            'nch_type': nch_type,
-            'nch_validation_applicable': nch_validation_applicable,
-            'is_fedaba': is_fedaba,
-            'country': country
-        }
-        
-        if not has_nch and not nch_value:
-            result.cannot_fire = True
-            result.decision_path = ['has_nch=False', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'has_nch=True (nch={nch_value})')
-        
-        if not nch_validation_applicable:
-            result.cannot_fire = True
-            result.decision_path.append('nch_validation_applicable=False')
-            result.decision_path.append('→ Cannot fire (international, no NCH validation)')
-            return result
-        
-        result.decision_path.append('nch_validation_applicable=True')
-        
-        # Validate the NCH
-        nch_clean = nch_value.strip().replace('-', '').replace(' ', '') if nch_value else ''
-        
-        # Check for FEDABA (9 digits)
-        if is_fedaba or len(nch_clean) == 9:
-            format_valid, checksum_valid = self._validate_fedaba(nch_clean)
-            result.features_used['fedaba_format_valid'] = format_valid
-            result.features_used['fedaba_checksum_valid'] = checksum_valid
+        if isinstance(basic, list):
+            basic = basic[0] if basic else {}
+        
+        if not isinstance(basic, dict):
+            return
+        
+        # Parse ID field
+        id_field = basic.get('ID')
+        bic, iban = None, None
+        
+        if id_field:
+            self.features[f'{prefix}_has_id'] = True
+            if isinstance(id_field, dict):
+                id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
+                id_text = id_field.get('text') or id_field.get('#text') or ''
+                
+                if id_type in ('S', 'SWIFT', 'BIC'):
+                    bic = id_text
+                elif id_type == 'IBAN':
+                    iban = id_text
+                elif self._looks_like_bic(id_text):
+                    bic = id_text
+                elif self._looks_like_iban(id_text):
+                    iban = id_text
+            else:
+                id_text = str(id_field)
+                if self._looks_like_iban(id_text):
+                    iban = id_text
+                elif self._looks_like_bic(id_text):
+                    bic = id_text
+        
+        # Store BIC features
+        if bic:
+            self.features[f'{prefix}_has_bic'] = True
+            self.features[f'{prefix}_bic'] = bic
+            fmt_valid, ctry_valid = validate_bic(bic)
+            self.features[f'{prefix}_bic_valid_format'] = fmt_valid
+            self.features[f'{prefix}_bic_valid_country'] = ctry_valid
+            self.features[f'{prefix}_bic4_valid'] = validate_bic4(bic)
+            if len(bic) >= 6:
+                self.features[f'{prefix}_bic_country'] = bic[4:6].upper()
+        
+        # Store IBAN features
+        if iban:
+            self.features[f'{prefix}_has_iban'] = True
+            self.features[f'{prefix}_iban'] = iban
+            fmt_valid, cksum_valid = validate_iban(iban)
+            self.features[f'{prefix}_iban_valid_format'] = fmt_valid
+            self.features[f'{prefix}_iban_checksum_valid'] = cksum_valid
+            if len(iban) >= 2:
+                self.features[f'{prefix}_iban_country'] = iban[:2].upper()
+        
+        # Parse account info
+        acct_info = basic.get('AcctIDInfo') or basic.get('AcctIDInf')
+        if acct_info and isinstance(acct_info, dict):
+            self.features[f'{prefix}_has_account'] = True
+            acct_id = acct_info.get('ID', {})
+            if isinstance(acct_id, dict):
+                acct_type = acct_id.get('@Type') or acct_id.get('Type')
+                acct_value = acct_id.get('#text') or acct_id.get('text')
+                self.features[f'{prefix}_account_type'] = acct_type
+                
+                if acct_type == 'IBAN' and acct_value:
+                    self.features[f'{prefix}_has_iban'] = True
+                    fmt_valid, cksum_valid = validate_iban(acct_value)
+                    self.features[f'{prefix}_iban_valid_format'] = fmt_valid
+                    self.features[f'{prefix}_iban_checksum_valid'] = cksum_valid
+                    if len(acct_value) >= 2:
+                        self.features[f'{prefix}_iban_country'] = acct_value[:2].upper()
+        
+        # Parse AdrBankID (NCH/routing number)
+        adr_bank_id = basic.get('AdrBankID')
+        if adr_bank_id:
+            self.features[f'{prefix}_has_adr_bank_id'] = True
+            if isinstance(adr_bank_id, dict):
+                adr_type = adr_bank_id.get('@Type') or adr_bank_id.get('Type')
+                adr_value = adr_bank_id.get('#text') or adr_bank_id.get('text')
+            else:
+                adr_type = None
+                adr_value = str(adr_bank_id)
             
-            if not format_valid:
-                result.fires = True
-                result.decision_path.append('fedaba_format_valid=False')
-                result.decision_path.append('→ 8895 FIRES (invalid FEDABA format)')
-                return result
-            
-            result.decision_path.append('fedaba_format_valid=True')
-            
-            if not checksum_valid:
-                result.fires = True
-                result.decision_path.append('fedaba_checksum_valid=False')
-                result.decision_path.append('→ 8895 FIRES (FEDABA checksum failed)')
-                return result
-            
-            result.decision_path.append('fedaba_checksum_valid=True')
+            if adr_type in ['FEDABA', 'FW', 'FEDWIRE'] or (adr_value and len(adr_value) == 9 and adr_value.isdigit()):
+                self.features[f'{prefix}_has_nch'] = True
+                self.features[f'{prefix}_nch_type'] = 'FEDABA'
+                fmt_valid, cksum_valid = validate_fedaba(adr_value)
+                self.features[f'{prefix}_nch_valid'] = fmt_valid
+                self.features[f'{prefix}_fedaba_checksum_valid'] = cksum_valid
+                # NCH validation is applicable for US domestic
+                self.features[f'{prefix}_nch_validation_applicable'] = True
         
-        # Check for CHIPS (6 digits)
-        elif len(nch_clean) == 6:
-            if not nch_clean.isdigit():
-                result.fires = True
-                result.decision_path.append('chips_valid=False (not all digits)')
-                result.decision_path.append('→ 8895 FIRES')
-                return result
-            result.decision_path.append('chips_valid=True')
+        # Parse country
+        country = basic.get('Country') or party_data.get('Country')
+        if country:
+            self.features[f'{prefix}_has_country'] = True
+            self.features[f'{prefix}_country'] = country
+            self.features[f'{prefix}_country_valid'] = validate_country(country)
         
-        result.cannot_fire = True
-        result.decision_path.append('→ Cannot fire (NCH is valid)')
-        
-        return result
+        # Check if IBAN is needed
+        party_country = self.features.get(f'{prefix}_bic_country') or self.features.get(f'{prefix}_country')
+        if party_country and party_country.upper() in IBAN_COUNTRIES:
+            has_iban = self.features.get(f'{prefix}_has_iban', False)
+            has_account = self.features.get(f'{prefix}_has_account', False)
+            if not has_iban and not has_account:
+                self.features[f'{prefix}_needs_iban'] = True
     
-    def check_8898(self, features: Dict, party: str = None) -> CodeCheckResult:
-        """
-        Check 8898: IBAN Check Digit Failed
+    def _parse_cross_party(self, basic_payment: Dict):
+        """Parse cross-party validation features."""
+        # 8022: WireKey BIC vs BNP IBAN country match
+        party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
         
-        More specific than 8894 - fires only when format is valid but checksum fails.
+        cdt_data = party_info.get('CreditPartyInfo') or party_info.get('CreditPartyInf') or {}
+        if isinstance(cdt_data, list):
+            cdt_data = cdt_data[0] if cdt_data else {}
         
-        Decision Tree:
-            has_iban = True?
-            ├─ NO → Cannot fire
-            └─ YES → iban_valid_format?
-                      ├─ NO → 8894 fires instead
-                      └─ YES → iban_checksum_valid?
-                                ├─ YES → Cannot fire
-                                └─ NO → 8898 FIRES
-        """
-        result = CodeCheckResult(
-            code='8898',
-            party=party,
-            description='IBAN check digit failed - format valid but checksum error'
-        )
+        # Extract WireKey BIC from credit party
+        wirekey_bic_country = None
+        if isinstance(cdt_data, dict):
+            basic = (cdt_data.get('BasicPartyInfo') or cdt_data.get('BasicPartyInf') or
+                    cdt_data.get('AccountPartyInfo') or cdt_data.get('AccountPartyInf') or cdt_data)
+            if isinstance(basic, list):
+                basic = basic[0] if basic else {}
+            if isinstance(basic, dict):
+                wirekey = basic.get('WireKey')
+                if wirekey and isinstance(wirekey, dict):
+                    wk_acct = wirekey.get('AcctIDInf') or wirekey.get('AcctIDInfo')
+                    if wk_acct and isinstance(wk_acct, dict):
+                        wk_id = wk_acct.get('ID')
+                        if wk_id and isinstance(wk_id, dict):
+                            wk_type = (wk_id.get('@Type') or wk_id.get('Type') or '').upper()
+                            wk_text = wk_id.get('#text') or wk_id.get('text')
+                            if wk_type in ['S', 'SWIFT', 'BIC'] and wk_text and len(wk_text) >= 6:
+                                wirekey_bic_country = wk_text[4:6].upper()
         
-        has_iban = features.get('has_iban', False)
-        iban_value = features.get('iban') or features.get('account_value', '')
+        # Get BNP IBAN country
+        bnp_iban_country = self.features.get('bnp_iban_country')
         
-        result.features_used = {
-            'has_iban': has_iban,
-            'iban_value': iban_value
-        }
-        
-        if not has_iban or not iban_value:
-            result.cannot_fire = True
-            result.decision_path = ['has_iban=False', '→ Cannot fire']
-            return result
-        
-        result.decision_path.append(f'has_iban=True')
-        
-        format_valid, checksum_valid, _ = self._validate_iban(iban_value)
-        
-        result.features_used['iban_valid_format'] = format_valid
-        result.features_used['iban_checksum_valid'] = checksum_valid
-        
-        if not format_valid:
-            result.cannot_fire = True
-            result.decision_path.append('iban_valid_format=False')
-            result.decision_path.append('→ Cannot fire (8894 fires for format errors)')
-            return result
-        
-        result.decision_path.append('iban_valid_format=True')
-        
-        if checksum_valid:
-            result.cannot_fire = True
-            result.decision_path.append('iban_checksum_valid=True')
-            result.decision_path.append('→ Cannot fire')
-            return result
-        
-        result.fires = True
-        result.decision_path.append('iban_checksum_valid=False')
-        result.decision_path.append('→ 8898 FIRES (checksum specifically failed)')
-        
-        return result
+        # Compare
+        if wirekey_bic_country and bnp_iban_country:
+            self.features['wirekey_bic_bnp_iban_match'] = (wirekey_bic_country == bnp_iban_country)
+            if self.debug and wirekey_bic_country != bnp_iban_country:
+                print(f"[DEBUG] 8022: WireKey BIC country={wirekey_bic_country}, BNP IBAN country={bnp_iban_country}")
     
-    # =========================================================================
-    # AGGREGATE CHECK METHOD
-    # =========================================================================
+    def _looks_like_bic(self, s: str) -> bool:
+        if not s or len(s) not in (8, 11):
+            return False
+        return bool(re.match(r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2,5}$', s.upper()))
     
-    def check_all(self, features: Dict, parties: Dict = None, 
-                  global_features: Dict = None) -> List[CodeCheckResult]:
-        """
-        Check all 8XXX codes for all parties.
-        
-        Args:
-            features: Flat feature dictionary (prefixed keys)
-            parties: Dict of party_type -> party_features (optional)
-            global_features: Cross-party aggregated features (optional)
-        
-        Returns:
-            List of CodeCheckResult for all codes checked
-        """
+    def _looks_like_iban(self, s: str) -> bool:
+        if not s:
+            return False
+        s = s.upper().replace(' ', '').replace('-', '')
+        if len(s) < 15 or len(s) > 34:
+            return False
+        if not s[:2].isalpha():
+            return False
+        country = s[:2]
+        expected_len = IBAN_LENGTHS.get(country)
+        if expected_len and len(s) == expected_len:
+            return True
+        if len(s) >= 15 and s[:2].isalpha() and s[2:4].isdigit():
+            return True
+        return False
+
+
+# =============================================================================
+# VALIDATION ENGINE
+# =============================================================================
+
+class ValidationEngine:
+    """Apply validation rules to predict 8XXX codes."""
+    
+    PREFIX_TO_SUFFIX = {
+        'orig': 'ORGPTY',
+        'send': 'SNDBNK',
+        'dbt': 'DBTPTY',
+        'cdt': 'CDTPTY',
+        'intm': 'INTBNK',
+        'bnf': 'BNFBNK',
+        'bnp': 'BNPPTY',
+        'acwi': 'ACWI',
+        'ordi': 'ORDI',
+    }
+    
+    PARTY_PREFIXES = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'bnp', 'acwi', 'ordi']
+    
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+    
+    def validate(self, features: Dict) -> List[ValidationResult]:
+        """Apply all validation rules and return results."""
         results = []
         
-        # Global/cross-party checks (no specific party)
-        global_checks = [
-            (self.check_8023, 'IBAN inconsistency'),
-            (self.check_8024, 'BBAN inconsistency'),
-            (self.check_8025, 'Domestic account inconsistency'),
-            (self.check_8026, 'NCH inconsistency'),
-            (self.check_8027, 'Country code inconsistency'),
-            (self.check_8028, 'BIC4 inconsistency'),
-            (self.check_8029, 'Account inconsistency'),
-            (self.check_8033, 'CLABE inconsistency'),
-        ]
+        # Check global codes
+        results.extend(self._check_global_codes(features))
         
-        gf = global_features or features
-        for check_func, desc in global_checks:
-            try:
-                result = check_func(features, gf)
-                results.append(result)
-            except Exception as e:
-                # Log error but continue
-                results.append(CodeCheckResult(
-                    code=check_func.__name__.replace('check_', ''),
-                    cannot_fire=True,
-                    decision_path=[f'Error: {str(e)}']
-                ))
-        
-        # Currency check (global)
-        results.append(self.check_8124(features))
-        results.append(self.check_8007(features))
-        
-        # Per-party checks
-        # NOTE: 8851/8852 are schema-level errors detected during XML parsing,
-        # not from IFML features, so they are excluded from rules engine.
-        party_checks = [
-            self.check_8001,  # Invalid BIC
-            self.check_8004,  # IBAN cannot be derived (common code!)
-            self.check_8005,  # Invalid BIC4
-            self.check_8006,  # Invalid country
-            self.check_8022,  # IBAN/BIC mismatch
-            # self.check_8030,  # IBAN derivation not supported - covered by 8004
-            # self.check_8852,  # REMOVED - schema error, not detectable from features
-            self.check_8894,  # Invalid IBAN
-            self.check_8895,  # Invalid NCH
-            self.check_8898,  # IBAN check digit failed
-        ]
-        
-        # If parties dict provided, check each party
-        if parties:
-            for party_type, party_features in parties.items():
-                suffix = self._get_suffix(party_type)
-                for check_func in party_checks:
-                    try:
-                        result = check_func(party_features, suffix)
-                        # Add party-specific code suffix
-                        if result.fires or result.eligible:
-                            result.code = f"{result.code}_{suffix}"
-                        results.append(result)
-                    except Exception as e:
-                        results.append(CodeCheckResult(
-                            code=f"{check_func.__name__.replace('check_', '')}_{suffix}",
-                            cannot_fire=True,
-                            decision_path=[f'Error: {str(e)}']
-                        ))
-        else:
-            # Extract parties from flat features and check each
-            for party_type, prefix in self.PARTY_PREFIXES.items():
-                # Check if this party exists in features - check multiple indicators
-                party_exists = (
-                    features.get(f"{prefix}_present", False) or
-                    features.get(f"{prefix}_has_bic", False) or
-                    features.get(f"{prefix}_has_iban", False) or
-                    features.get(f"{prefix}_has_account", False) or
-                    features.get(f"{prefix}_has_nch", False) or
-                    features.get(f"{prefix}_has_name", False) or
-                    features.get(f"{prefix}_has_id", False) or
-                    features.get(f"{prefix}_country", '') != '' or
-                    features.get(f"{prefix}_bic", '') != ''
-                )
-                
-                if party_exists:
-                    party_features = self._get_party_features(features, party_type)
-                    suffix = self._get_suffix(party_type)
-                    
-                    for check_func in party_checks:
-                        try:
-                            result = check_func(party_features, suffix)
-                            if result.fires or result.eligible:
-                                result.code = f"{result.code}_{suffix}"
-                            results.append(result)
-                        except Exception as e:
-                            results.append(CodeCheckResult(
-                                code=f"{check_func.__name__.replace('check_', '')}_{suffix}",
-                                cannot_fire=True,
-                                decision_path=[f'Error: {str(e)}']
-                            ))
+        # Check party-specific codes
+        for prefix in self.PARTY_PREFIXES:
+            if features.get(f'{prefix}_present'):
+                suffix = self.PREFIX_TO_SUFFIX.get(prefix)
+                results.extend(self._check_party_codes(features, prefix, suffix))
         
         return results
     
-    def get_fired_codes(self, results: List[CodeCheckResult]) -> List[str]:
-        """Extract codes that fired from results."""
-        return [r.code for r in results if r.fires]
+    def _check_global_codes(self, f: Dict) -> List[ValidationResult]:
+        """Check codes that apply globally (not party-specific)."""
+        results = []
+        
+        # 8007: Amount decimal places exceeded
+        if f.get('amount_decimals_valid') is False:
+            results.append(ValidationResult(
+                code='8007',
+                party=None,
+                fires=True,
+                reason=f"Amount has {f.get('amount_decimals', 0)} decimal places (max 2)",
+                features_checked={'amount_decimals_valid': False}
+            ))
+        
+        # 8022: IBAN/BIC country mismatch
+        if f.get('wirekey_bic_bnp_iban_match') is False:
+            results.append(ValidationResult(
+                code='8022',
+                party='BNFBNK',  # Always tagged to BNFBNK
+                fires=True,
+                reason="WireKey BIC country doesn't match BNP IBAN country",
+                features_checked={'wirekey_bic_bnp_iban_match': False}
+            ))
+        
+        # 8124: Invalid currency
+        if f.get('has_currency') and f.get('currency_valid') is False:
+            results.append(ValidationResult(
+                code='8124',
+                party=None,
+                fires=True,
+                reason=f"Invalid currency code: {f.get('primary_currency')}",
+                features_checked={'currency_valid': False}
+            ))
+        
+        return results
     
-    def get_eligible_codes(self, results: List[CodeCheckResult]) -> List[str]:
-        """Extract codes that are eligible (pending lookup) from results."""
-        return [r.code for r in results if r.eligible]
-    
-    def get_cannot_fire_codes(self, results: List[CodeCheckResult]) -> List[str]:
-        """Extract codes that cannot fire from results."""
-        return [r.code for r in results if r.cannot_fire]
+    def _check_party_codes(self, f: Dict, prefix: str, suffix: str) -> List[ValidationResult]:
+        """Check codes that apply to specific parties."""
+        results = []
+        
+        # Helper to get prefixed feature
+        def get(key: str, default=None):
+            return f.get(f'{prefix}_{key}', default)
+        
+        # 8001: Invalid BIC
+        if get('has_bic'):
+            fmt_valid = get('bic_valid_format', True)
+            ctry_valid = get('bic_valid_country', True)
+            if not fmt_valid or not ctry_valid:
+                results.append(ValidationResult(
+                    code='8001',
+                    party=suffix,
+                    fires=True,
+                    reason=f"BIC '{get('bic')}': format_valid={fmt_valid}, country_valid={ctry_valid}",
+                    features_checked={
+                        'has_bic': True,
+                        'bic_valid_format': fmt_valid,
+                        'bic_valid_country': ctry_valid
+                    }
+                ))
+        
+        # 8004: IBAN cannot be derived (only for party accounts, not banks)
+        if suffix not in BANK_SUFFIXES:  # Banks don't need IBANs
+            if get('needs_iban') and not get('has_iban'):
+                results.append(ValidationResult(
+                    code='8004',
+                    party=suffix,
+                    fires=True,
+                    reason=f"Party in IBAN country but no IBAN present",
+                    features_checked={
+                        'needs_iban': True,
+                        'has_iban': False
+                    }
+                ))
+        
+        # 8005: Invalid BIC4
+        if get('has_bic') and get('bic4_valid') is False:
+            results.append(ValidationResult(
+                code='8005',
+                party=suffix,
+                fires=True,
+                reason=f"BIC4 invalid (first 4 chars must be A-Z)",
+                features_checked={
+                    'has_bic': True,
+                    'bic4_valid': False
+                }
+            ))
+        
+        # 8006: Invalid country code
+        if get('has_country') and get('country_valid') is False:
+            results.append(ValidationResult(
+                code='8006',
+                party=suffix,
+                fires=True,
+                reason=f"Invalid country code: {get('country')}",
+                features_checked={
+                    'has_country': True,
+                    'country_valid': False
+                }
+            ))
+        
+        # 8894: Invalid IBAN
+        if get('has_iban'):
+            fmt_valid = get('iban_valid_format', True)
+            cksum_valid = get('iban_checksum_valid', True)
+            if not fmt_valid or not cksum_valid:
+                results.append(ValidationResult(
+                    code='8894',
+                    party=suffix,
+                    fires=True,
+                    reason=f"IBAN invalid: format_valid={fmt_valid}, checksum_valid={cksum_valid}",
+                    features_checked={
+                        'has_iban': True,
+                        'iban_valid_format': fmt_valid,
+                        'iban_checksum_valid': cksum_valid
+                    }
+                ))
+        
+        # 8895: Invalid NCH (FEDABA checksum)
+        if get('has_nch') and get('nch_validation_applicable'):
+            nch_valid = get('nch_valid', True)
+            fedaba_valid = get('fedaba_checksum_valid', True)
+            if not nch_valid or not fedaba_valid:
+                results.append(ValidationResult(
+                    code='8895',
+                    party=suffix,
+                    fires=True,
+                    reason=f"NCH invalid: format_valid={nch_valid}, checksum_valid={fedaba_valid}",
+                    features_checked={
+                        'has_nch': True,
+                        'nch_valid': nch_valid,
+                        'fedaba_checksum_valid': fedaba_valid
+                    }
+                ))
+        
+        # 8898: IBAN checksum failed (more specific than 8894)
+        if get('has_iban') and get('iban_valid_format') and get('iban_checksum_valid') is False:
+            results.append(ValidationResult(
+                code='8898',
+                party=suffix,
+                fires=True,
+                reason=f"IBAN checksum validation failed (mod-97)",
+                features_checked={
+                    'has_iban': True,
+                    'iban_valid_format': True,
+                    'iban_checksum_valid': False
+                }
+            ))
+        
+        return results
 
 
 # =============================================================================
-# STANDALONE TESTING
+# RESPONSE PARSER
 # =============================================================================
+
+def extract_actual_codes(response: Dict, filter_8xxx: bool = True) -> Set[str]:
+    """Extract actual codes from ACE response."""
+    codes = set()
+    
+    # Find AuditTrail
+    audit = None
+    paths = [
+        ['AuditTrail'],
+        ['IFML', 'File', 'Message', 'AuditTrail'],
+        ['IFML', 'File', 'AuditTrail'],
+        ['Response', 'IFML', 'File', 'Message', 'AuditTrail'],
+    ]
+    
+    for path in paths:
+        current = response
+        for key in path:
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                current = None
+                break
+        if current:
+            audit = current
+            break
+    
+    if not audit:
+        return codes
+    
+    # Parse MsgStatus entries
+    msg_status = audit.get('MsgStatus', [])
+    if isinstance(msg_status, dict):
+        msg_status = [msg_status]
+    
+    for item in msg_status:
+        code = item.get('Code', '')
+        party = item.get('Party', '')
+        
+        if code:
+            if filter_8xxx and not code.startswith('8'):
+                continue
+            
+            # Include party suffix if present
+            if party:
+                codes.add(f"{code}_{party}")
+            else:
+                codes.add(code)
+    
+    return codes
+
+
+def get_transaction_id(data: Dict) -> str:
+    """Extract transaction ID from IFML data."""
+    paths = [
+        ['Request', 'IFML', 'File', 'Message', 'BasicPayment', 'TransactionUID'],
+        ['Request', 'IFML', 'File', 'Message', 'BasicPayment', 'TransactionID'],
+        ['IFML', 'File', 'Message', 'BasicPayment', 'TransactionUID'],
+        ['IFML', 'File', 'Message', 'BasicPayment', 'TransactionID'],
+    ]
+    
+    for path in paths:
+        current = data
+        for key in path:
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                current = None
+                break
+        if isinstance(current, str):
+            return current
+    
+    return "UNKNOWN"
+
+
+# =============================================================================
+# MAIN VALIDATOR
+# =============================================================================
+
+class ACEValidator:
+    """Main validator class."""
+    
+    def __init__(self, debug: bool = False):
+        self.extractor = FeatureExtractor(debug=debug)
+        self.engine = ValidationEngine(debug=debug)
+        self.debug = debug
+    
+    def validate_payment(self, request: Dict, response: Dict) -> PaymentResult:
+        """Validate a single payment."""
+        payment_id = get_transaction_id(request)
+        
+        # Extract features
+        features = self.extractor.extract(request)
+        
+        # Get predictions
+        results = self.engine.validate(features)
+        predicted = {r.code_with_party for r in results if r.fires}
+        
+        # Get actual codes (8XXX only)
+        actual_raw = extract_actual_codes(response, filter_8xxx=True)
+        
+        # Separate predictable vs directory-dependent
+        actual_predictable = set()
+        excluded = set()
+        
+        for code_str in actual_raw:
+            base_code = code_str.split('_')[0]
+            if base_code in DIRECTORY_DEPENDENT:
+                excluded.add(code_str)
+            else:
+                actual_predictable.add(code_str)
+        
+        # Compare (using predictable codes only)
+        correct = predicted & actual_predictable
+        missed = actual_predictable - predicted
+        false_positives = predicted - actual_predictable
+        
+        return PaymentResult(
+            payment_id=payment_id,
+            predicted_codes=predicted,
+            actual_codes=actual_predictable,
+            correct=correct,
+            missed=missed,
+            false_positives=false_positives,
+            details=results,
+            excluded_codes=excluded
+        )
+    
+    def validate_file(self, filepath: Path) -> List[PaymentResult]:
+        """Validate all payments in a file."""
+        results = []
+        
+        with open(filepath) as f:
+            data = json.load(f)
+        
+        if isinstance(data, dict):
+            # Single payment or dict of payments
+            if 'Request' in data and 'Response' in data:
+                # Single payment with Request/Response
+                result = self.validate_payment(data, data.get('Response', {}))
+                results.append(result)
+            else:
+                # Dict keyed by transaction ID
+                for key, val in data.items():
+                    if isinstance(val, dict) and 'Request' in val and 'Response' in val:
+                        result = self.validate_payment(val, val.get('Response', {}))
+                        result.payment_id = key
+                        results.append(result)
+        
+        return results
+    
+    def validate_directory(self, dirpath: Path) -> List[PaymentResult]:
+        """Validate all JSON files in a directory."""
+        results = []
+        
+        for filepath in sorted(dirpath.glob('*.json')):
+            try:
+                file_results = self.validate_file(filepath)
+                results.extend(file_results)
+            except Exception as e:
+                if self.debug:
+                    print(f"Error processing {filepath}: {e}")
+        
+        return results
+    
+    def compute_accuracy(self, results: List[PaymentResult]) -> AccuracyReport:
+        """Compute accuracy metrics."""
+        total = len(results)
+        correct_payments = sum(1 for r in results if r.passed)
+        
+        tp = sum(len(r.correct) for r in results)
+        fp = sum(len(r.false_positives) for r in results)
+        fn = sum(len(r.missed) for r in results)
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        # Code breakdown
+        code_stats = defaultdict(lambda: {'tp': 0, 'fp': 0, 'fn': 0})
+        
+        for r in results:
+            for code in r.correct:
+                base = code.split('_')[0]
+                code_stats[base]['tp'] += 1
+            for code in r.false_positives:
+                base = code.split('_')[0]
+                code_stats[base]['fp'] += 1
+            for code in r.missed:
+                base = code.split('_')[0]
+                code_stats[base]['fn'] += 1
+        
+        return AccuracyReport(
+            total_payments=total,
+            payments_correct=correct_payments,
+            total_predictions=tp + fp,
+            true_positives=tp,
+            false_positives=fp,
+            false_negatives=fn,
+            precision=precision,
+            recall=recall,
+            f1=f1,
+            code_breakdown=dict(code_stats)
+        )
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def print_result(result: PaymentResult, verbose: bool = False):
+    """Print a single payment result."""
+    status = "PASS" if result.passed else "FAIL"
+    
+    if result.passed and not verbose:
+        print(f"{result.payment_id}: {status}")
+        return
+    
+    print(f"\n{'='*60}")
+    print(f"Payment: {result.payment_id}")
+    print(f"Status: {status}")
+    print(f"Predicted: {sorted(result.predicted_codes)}")
+    print(f"Actual: {sorted(result.actual_codes)}")
+    
+    if result.correct:
+        print(f"Correct (TP): {sorted(result.correct)}")
+    if result.missed:
+        print(f"Missed (FN): {sorted(result.missed)}")
+    if result.false_positives:
+        print(f"False Positive: {sorted(result.false_positives)}")
+    if result.excluded_codes:
+        print(f"Excluded (directory-dependent): {sorted(result.excluded_codes)}")
+    
+    if verbose:
+        print("\nValidation Details:")
+        for detail in result.details:
+            if detail.fires:
+                print(f"  {detail.code_with_party}: {detail.reason}")
+
+
+def print_accuracy(report: AccuracyReport):
+    """Print accuracy report."""
+    print(f"\n{'='*60}")
+    print("ACCURACY REPORT")
+    print(f"{'='*60}")
+    print(f"Total Payments: {report.total_payments}")
+    print(f"Payments Correct: {report.payments_correct} ({100*report.payments_correct/report.total_payments:.1f}%)")
+    print(f"\nCode-Level Metrics:")
+    print(f"  True Positives: {report.true_positives}")
+    print(f"  False Positives: {report.false_positives}")
+    print(f"  False Negatives: {report.false_negatives}")
+    print(f"\n  Precision: {report.precision:.3f}")
+    print(f"  Recall: {report.recall:.3f}")
+    print(f"  F1 Score: {report.f1:.3f}")
+    
+    if report.code_breakdown:
+        print(f"\nBreakdown by Code:")
+        for code in sorted(report.code_breakdown.keys()):
+            stats = report.code_breakdown[code]
+            total = stats['tp'] + stats['fp'] + stats['fn']
+            if total > 0:
+                p = stats['tp'] / (stats['tp'] + stats['fp']) if (stats['tp'] + stats['fp']) > 0 else 0
+                r = stats['tp'] / (stats['tp'] + stats['fn']) if (stats['tp'] + stats['fn']) > 0 else 0
+                print(f"  {code}: TP={stats['tp']}, FP={stats['fp']}, FN={stats['fn']} (P={p:.2f}, R={r:.2f})")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='ACE 8XXX Code Validator')
+    subparsers = parser.add_subparsers(dest='command', help='Command')
+    
+    # Single payment validation
+    single_parser = subparsers.add_parser('single', help='Validate single payment')
+    single_parser.add_argument('-r', '--request', required=True, help='Request JSON file')
+    single_parser.add_argument('-s', '--response', required=True, help='Response JSON file')
+    single_parser.add_argument('-v', '--verbose', action='store_true')
+    single_parser.add_argument('--debug', action='store_true')
+    
+    # Directory validation
+    validate_parser = subparsers.add_parser('validate', help='Validate directory')
+    validate_parser.add_argument('-i', '--input', required=True, help='Input directory or file')
+    validate_parser.add_argument('-o', '--output', help='Output report JSON')
+    validate_parser.add_argument('-v', '--verbose', action='store_true')
+    validate_parser.add_argument('--debug', action='store_true')
+    
+    # Accuracy summary
+    accuracy_parser = subparsers.add_parser('accuracy', help='Show accuracy summary')
+    accuracy_parser.add_argument('-i', '--input', required=True, help='Input directory or file')
+    accuracy_parser.add_argument('--debug', action='store_true')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return
+    
+    debug = getattr(args, 'debug', False)
+    validator = ACEValidator(debug=debug)
+    
+    if args.command == 'single':
+        with open(args.request) as f:
+            request = json.load(f)
+        with open(args.response) as f:
+            response = json.load(f)
+        
+        result = validator.validate_payment(request, response)
+        print_result(result, args.verbose)
+    
+    elif args.command == 'validate':
+        path = Path(args.input)
+        if path.is_file():
+            results = validator.validate_file(path)
+        else:
+            results = validator.validate_directory(path)
+        
+        for result in results:
+            print_result(result, args.verbose)
+        
+        report = validator.compute_accuracy(results)
+        print_accuracy(report)
+        
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump({
+                    'accuracy': asdict(report),
+                    'results': [
+                        {
+                            'payment_id': r.payment_id,
+                            'passed': r.passed,
+                            'predicted': list(r.predicted_codes),
+                            'actual': list(r.actual_codes),
+                            'missed': list(r.missed),
+                            'false_positives': list(r.false_positives)
+                        }
+                        for r in results
+                    ]
+                }, f, indent=2)
+            print(f"\nReport saved to {args.output}")
+    
+    elif args.command == 'accuracy':
+        path = Path(args.input)
+        if path.is_file():
+            results = validator.validate_file(path)
+        else:
+            results = validator.validate_directory(path)
+        
+        report = validator.compute_accuracy(results)
+        print_accuracy(report)
+
 
 if __name__ == '__main__':
-    # Simple test
-    rules = Rules8XXX()
-    
-    # Test 8001 with invalid BIC
-    test_features = {
-        'has_bic': True,
-        'bic': 'INVALID123',  # Invalid format
-    }
-    result = rules.check_8001(test_features, 'BNFBNK')
-    print(f"8001 Test: fires={result.fires}")
-    print(f"  Decision path: {result.decision_path}")
-    
-    # Test 8894 with invalid IBAN
-    test_features = {
-        'has_iban': True,
-        'iban': 'DE99123456789012345678',  # Bad checksum
-    }
-    result = rules.check_8894(test_features, 'CDTPTY')
-    print(f"\n8894 Test: fires={result.fires}")
-    print(f"  Decision path: {result.decision_path}")
-    
-    # Test 8022 with country mismatch
-    test_features = {
-        'has_iban': True,
-        'has_bic': True,
-        'iban': 'DE89370400440532013000',  # German IBAN
-        'bic': 'ABORFRPP',  # French BIC
-    }
-    result = rules.check_8022(test_features, 'BNFBNK')
-    print(f"\n8022 Test: fires={result.fires}")
-    print(f"  Decision path: {result.decision_path}")
+    main()
