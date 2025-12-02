@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-ACE 8XXX CODE VALIDATOR
+ACE 8XXX/9XXX CODE VALIDATOR
 ================================================================================
 
 Validates rule-based predictions against actual ACE response codes.
 
 This tool:
-1. Parses IFML payments using ifml_parser_v3.py
-2. Applies deterministic validation rules to predict 8XXX codes
+1. Parses IFML payments and extracts validation features
+2. Applies deterministic validation rules to predict codes
 3. Compares predictions with actual ACE response codes
 4. Reports accuracy metrics (precision, recall, F1)
 
 PREDICTABLE CODES (deterministic validation):
-- 8001: Invalid BIC (format or country code)
 - 8004: IBAN cannot be derived (needs IBAN but missing)
-- 8005: Invalid BIC4 (first 4 chars)
 - 8006: Invalid country code
 - 8007: Amount decimal places exceeded
-- 8022: IBAN/BIC country mismatch
 - 8124: Invalid currency code
+- 8852: Attribute length violation
 - 8894: Invalid IBAN (format or checksum)
 - 8895: Invalid NCH/FEDABA (checksum)
 - 8898: IBAN checksum failed
+- 9018: Duplicate party removed (redundant intermediaries)
 
-UNPREDICTABLE CODES (require directory/config):
-- 8003, 8034-8036, 8464-8472, 8851-8853, 8905, 8906
+DIRECTORY-DEPENDENT CODES (excluded from prediction):
+- 8001: Invalid BIC - requires BICPlus directory
+- 8005: Invalid BIC4 - requires BICPlus directory
+- 8022: IBAN/BIC mismatch - requires NCH derivation
+- 8026: NCH inconsistency - requires directory derivation
+- 9019: ID cleaned - context-dependent rules
+- 8003, 8034-8036, 8464-8472, 8851, 8853, 8905, 8906
 
 Usage:
     # Validate single payment
@@ -38,7 +42,7 @@ Usage:
     python ace_8xxx_validator.py accuracy -i /path/to/data
 
 Author: ACE Pelican Team
-Version: 1.0 (December 2025)
+Version: 1.1 (December 2025) - Removed directory-dependent codes
 ================================================================================
 """
 
@@ -76,24 +80,32 @@ SUFFIX_TO_PREFIX = {
 # Codes that are deterministically predictable
 PREDICTABLE_CODES = {
     # 8XXX Validation Errors
-    '8001',  # Invalid BIC
-    '8004',  # IBAN cannot be derived
-    '8005',  # Invalid BIC4
+    '8004',  # IBAN cannot be derived (needs IBAN but missing)
     '8006',  # Invalid country code
     '8007',  # Amount decimal places
-    '8022',  # IBAN/BIC inconsistency
     '8124',  # Invalid currency
     '8852',  # Attribute length violation
-    '8894',  # Invalid IBAN
-    '8895',  # Invalid NCH
+    '8894',  # Invalid IBAN (format or checksum)
+    '8895',  # Invalid NCH (FEDABA checksum)
     '8898',  # IBAN checksum failed
     # 9XXX Repair Codes (structurally detectable)
     '9018',  # Duplicate party removed (multiple redundant intermediaries)
-    '9019',  # Party identifier cleaned (non-alphanumeric chars)
 }
 
-# Codes that require directory lookup - can predict eligibility but not certainty
+# Codes that require directory lookup - excluded from comparison
 DIRECTORY_DEPENDENT = {
+    # BIC validation requires BICPlus directory
+    '8001',  # Invalid BIC - directory lookup
+    '8005',  # Invalid BIC4 - directory lookup
+    
+    # NCH/routing requires directory derivation
+    '8022',  # IBAN/BIC inconsistency - requires NCH derivation from directory
+    '8026',  # NCH inconsistency - derived NCH comparison
+    
+    # ID cleaning is context-dependent (not just presence of special chars)
+    '9019',  # Party identifier cleaned - context-dependent rules
+    
+    # System/config dependent
     '8003',  # File name derivation
     '8034',  # Forced debit
     '8035',  # FCDA validation
@@ -410,24 +422,38 @@ class FeatureExtractor:
             ['IFML', 'File', 'Message'],
             ['File', 'Message'],
             ['Message'],
+            # With * wrapper
+            ['*', 'Request', 'IFML', 'File', 'Message'],
+            ['*', 'IFML', 'File', 'Message'],
         ]
         
         for path in paths:
             current = data
             for key in path:
                 if isinstance(current, dict):
-                    current = current.get(key)
+                    if key == '*':
+                        # Wildcard - use first key
+                        if current:
+                            current = current.get(list(current.keys())[0])
+                        else:
+                            current = None
+                    else:
+                        current = current.get(key)
                 else:
                     current = None
                     break
             if current and isinstance(current, dict):
+                if self.debug:
+                    print(f"[DEBUG] Found Message via path: {path}")
                 return current
         
-        # Try with transaction ID wrapper
+        # Try with transaction ID wrapper (single key that looks like an ID)
         if isinstance(data, dict) and len(data) == 1:
-            key = list(data.keys())[0]
-            nested = data[key]
-            for path in paths:
+            wrapper_key = list(data.keys())[0]
+            nested = data[wrapper_key]
+            if self.debug:
+                print(f"[DEBUG] Trying wrapper key: {wrapper_key}")
+            for path in paths[:4]:  # Skip * paths for nested
                 current = nested
                 for key in path:
                     if isinstance(current, dict):
@@ -436,7 +462,12 @@ class FeatureExtractor:
                         current = None
                         break
                 if current and isinstance(current, dict):
+                    if self.debug:
+                        print(f"[DEBUG] Found Message via wrapper + path: {path}")
                     return current
+        
+        if self.debug:
+            print(f"[DEBUG] Could not find Message node. Top-level keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
         
         return None
     
@@ -823,15 +854,7 @@ class ValidationEngine:
                 features_checked={'amount_decimals_valid': False}
             ))
         
-        # 8022: IBAN/BIC country mismatch
-        if f.get('wirekey_bic_bnp_iban_match') is False:
-            results.append(ValidationResult(
-                code='8022',
-                party='BNFBNK',  # Always tagged to BNFBNK
-                fires=True,
-                reason="WireKey BIC country doesn't match BNP IBAN country",
-                features_checked={'wirekey_bic_bnp_iban_match': False}
-            ))
+        # NOTE: 8022 (IBAN/BIC mismatch) removed - requires NCH derivation from directory
         
         # 8124: Invalid currency
         if f.get('has_currency') and f.get('currency_valid') is False:
@@ -869,22 +892,8 @@ class ValidationEngine:
         def get(key: str, default=None):
             return f.get(f'{prefix}_{key}', default)
         
-        # 8001: Invalid BIC
-        if get('has_bic'):
-            fmt_valid = get('bic_valid_format', True)
-            ctry_valid = get('bic_valid_country', True)
-            if not fmt_valid or not ctry_valid:
-                results.append(ValidationResult(
-                    code='8001',
-                    party=suffix,
-                    fires=True,
-                    reason=f"BIC '{get('bic')}': format_valid={fmt_valid}, country_valid={ctry_valid}",
-                    features_checked={
-                        'has_bic': True,
-                        'bic_valid_format': fmt_valid,
-                        'bic_valid_country': ctry_valid
-                    }
-                ))
+        # NOTE: 8001 (Invalid BIC) removed - requires BICPlus directory lookup
+        # Our format-based validation produces too many false positives
         
         # 8004: IBAN cannot be derived (only for party accounts, not banks)
         if suffix not in BANK_SUFFIXES:  # Banks don't need IBANs
@@ -900,18 +909,7 @@ class ValidationEngine:
                     }
                 ))
         
-        # 8005: Invalid BIC4
-        if get('has_bic') and get('bic4_valid') is False:
-            results.append(ValidationResult(
-                code='8005',
-                party=suffix,
-                fires=True,
-                reason=f"BIC4 invalid (first 4 chars must be A-Z)",
-                features_checked={
-                    'has_bic': True,
-                    'bic4_valid': False
-                }
-            ))
+        # NOTE: 8005 (Invalid BIC4) removed - requires BICPlus directory lookup
         
         # 8006: Invalid country code
         if get('has_country') and get('country_valid') is False:
@@ -974,17 +972,7 @@ class ValidationEngine:
                 }
             ))
         
-        # 9019: Party identifier cleaned of non-alphanumeric characters
-        if get('id_needs_cleaning'):
-            results.append(ValidationResult(
-                code='9019',
-                party=suffix,
-                fires=True,
-                reason=f"ID contains non-alphanumeric characters that will be cleaned",
-                features_checked={
-                    'id_needs_cleaning': True
-                }
-            ))
+        # NOTE: 9019 (ID cleaned) removed - context-dependent rules, not just char presence
         
         return results
 
@@ -1052,23 +1040,68 @@ def extract_actual_codes(response: Dict, filter_prefix: str = None) -> Set[str]:
 
 def get_transaction_id(data: Dict) -> str:
     """Extract transaction ID from IFML data."""
+    
+    # First, try to unwrap if there's a single key wrapper (transaction ID as key)
+    if isinstance(data, dict) and len(data) == 1:
+        key = list(data.keys())[0]
+        # If key looks like a transaction ID (long numeric or alphanumeric), use it
+        if len(key) > 10 and (key.isdigit() or key.isalnum()):
+            return key
+        # Otherwise unwrap and continue
+        data = data[key]
+    
     paths = [
+        # Standard paths
         ['Request', 'IFML', 'File', 'Message', 'BasicPayment', 'TransactionUID'],
         ['Request', 'IFML', 'File', 'Message', 'BasicPayment', 'TransactionID'],
         ['IFML', 'File', 'Message', 'BasicPayment', 'TransactionUID'],
         ['IFML', 'File', 'Message', 'BasicPayment', 'TransactionID'],
+        ['File', 'Message', 'BasicPayment', 'TransactionUID'],
+        ['File', 'Message', 'BasicPayment', 'TransactionID'],
+        ['Message', 'BasicPayment', 'TransactionUID'],
+        ['Message', 'BasicPayment', 'TransactionID'],
+        ['BasicPayment', 'TransactionUID'],
+        ['BasicPayment', 'TransactionID'],
+        # With * wrapper (some IFML formats)
+        ['*', 'Request', 'IFML', 'File', 'Message', 'BasicPayment', 'TransactionUID'],
+        ['*', 'Request', 'IFML', 'File', 'Message', 'BasicPayment', 'TransactionID'],
     ]
     
     for path in paths:
         current = data
         for key in path:
             if isinstance(current, dict):
-                current = current.get(key)
+                if key == '*':
+                    # Wildcard - try first key
+                    if current:
+                        current = current.get(list(current.keys())[0])
+                    else:
+                        current = None
+                else:
+                    current = current.get(key)
             else:
                 current = None
                 break
-        if isinstance(current, str):
+        if isinstance(current, str) and current:
             return current
+    
+    # Last resort: search recursively for TransactionUID or TransactionID
+    def find_txn_id(obj, depth=0):
+        if depth > 10:  # Prevent infinite recursion
+            return None
+        if isinstance(obj, dict):
+            for key in ['TransactionUID', 'TransactionID']:
+                if key in obj and isinstance(obj[key], str):
+                    return obj[key]
+            for v in obj.values():
+                result = find_txn_id(v, depth + 1)
+                if result:
+                    return result
+        return None
+    
+    found = find_txn_id(data)
+    if found:
+        return found
     
     return "UNKNOWN"
 
@@ -1309,6 +1342,37 @@ def main():
         
         result = validator.validate_payment(request, response)
         print_result(result, args.verbose)
+        
+        # Show feature extraction summary if verbose or debug
+        if args.verbose or debug:
+            print("\n--- Feature Extraction Summary ---")
+            features = validator.extractor.features
+            
+            # Show parties found
+            parties_found = [p for p in ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'bnp'] 
+                           if features.get(f'{p}_present')]
+            print(f"Parties found: {parties_found if parties_found else 'None'}")
+            
+            # Show key validation features
+            for prefix in parties_found:
+                party_info = []
+                if features.get(f'{prefix}_has_bic'):
+                    valid = features.get(f'{prefix}_bic_valid_format', '?')
+                    party_info.append(f"BIC(valid={valid})")
+                if features.get(f'{prefix}_has_iban'):
+                    valid = features.get(f'{prefix}_iban_checksum_valid', '?')
+                    party_info.append(f"IBAN(valid={valid})")
+                if features.get(f'{prefix}_has_nch'):
+                    valid = features.get(f'{prefix}_fedaba_checksum_valid', '?')
+                    party_info.append(f"NCH(valid={valid})")
+                if features.get(f'{prefix}_id_needs_cleaning'):
+                    party_info.append("ID_DIRTY")
+                if party_info:
+                    print(f"  {prefix}: {', '.join(party_info)}")
+            
+            # Show intermediary info for 9018
+            if features.get('intm_has_multiple'):
+                print(f"  Intermediary: count={features.get('intm_count')}, redundant={features.get('intm_has_redundant_info')}")
     
     elif args.command == 'validate':
         path = Path(args.input)
