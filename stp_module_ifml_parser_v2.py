@@ -379,6 +379,9 @@ class PartyInfo:
     iban_bban_valid: bool = False  # Is IBAN's BBAN structure valid?
     bic_iban_country_match: Optional[bool] = None  # Do BIC and IBAN countries match?
     bic_party_country_match: Optional[bool] = None  # Does BIC country match party country?
+    # Domestic account features (for 8896)
+    has_domestic_account: bool = False  # Has non-IBAN account number
+    domestic_account_valid: bool = True  # Is domestic account format valid (default True)
     # Account identifier types detected
     is_clabe: bool = False  # Mexican 18-digit
     is_fedaba: bool = False  # US 9-digit routing
@@ -603,6 +606,45 @@ class IFMLParser:
             # Unknown country - accept if reasonable length
             return True
     
+    def _looks_like_iban_attempt(self, s: str) -> bool:
+        """
+        Check if string looks like an IBAN attempt but with wrong length.
+        This catches malformed IBANs like "IT12345..." (23 chars instead of 27).
+        These should trigger 8894 (Invalid IBAN), not 8896 (Invalid Domestic Account).
+        """
+        if not s:
+            return False
+        cleaned = s.upper().replace(' ', '').replace('-', '')
+        
+        # Must start with 2 letters (country code) + 2 digits (check digits pattern)
+        if not re.match(r'^[A-Z]{2}[0-9]{2}', cleaned):
+            return False
+        
+        # Check if it's a known IBAN country but wrong length
+        iban_lengths = {
+            'AL': 28, 'AD': 24, 'AT': 20, 'AZ': 28, 'BH': 22, 'BY': 28, 'BE': 16,
+            'BA': 20, 'BR': 29, 'BG': 22, 'CR': 22, 'HR': 21, 'CY': 28, 'CZ': 24,
+            'DK': 18, 'DO': 28, 'TL': 23, 'EE': 20, 'FO': 18, 'FI': 18, 'FR': 27,
+            'GE': 22, 'DE': 22, 'GI': 23, 'GR': 27, 'GL': 18, 'GT': 28, 'HU': 28,
+            'IS': 26, 'IQ': 23, 'IE': 22, 'IL': 23, 'IT': 27, 'JO': 30, 'KZ': 20,
+            'XK': 20, 'KW': 30, 'LV': 21, 'LB': 28, 'LI': 21, 'LT': 20, 'LU': 20,
+            'MK': 19, 'MT': 31, 'MR': 27, 'MU': 30, 'MC': 27, 'MD': 24, 'ME': 22,
+            'NL': 18, 'NO': 15, 'PK': 24, 'PS': 29, 'PL': 28, 'PT': 25, 'QA': 29,
+            'RO': 24, 'LC': 32, 'SM': 27, 'ST': 25, 'SA': 24, 'RS': 22, 'SC': 31,
+            'SK': 24, 'SI': 19, 'ES': 24, 'SE': 24, 'CH': 21, 'TN': 24, 'TR': 26,
+            'UA': 29, 'AE': 23, 'GB': 22, 'VA': 22, 'VG': 24
+        }
+        
+        country = cleaned[:2]
+        expected_len = iban_lengths.get(country)
+        
+        if expected_len:
+            # Known IBAN country but wrong length = malformed IBAN attempt
+            return len(cleaned) != expected_len and len(cleaned) >= 10
+        
+        # Not a known IBAN country
+        return False
+    
     def _validate_iban_checksum(self, s: str) -> bool:
         """
         Validate IBAN mod-97 checksum.
@@ -627,6 +669,63 @@ class IFMLParser:
             return int(numeric) % 97 == 1
         except (ValueError, OverflowError):
             return False
+    
+    def _validate_domestic_account(self, account: str, country: Optional[str]) -> bool:
+        """
+        Validate domestic (non-IBAN) account number format.
+        Returns True if valid or unknown format, False if definitely invalid.
+        
+        This is for 8896 (Invalid Domestic Account Number).
+        """
+        if not account:
+            return False
+        
+        cleaned = account.upper().replace(' ', '').replace('-', '')
+        
+        # If account looks like an IBAN (starts with 2 letters + 2 digits), validate as domestic
+        # A plain string in IBAN format is INVALID as a domestic account
+        # (domestic accounts should be just the BBAN without country code and check digits)
+        if re.match(r'^[A-Z]{2}[0-9]{2}', cleaned):
+            # This is IBAN format - not valid as a domestic account
+            # ACE fires 8896 for these (plain string IBANs treated as invalid domestic accounts)
+            return False
+        
+        # Country-specific domestic account validation
+        if country == 'US':
+            # US accounts are typically 4-17 digits
+            if not cleaned.isdigit():
+                return False
+            return 4 <= len(cleaned) <= 17
+        
+        elif country == 'PL':
+            # Polish domestic account (NRB) is 26 digits
+            if not cleaned.isdigit():
+                return False
+            return len(cleaned) == 26
+        
+        elif country == 'GB':
+            # UK account: 8 digits (sort code is separate)
+            if not cleaned.isdigit():
+                return False
+            return len(cleaned) == 8
+        
+        elif country == 'DE':
+            # German domestic: up to 10 digits
+            if not cleaned.isdigit():
+                return False
+            return 1 <= len(cleaned) <= 10
+        
+        # Default: accept if reasonably formatted
+        # Most domestic accounts are 6-20 digits
+        if cleaned.isdigit():
+            return 4 <= len(cleaned) <= 20
+        
+        # Alphanumeric accounts should be 6-30 chars
+        if cleaned.isalnum():
+            return 4 <= len(cleaned) <= 30
+        
+        # Contains special characters - probably invalid
+        return False
     
     def _analyze_compound_id(self, id_text: str) -> dict:
         """
@@ -1041,16 +1140,28 @@ class IFMLParser:
             else:
                 party.has_id = True
                 party.id_value = str(id_field)
-                # For plain string IDs: detect IBAN by pattern so 8894/8898 can fire on invalid IBANs
-                # Checksum validation is done separately - has_iban=True doesn't mean it's valid
-                if self._looks_like_iban(party.id_value):
-                    party.has_iban = True
-                    party.account_type = 'IBAN'
-                    party.account_value = party.id_value
-                elif self._looks_like_bic(party.id_value):
+                # Plain string ID (no Type specified)
+                # ACE treats plain strings as domestic accounts for 8896 validation
+                # But also checks IBAN format for 8894 if it looks like IBAN
+                if self._looks_like_bic(party.id_value):
                     party.has_bic = True
                     party.bic = party.id_value
                     party.bic_value = party.id_value
+                elif self._looks_like_iban_attempt(party.id_value):
+                    # Malformed IBAN (starts like IBAN but wrong length)
+                    # Don't treat as domestic account - let 8004 fire instead of 8896
+                    pass
+                elif self._looks_like_iban(party.id_value):
+                    # Looks like IBAN - set IBAN flags for 8894/8898
+                    party.has_iban = True
+                    party.account_type = 'IBAN'
+                    party.account_value = party.id_value
+                    # ALSO treat as domestic account for 8896 (ACE logic for plain strings)
+                    party.has_account = True
+                else:
+                    # Plain string that's not IBAN or BIC - treat as domestic account
+                    party.has_account = True
+                    party.account_value = party.id_value
         
         # === COMPOUND ID ANALYSIS (for 8026, 8022) ===
         # Detect IDs like "CUSCAU2S/AU805013" that contain multiple values
@@ -1158,6 +1269,34 @@ class IFMLParser:
             party.iban_valid_format, party.iban_checksum_valid = validate_iban(party.account_value)
             # Validate BBAN structure (catches IBANs with valid checksum but invalid bank code)
             party.iban_bban_valid = validate_iban_bban(party.account_value)
+        
+        # Domestic account detection (for 8896)
+        # A domestic account is any non-IBAN account WITH an actual account value
+        # EXCEPT: Plain string IDs that look like IBANs should ALSO trigger 8896
+        # BUT ONLY if the IBAN is otherwise valid (invalid IBANs trigger 8894 instead)
+        # NOTE: Type "F" or other typed accounts don't trigger 8896 for IBAN-format values
+        if party.has_account and party.account_value:
+            if party.account_type not in ('IBAN', None) and party.account_type != 'F':
+                # Non-IBAN, non-F account type (like D for domestic)
+                party.has_domestic_account = True
+                party.domestic_account_valid = self._validate_domestic_account(
+                    party.account_value, 
+                    party.residence_country or party.country or party.mailing_country
+                )
+            elif party.account_type is None and not party.has_iban:
+                # Truly plain string that doesn't look like IBAN
+                party.has_domestic_account = True
+                party.domestic_account_valid = self._validate_domestic_account(
+                    party.account_value, 
+                    party.residence_country or party.country or party.mailing_country
+                )
+            elif party.has_iban and party.id_type is None and party.account_type == 'IBAN':
+                # Plain string that looks like IBAN (no explicit Type from AcctIDInf)
+                # Only treat as invalid domestic account if the IBAN is otherwise valid
+                # (Invalid IBANs will trigger 8894 instead)
+                if party.iban_checksum_valid and party.iban_bban_valid:
+                    party.has_domestic_account = True
+                    party.domestic_account_valid = False  # Valid IBAN as plain string = invalid domestic
         
         # Detect account type (CLABE, FEDABA, etc.) and get length
         if party.account_value:
@@ -1571,6 +1710,8 @@ class IFMLParser:
                 result[f'{prefix}_account_type'] = party.account_type
                 result[f'{prefix}_account_length'] = party.account_length
                 result[f'{prefix}_account_numeric'] = party.account_numeric_only
+                result[f'{prefix}_has_domestic_account'] = party.has_domestic_account
+                result[f'{prefix}_domestic_account_valid'] = party.domestic_account_valid
                 result[f'{prefix}_iban_country'] = party.iban_country
                 result[f'{prefix}_iban_valid_format'] = party.iban_valid_format
                 result[f'{prefix}_iban_checksum_valid'] = party.iban_checksum_valid
@@ -1645,6 +1786,8 @@ class IFMLParser:
                 result[f'{prefix}_account_type'] = None
                 result[f'{prefix}_account_length'] = 0
                 result[f'{prefix}_account_numeric'] = False
+                result[f'{prefix}_has_domestic_account'] = False
+                result[f'{prefix}_domestic_account_valid'] = True
                 result[f'{prefix}_iban_country'] = None
                 result[f'{prefix}_iban_valid_format'] = False
                 result[f'{prefix}_iban_checksum_valid'] = False
