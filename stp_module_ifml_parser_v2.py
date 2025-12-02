@@ -340,6 +340,10 @@ class PartyInfo:
     fedaba_checksum_valid: bool = False  # Does FEDABA pass ABA checksum
     has_adr_bank_id: bool = False  # Has AdrBankID field
     adr_bank_id_type: Optional[str] = None  # Type of AdrBankID (FEDABA, CHIPS, etc.)
+    # WireKey BIC (Account With Institution) - for 8022 cross-party check
+    has_wirekey_bic: bool = False
+    wirekey_bic: Optional[str] = None
+    wirekey_bic_country: Optional[str] = None
     # IBAN requirement indicator (for 8004)
     needs_iban: bool = False  # International payment that should have IBAN
     has_iban: bool = False  # Explicit IBAN present
@@ -497,9 +501,8 @@ class IFMLParser:
     
     def _looks_like_iban(self, s: str) -> bool:
         """
-        Quick check if string looks like an IBAN by format (handles spaces).
+        Check if string looks like an IBAN by format and country-specific length.
         This detects IBAN-like strings by pattern, NOT by checksum validity.
-        Checksum validation is done separately in _validate_iban_checksum.
         """
         if not s:
             return False
@@ -507,7 +510,34 @@ class IFMLParser:
         if len(cleaned) < 15 or len(cleaned) > 34:
             return False
         # Must start with 2 letters + 2 digits + alphanumeric
-        return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned))
+        if not re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned):
+            return False
+        
+        # Check country-specific IBAN length (common countries)
+        # This helps avoid false positives like IT12345... (23 chars when IT needs 27)
+        iban_lengths = {
+            'AL': 28, 'AD': 24, 'AT': 20, 'AZ': 28, 'BH': 22, 'BY': 28, 'BE': 16,
+            'BA': 20, 'BR': 29, 'BG': 22, 'CR': 22, 'HR': 21, 'CY': 28, 'CZ': 24,
+            'DK': 18, 'DO': 28, 'TL': 23, 'EE': 20, 'FO': 18, 'FI': 18, 'FR': 27,
+            'GE': 22, 'DE': 22, 'GI': 23, 'GR': 27, 'GL': 18, 'GT': 28, 'HU': 28,
+            'IS': 26, 'IQ': 23, 'IE': 22, 'IL': 23, 'IT': 27, 'JO': 30, 'KZ': 20,
+            'XK': 20, 'KW': 30, 'LV': 21, 'LB': 28, 'LI': 21, 'LT': 20, 'LU': 20,
+            'MK': 19, 'MT': 31, 'MR': 27, 'MU': 30, 'MC': 27, 'MD': 24, 'ME': 22,
+            'NL': 18, 'NO': 15, 'PK': 24, 'PS': 29, 'PL': 28, 'PT': 25, 'QA': 29,
+            'RO': 24, 'LC': 32, 'SM': 27, 'ST': 25, 'SA': 24, 'RS': 22, 'SC': 31,
+            'SK': 24, 'SI': 19, 'ES': 24, 'SE': 24, 'CH': 21, 'TN': 24, 'TR': 26,
+            'UA': 29, 'AE': 23, 'GB': 22, 'VA': 22, 'VG': 24
+        }
+        
+        country = cleaned[:2]
+        expected_len = iban_lengths.get(country)
+        
+        if expected_len:
+            # If we know the expected length, require exact match
+            return len(cleaned) == expected_len
+        else:
+            # Unknown country - accept if reasonable length
+            return True
     
     def _validate_iban_checksum(self, s: str) -> bool:
         """
@@ -947,9 +977,9 @@ class IFMLParser:
             else:
                 party.has_id = True
                 party.id_value = str(id_field)
-                # FIX: For plain string IDs (no type), be conservative - require valid checksum
-                # to treat as IBAN. This avoids false positives like "IT12345..." being treated as IBAN.
-                if self._looks_like_iban(party.id_value) and self._validate_iban_checksum(party.id_value):
+                # For plain string IDs: detect IBAN by pattern so 8894/8898 can fire on invalid IBANs
+                # Checksum validation is done separately - has_iban=True doesn't mean it's valid
+                if self._looks_like_iban(party.id_value):
                     party.has_iban = True
                     party.account_type = 'IBAN'
                     party.account_value = party.id_value
@@ -1125,6 +1155,23 @@ class IFMLParser:
         if party.is_chips_aba and party.account_value:
             party.has_nch = True
             party.nch_type = party.nch_type or 'CHIPS'
+        
+        # === WireKey BIC Parsing (Account With Institution) ===
+        # WireKey contains BIC for correspondent/intermediary routing
+        wirekey = basic_info.get('WireKey')
+        if wirekey and isinstance(wirekey, dict):
+            wk_acct = wirekey.get('AcctIDInf') or wirekey.get('AcctIDInfo')
+            if wk_acct and isinstance(wk_acct, dict):
+                wk_id = wk_acct.get('ID')
+                if wk_id and isinstance(wk_id, dict):
+                    wk_type = wk_id.get('@Type') or wk_id.get('Type')
+                    wk_text = wk_id.get('#text') or wk_id.get('text')
+                    if wk_type in ['S', 'SWIFT', 'BIC'] and wk_text:
+                        if self._looks_like_bic(wk_text):
+                            party.has_wirekey_bic = True
+                            party.wirekey_bic = wk_text
+                            if len(wk_text) >= 6:
+                                party.wirekey_bic_country = wk_text[4:6].upper()
         
         # === IBAN Requirement Features (for 8004) ===
         # International payments to IBAN countries should have IBAN
@@ -1686,6 +1733,50 @@ class IFMLParser:
         result['has_multiple_nchs'] = len(all_nchs) > 1
         result['has_multiple_countries'] = len(all_countries) > 1
         result['has_multiple_bic4s'] = len(all_bic4s) > 1
+        
+        # === CROSS-PARTY RELATIONSHIP FEATURES (for 8022, 8026) ===
+        # 8022: IBAN inconsistent with Account With Institution BIC
+        # ACE message: "BNFBNK IBAN inconsistent with Account With Institution BIC"
+        # This checks if WireKey BIC country matches BeneficiaryParty's IBAN country
+        bnf = features.parties.get('BeneficiaryBankInfo')
+        bnp = features.parties.get('BeneficiaryPartyInfo')
+        cdt = features.parties.get('CreditPartyInfo')
+        
+        # For 8022: Check WireKey BIC (Account With Institution) against BNP's IBAN
+        result['bnf_bic_bnp_iban_match'] = None  # Default
+        
+        if cdt and bnp:
+            # CreditPartyInf's WireKey BIC vs BeneficiaryPartyInf's IBAN
+            if cdt.has_wirekey_bic and cdt.wirekey_bic_country and bnp.has_iban and bnp.iban_country:
+                result['wirekey_bic_bnp_iban_match'] = (cdt.wirekey_bic_country == bnp.iban_country)
+            else:
+                result['wirekey_bic_bnp_iban_match'] = None
+        else:
+            result['wirekey_bic_bnp_iban_match'] = None
+            
+        # Also check BNF's BIC against BNP's IBAN (alternate 8022 trigger)
+        if bnf and bnp:
+            if bnf.has_bic and bnf.bic_country and bnp.has_iban and bnp.iban_country:
+                result['bnf_bic_bnp_iban_match'] = (bnf.bic_country == bnp.iban_country)
+        
+        # 8026: NCH inconsistency - check if AdrBankID conflicts with BIC country
+        # If a party has AdrBankID (potential NCH) AND BIC from different country, 
+        # ACE derives NCH from BIC which conflicts with AdrBankID
+        for party_type, party in features.parties.items():
+            if not party:
+                continue
+            prefix = self._party_type_to_prefix(party_type)
+            
+            # Check for AdrBankID + BIC country conflict
+            # AdrBankID "121" with Finnish BIC suggests NCH inconsistency
+            if party.has_adr_bank_id and party.has_bic and party.bic_country:
+                # AdrBankID with BIC from non-US country = likely inconsistency
+                # ACE derives NCH from BIC, which won't match the AdrBankID
+                result[f'{prefix}_nch_consistent_with_bic'] = False  # False = inconsistent
+                result[f'{prefix}_has_nch_inconsistency'] = True
+            else:
+                result[f'{prefix}_nch_consistent_with_bic'] = True  # No conflict
+                result[f'{prefix}_has_nch_inconsistency'] = False
         
         return result
     
