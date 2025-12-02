@@ -497,18 +497,30 @@ class IFMLParser:
     
     def _looks_like_iban(self, s: str) -> bool:
         """
-        Quick check if string looks like an IBAN (handles spaces).
-        Only returns True if the IBAN checksum is valid to avoid false positives.
+        Quick check if string looks like an IBAN by format (handles spaces).
+        This detects IBAN-like strings by pattern, NOT by checksum validity.
+        Checksum validation is done separately in _validate_iban_checksum.
         """
         if not s:
             return False
         cleaned = s.upper().replace(' ', '').replace('-', '')
         if len(cleaned) < 15 or len(cleaned) > 34:
             return False
-        # Must start with 2 letters + 2 digits
+        # Must start with 2 letters + 2 digits + alphanumeric
+        return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned))
+    
+    def _validate_iban_checksum(self, s: str) -> bool:
+        """
+        Validate IBAN mod-97 checksum.
+        Returns True if checksum is valid, False otherwise.
+        """
+        if not s:
+            return False
+        cleaned = s.upper().replace(' ', '').replace('-', '')
+        if len(cleaned) < 15 or len(cleaned) > 34:
+            return False
         if not re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned):
             return False
-        # Validate IBAN checksum (mod-97) to avoid false positives
         # Move first 4 chars to end and convert letters to numbers (A=10, B=11, etc.)
         rearranged = cleaned[4:] + cleaned[:4]
         numeric = ''
@@ -935,8 +947,9 @@ class IFMLParser:
             else:
                 party.has_id = True
                 party.id_value = str(id_field)
-                # FIX: Detect plain string IBAN by pattern
-                if self._looks_like_iban(party.id_value):
+                # FIX: For plain string IDs (no type), be conservative - require valid checksum
+                # to treat as IBAN. This avoids false positives like "IT12345..." being treated as IBAN.
+                if self._looks_like_iban(party.id_value) and self._validate_iban_checksum(party.id_value):
                     party.has_iban = True
                     party.account_type = 'IBAN'
                     party.account_value = party.id_value
@@ -1579,6 +1592,100 @@ class IFMLParser:
                 result[f'{prefix}_id_has_bic_pattern'] = False
                 result[f'{prefix}_id_has_nch_pattern'] = False
                 result[f'{prefix}_id_has_bic_and_nch'] = False
+        
+        # === CROSS-PARTY CONSISTENCY FEATURES (for 8022-8033) ===
+        # Collect values across all parties for consistency checks
+        all_ibans = set()
+        all_bbans = set()
+        all_nchs = set()
+        all_countries = set()
+        all_bic4s = set()
+        all_accounts = set()
+        all_clabes = set()
+        all_domestic_accounts = set()
+        
+        # Track if any party has these features (for global require_true)
+        any_has_iban = False
+        any_has_bban = False
+        any_has_nch = False
+        any_has_country = False
+        any_has_bic = False
+        any_has_account = False
+        any_has_clabe = False
+        
+        for party_type, party in features.parties.items():
+            if not party:
+                continue
+            
+            # Collect IBANs
+            if party.has_iban and party.account_value:
+                any_has_iban = True
+                iban = party.account_value.upper().replace(' ', '').replace('-', '')
+                all_ibans.add(iban)
+                # BBAN is IBAN without country code and check digits (chars 5+)
+                if len(iban) > 4:
+                    all_bbans.add(iban[4:])
+                    any_has_bban = True
+            
+            # Collect NCH/routing codes
+            if party.has_nch and party.nch_value:
+                any_has_nch = True
+                all_nchs.add(party.nch_value.replace('-', '').replace(' ', ''))
+            
+            # Collect countries
+            if party.country:
+                any_has_country = True
+                all_countries.add(party.country.upper())
+            if party.bic_country:
+                any_has_country = True
+                all_countries.add(party.bic_country.upper())
+            if party.iban_country:
+                any_has_country = True
+                all_countries.add(party.iban_country.upper())
+            
+            # Collect BIC4 (first 4 chars of BIC)
+            if party.has_bic and party.bic and len(party.bic) >= 4:
+                any_has_bic = True
+                all_bic4s.add(party.bic[:4].upper())
+            
+            # Collect account numbers
+            if party.has_account and party.account_value:
+                any_has_account = True
+                all_accounts.add(party.account_value.replace(' ', '').replace('-', ''))
+            
+            # Collect CLABEs
+            if party.is_clabe and party.account_value:
+                any_has_clabe = True
+                all_clabes.add(party.account_value)
+            
+            # Collect domestic accounts (non-IBAN)
+            if party.has_account and not party.has_iban and party.account_value:
+                all_domestic_accounts.add(party.account_value.replace(' ', '').replace('-', ''))
+        
+        # Global "has_*" features (True if ANY party has the feature)
+        result['has_iban'] = any_has_iban
+        result['has_bban'] = any_has_bban
+        result['has_nch'] = any_has_nch
+        result['has_country'] = any_has_country
+        result['has_bic'] = any_has_bic
+        result['has_account'] = any_has_account
+        result['has_clabe'] = any_has_clabe
+        
+        # Consistency = True if 0 or 1 unique values, False if multiple different values
+        result['ibans_consistent'] = len(all_ibans) <= 1
+        result['bbans_consistent'] = len(all_bbans) <= 1
+        result['nchs_consistent'] = len(all_nchs) <= 1
+        result['countries_consistent'] = len(all_countries) <= 1
+        result['bic4s_consistent'] = len(all_bic4s) <= 1
+        result['accounts_consistent'] = len(all_accounts) <= 1
+        result['clabes_consistent'] = len(all_clabes) <= 1
+        result['domestic_accounts_consistent'] = len(all_domestic_accounts) <= 1
+        
+        # Also track if we have any of these for the consistency checks to be meaningful
+        result['has_multiple_ibans'] = len(all_ibans) > 1
+        result['has_multiple_nchs'] = len(all_nchs) > 1
+        result['has_multiple_countries'] = len(all_countries) > 1
+        result['has_multiple_bic4s'] = len(all_bic4s) > 1
         
         return result
     
