@@ -599,13 +599,22 @@ class FeatureExtractor:
             
             # Is this a real IBAN attempt? (starts with 2 letters, length >= 15)
             # If not, it's garbage and should be treated as "no IBAN" for 8004 purposes
+            # Also check that it's not obviously garbage (e.g., all same char, all zeros)
             is_iban_attempt = (len(iban) >= 15 and 
                               len(iban) <= 34 and 
-                              iban[:2].isalpha())
+                              iban[:2].isalpha() and
+                              len(set(iban[2:])) > 1)  # Not all same character after country
+            
+            # Additional check: the check digits (chars 3-4) should be numeric
+            if is_iban_attempt and len(iban) >= 4:
+                check_digits = iban[2:4]
+                if not check_digits.isdigit():
+                    is_iban_attempt = False
+            
             self.features[f'{prefix}_iban_is_attempt'] = is_iban_attempt
             
-            if self.debug and not is_iban_attempt:
-                print(f"[DEBUG] {prefix} IBAN '{iban}' is not a real IBAN attempt (too short or bad format)")
+            if self.debug:
+                print(f"[DEBUG] {prefix} IBAN field: '{iban}' len={len(iban)} attempt={is_iban_attempt} fmt={fmt_valid} cksum={cksum_valid}")
         
         # Parse account info
         acct_info = basic.get('AcctIDInfo') or basic.get('AcctIDInf')
@@ -629,11 +638,19 @@ class FeatureExtractor:
                     # Is this a real IBAN attempt?
                     is_iban_attempt = (len(acct_value) >= 15 and 
                                       len(acct_value) <= 34 and 
-                                      acct_value[:2].isalpha())
+                                      acct_value[:2].isalpha() and
+                                      len(set(acct_value[2:])) > 1)  # Not all same char
+                    
+                    # Check digits (chars 3-4) should be numeric
+                    if is_iban_attempt and len(acct_value) >= 4:
+                        check_digits = acct_value[2:4]
+                        if not check_digits.isdigit():
+                            is_iban_attempt = False
+                    
                     self.features[f'{prefix}_iban_is_attempt'] = is_iban_attempt
                     
-                    if self.debug and not is_iban_attempt:
-                        print(f"[DEBUG] {prefix} account IBAN '{acct_value}' is not a real IBAN attempt")
+                    if self.debug:
+                        print(f"[DEBUG] {prefix} AcctID IBAN: '{acct_value}' len={len(acct_value)} attempt={is_iban_attempt} fmt={fmt_valid} cksum={cksum_valid}")
         
         # Parse AdrBankID (NCH/routing number)
         adr_bank_id = basic.get('AdrBankID')
