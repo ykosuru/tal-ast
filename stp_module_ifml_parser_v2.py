@@ -1370,134 +1370,6 @@ class IFMLParser:
                 # Same BIC in both - one is duplicate
                 bnf.has_duplicate_info = True
     
-    def _validate_currency(self, currency: str) -> bool:
-        """Validate ISO 4217 currency code."""
-        if not currency:
-            return True  # No currency = no error
-        valid_currencies = {
-            'AED', 'AFN', 'ALL', 'AMD', 'ANG', 'AOA', 'ARS', 'AUD', 'AWG', 'AZN',
-            'BAM', 'BBD', 'BDT', 'BGN', 'BHD', 'BIF', 'BMD', 'BND', 'BOB', 'BRL',
-            'BSD', 'BTN', 'BWP', 'BYN', 'BZD', 'CAD', 'CDF', 'CHF', 'CLP', 'CNY',
-            'COP', 'CRC', 'CUC', 'CUP', 'CVE', 'CZK', 'DJF', 'DKK', 'DOP', 'DZD',
-            'EGP', 'ERN', 'ETB', 'EUR', 'FJD', 'FKP', 'GBP', 'GEL', 'GHS', 'GIP',
-            'GMD', 'GNF', 'GTQ', 'GYD', 'HKD', 'HNL', 'HRK', 'HTG', 'HUF', 'IDR',
-            'ILS', 'INR', 'IQD', 'IRR', 'ISK', 'JMD', 'JOD', 'JPY', 'KES', 'KGS',
-            'KHR', 'KMF', 'KPW', 'KRW', 'KWD', 'KYD', 'KZT', 'LAK', 'LBP', 'LKR',
-            'LRD', 'LSL', 'LYD', 'MAD', 'MDL', 'MGA', 'MKD', 'MMK', 'MNT', 'MOP',
-            'MRU', 'MUR', 'MVR', 'MWK', 'MXN', 'MYR', 'MZN', 'NAD', 'NGN', 'NIO',
-            'NOK', 'NPR', 'NZD', 'OMR', 'PAB', 'PEN', 'PGK', 'PHP', 'PKR', 'PLN',
-            'PYG', 'QAR', 'RON', 'RSD', 'RUB', 'RWF', 'SAR', 'SBD', 'SCR', 'SDG',
-            'SEK', 'SGD', 'SHP', 'SLL', 'SOS', 'SRD', 'SSP', 'STN', 'SVC', 'SYP',
-            'SZL', 'THB', 'TJS', 'TMT', 'TND', 'TOP', 'TRY', 'TTD', 'TWD', 'TZS',
-            'UAH', 'UGX', 'USD', 'UYU', 'UZS', 'VES', 'VND', 'VUV', 'WST', 'XAF',
-            'XCD', 'XOF', 'XPF', 'YER', 'ZAR', 'ZMW', 'ZWL'
-        }
-        return currency.upper() in valid_currencies
-    
-    def _validate_amount_decimals(self, amount: float, currency: str) -> bool:
-        """Validate that amount has correct decimal places for currency."""
-        if amount <= 0 or not currency:
-            return True  # No amount = no error
-        
-        # Currencies with 0 decimal places
-        zero_decimals = {'BIF', 'CLP', 'DJF', 'GNF', 'ISK', 'JPY', 'KMF', 'KRW', 
-                         'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'}
-        # Currencies with 3 decimal places
-        three_decimals = {'BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND'}
-        
-        currency = currency.upper()
-        if currency in zero_decimals:
-            max_decimals = 0
-        elif currency in three_decimals:
-            max_decimals = 3
-        else:
-            max_decimals = 2
-        
-        # Check actual decimal places
-        amount_str = f"{amount:.10f}".rstrip('0')
-        if '.' in amount_str:
-            actual_decimals = len(amount_str.split('.')[1])
-        else:
-            actual_decimals = 0
-        
-        return actual_decimals <= max_decimals
-    
-    def _compute_cross_party_consistency(self, features: IFMLFeatures) -> dict:
-        """
-        Compute cross-party consistency features for 8023-8029 and 8033.
-        These detect when multiple parties have conflicting values.
-        """
-        result = {
-            'ibans_consistent': True,
-            'bbans_consistent': True,
-            'nchs_consistent': True,
-            'countries_consistent': True,
-            'bic4s_consistent': True,
-            'accounts_consistent': True,
-            'clabes_consistent': True,
-            'domestic_accounts_consistent': True,
-        }
-        
-        # Collect values across all parties
-        ibans = set()
-        bbans = set()
-        nchs = set()
-        countries = set()
-        bic4s = set()
-        accounts = set()
-        clabes = set()
-        domestic_accounts = set()
-        
-        for party_type, party in features.parties.items():
-            if not party:
-                continue
-            
-            # IBAN
-            if party.has_iban and party.account_value:
-                iban = party.account_value.upper().replace(' ', '').replace('-', '')
-                ibans.add(iban)
-                # Extract BBAN (everything after country code and check digits)
-                if len(iban) > 4:
-                    bbans.add(iban[4:])
-            
-            # NCH/Routing codes
-            if party.has_nch and hasattr(party, 'nch_value') and party.nch_value:
-                nchs.add(party.nch_value.replace('-', '').replace(' ', ''))
-            
-            # Country codes
-            if party.country:
-                countries.add(party.country.upper())
-            if party.bic_country:
-                countries.add(party.bic_country.upper())
-            
-            # BIC4 (first 4 chars of BIC)
-            if party.has_bic and party.bic:
-                bic4s.add(party.bic[:4].upper())
-            
-            # Account numbers
-            if party.has_account and party.account_value and party.account_type != 'IBAN':
-                accounts.add(party.account_value.replace(' ', '').replace('-', ''))
-            
-            # CLABE (Mexican account)
-            if party.is_clabe and party.account_value:
-                clabes.add(party.account_value.replace(' ', ''))
-            
-            # Domestic accounts
-            if party.is_domestic and party.has_account and party.account_value:
-                domestic_accounts.add(party.account_value.replace(' ', '').replace('-', ''))
-        
-        # Check consistency - more than one unique value means inconsistency
-        result['ibans_consistent'] = len(ibans) <= 1
-        result['bbans_consistent'] = len(bbans) <= 1
-        result['nchs_consistent'] = len(nchs) <= 1
-        result['countries_consistent'] = len(countries) <= 1
-        result['bic4s_consistent'] = len(bic4s) <= 1
-        result['accounts_consistent'] = len(accounts) <= 1
-        result['clabes_consistent'] = len(clabes) <= 1
-        result['domestic_accounts_consistent'] = len(domestic_accounts) <= 1
-        
-        return result
-    
     def to_dict(self, features: IFMLFeatures) -> dict:
         """Convert features to a flat dictionary for ML consumption."""
         result = {
@@ -1528,17 +1400,7 @@ class IFMLParser:
             'intm_entries_share_bic_prefix': features.intm_entries_share_bic_prefix,
             'intm_has_redundant_info': features.intm_has_redundant_info,
             'intm_has_multiple_types': features.intm_has_multiple_types,
-            # === GLOBAL VALIDATION FEATURES (for 8XXX codes) ===
-            'has_currency': features.primary_currency is not None and features.primary_currency != '',
-            'currency_valid': self._validate_currency(features.primary_currency),
-            'has_amount': features.primary_amount > 0,
-            'amount_decimals_valid': self._validate_amount_decimals(features.primary_amount, features.primary_currency),
         }
-        
-        # === CROSS-PARTY CONSISTENCY FEATURES (for 8023-8029, 8033) ===
-        # These detect when multiple parties have conflicting values
-        consistency = self._compute_cross_party_consistency(features)
-        result.update(consistency)
         
         # Add party-specific features
         for party_type in self.PARTY_TYPES:
@@ -1618,29 +1480,6 @@ class IFMLParser:
                 result[f'{prefix}_id_has_bic_pattern'] = party.id_has_bic_pattern
                 result[f'{prefix}_id_has_nch_pattern'] = party.id_has_nch_pattern
                 result[f'{prefix}_id_has_bic_and_nch'] = party.id_has_bic_and_nch
-                # === ADDITIONAL VALIDATION FEATURES (for 8XXX) ===
-                # BIC4 validation (8005)
-                result[f'{prefix}_bic4_valid'] = self._validate_bic4(party.bic) if party.bic else True
-                # BIC length (for 9477)
-                result[f'{prefix}_bic_length_8'] = party.bic_length == 8
-                # Country validation (8006)
-                result[f'{prefix}_has_country'] = bool(party.country or party.bic_country)
-                result[f'{prefix}_country_valid'] = self._validate_country(party.country) if party.country else True
-                # Account validation (8892, 8896)
-                result[f'{prefix}_account_valid'] = self._validate_account(party) if party.has_account else True
-                # BBAN features (8024, 8897)
-                result[f'{prefix}_has_bban'] = party.has_iban  # BBAN is part of IBAN
-                result[f'{prefix}_bban_valid'] = party.iban_valid_format if party.has_iban else True
-                # CLABE features (8033)
-                result[f'{prefix}_has_clabe'] = party.is_clabe
-                # IBAN derivation support (8030)
-                result[f'{prefix}_iban_derivation_supported'] = self._is_iban_derivation_supported(party)
-                # Any ID needs cleaning (9019)
-                result[f'{prefix}_any_id_needs_cleaning'] = (
-                    party.account_has_dirty_chars or 
-                    party.iban_needs_formatting or 
-                    party.nch_has_dirty_chars
-                )
             else:
                 result[f'{prefix}_present'] = False
                 result[f'{prefix}_has_id'] = False
@@ -1714,17 +1553,6 @@ class IFMLParser:
                 result[f'{prefix}_id_has_bic_pattern'] = False
                 result[f'{prefix}_id_has_nch_pattern'] = False
                 result[f'{prefix}_id_has_bic_and_nch'] = False
-                # === ADDITIONAL VALIDATION FEATURES (for 8XXX) ===
-                result[f'{prefix}_bic4_valid'] = True
-                result[f'{prefix}_bic_length_8'] = False
-                result[f'{prefix}_has_country'] = False
-                result[f'{prefix}_country_valid'] = True
-                result[f'{prefix}_account_valid'] = True
-                result[f'{prefix}_has_bban'] = False
-                result[f'{prefix}_bban_valid'] = True
-                result[f'{prefix}_has_clabe'] = False
-                result[f'{prefix}_iban_derivation_supported'] = False
-                result[f'{prefix}_any_id_needs_cleaning'] = False
         
         return result
     
@@ -1742,60 +1570,6 @@ class IFMLParser:
             'OrderingInstitution': 'ordi'
         }
         return prefixes.get(party_type, party_type.lower()[:4])
-    
-    def _validate_bic4(self, bic: str) -> bool:
-        """Validate first 4 characters of BIC (must be letters A-Z)."""
-        if not bic or len(bic) < 4:
-            return False
-        return bic[:4].isalpha() and bic[:4].isupper()
-    
-    def _validate_country(self, country: str) -> bool:
-        """Validate ISO 3166-1 alpha-2 country code."""
-        if not country:
-            return True
-        return country.upper() in VALID_COUNTRY_CODES
-    
-    def _validate_account(self, party) -> bool:
-        """
-        Validate account number format.
-        Returns True if valid or cannot determine, False if definitely invalid.
-        """
-        if not party.has_account or not party.account_value:
-            return True
-        
-        account = party.account_value.replace(' ', '').replace('-', '')
-        
-        # IBAN - check format and checksum
-        if party.account_type == 'IBAN':
-            return party.iban_valid_format and party.iban_checksum_valid
-        
-        # CLABE - must be 18 digits
-        if party.is_clabe:
-            return len(account) == 18 and account.isdigit()
-        
-        # FEDABA - check format and checksum
-        if party.is_fedaba:
-            return party.fedaba_checksum_valid
-        
-        # Generic account - just check it's not empty and reasonable length
-        return len(account) >= 4 and len(account) <= 34
-    
-    def _is_iban_derivation_supported(self, party) -> bool:
-        """
-        Check if IBAN derivation is supported for this party's country.
-        """
-        # Countries where IBAN can be derived from account + BIC/NCH
-        derivation_countries = {
-            'AT', 'BE', 'CH', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR',
-            'GB', 'GR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'NL',
-            'NO', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK'
-        }
-        
-        country = party.country or party.bic_country or party.mailing_country or party.residence_country
-        if not country:
-            return False
-        
-        return country.upper() in derivation_countries
 
 
 class IFMLResponseParser:
