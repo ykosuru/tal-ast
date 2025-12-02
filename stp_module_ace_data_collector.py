@@ -1,1009 +1,997 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-ACE ERROR CODE DATA COLLECTOR & DECISION TREE BUILDER
+ACE DATA COLLECTOR v2.0
 ================================================================================
 
-PURPOSE:
-    Collect features and actual error codes from IFML request/response pairs,
-    then build decision trees to understand which features trigger each code.
+Collects IFML payment data and builds decision trees for ACE code prediction.
 
-USAGE:
-    # Collect data from directory of IFML files
-    python ace_data_collector.py collect --input-dir ./ifml_data --output dataset.csv
-    
-    # Build decision trees from collected data
-    python ace_data_collector.py analyze --input dataset.csv --output-dir ./trees
-    
-    # Process single file pair
-    python ace_data_collector.py single --request req.json --response resp.json
-    
-    # Show feature importance for a specific code
-    python ace_data_collector.py explain --input dataset.csv --code 8894
+KEY CHANGE: Excludes spurious correlation features from decision tree analysis:
+- Amount features (primary_amount, instructed_amount, etc.)
+- Transaction IDs (transaction_uid - meaningless numeric)
+- Message type (correlation, not causation)
+- Source code, incoming format (operational, not validation-related)
 
-WORKFLOW:
-    1. Place IFML request/response pairs in a directory
-       - Naming convention: *_request.json / *_response.json
-       - Or: requests/*.json / responses/*.json subdirectories
-    
-    2. Run collect to extract features and actual codes
-    
-    3. Run analyze to build decision trees
-    
-    4. Review generated rules and feature importance
+These features may correlate with codes in the dataset but do NOT cause the codes
+to fire. Including them creates misleading decision trees.
 
-OUTPUT:
-    - CSV dataset with all features and fired codes
-    - Decision tree visualizations (text and optional graphviz)
-    - Feature importance rankings per code
-    - Suggested precondition rules
+Usage:
+    # Collect data from combined JSON files
+    python ace_data_collector_v2.py collect -i /path/to/data -o dataset.csv
+    
+    # Build decision trees (excluding spurious features)
+    python ace_data_collector_v2.py analyze -i dataset.csv -o ./trees --prefix 8
+    
+    # Build trees for 9XXX repair codes
+    python ace_data_collector_v2.py analyze -i dataset.csv -o ./trees --prefix 9
 
-AUTHOR: ACE Pelican ML Team
-VERSION: 1.0 (December 2025)
+Author: ACE Pelican Team
+Version: 2.0 - Excludes spurious correlations
 ================================================================================
 """
 
 import json
 import csv
-import os
-import sys
-import re
 import argparse
+import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set, Any
-from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Set, Any, Tuple
 from collections import defaultdict
-from datetime import datetime
+from dataclasses import dataclass, field
+import warnings
 
-# Try to import ML libraries (optional)
-try:
-    import numpy as np
-    from sklearn.tree import DecisionTreeClassifier, export_text
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import classification_report, confusion_matrix
-    ML_AVAILABLE = True
-except ImportError:
-    ML_AVAILABLE = False
-    print("Note: scikit-learn not installed. Decision tree building disabled.")
-    print("      Install with: pip install scikit-learn numpy")
+# Suppress sklearn warnings
+warnings.filterwarnings('ignore')
 
-# Add current directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# =============================================================================
+# SPURIOUS FEATURES TO EXCLUDE FROM DECISION TREES
+# =============================================================================
 
-# Try to import our parser and enhanced features
-try:
-    from ifml_parser_v3 import IFMLParser
-    PARSER_VERSION = 'v3'
-except ImportError:
-    try:
-        from ifml_parser_v2 import IFMLParser
-        PARSER_VERSION = 'v2'
-    except ImportError:
-        print("ERROR: Could not import IFMLParser. Make sure ifml_parser_v3.py is in the same directory.")
-        sys.exit(1)
+# These features correlate with codes but do NOT cause them
+# Including them creates misleading trees (e.g., "amount > 275M -> invalid IBAN")
+EXCLUDED_FEATURES = {
+    # Amount features - payment value doesn't determine validation
+    'primary_amount',
+    'instructed_amount',
+    'amount_mismatch',
+    'has_instructed_amount',
+    
+    # Transaction identifiers - meaningless numeric correlation
+    'transaction_uid',
+    'transaction_id',
+    
+    # Message metadata - operational, not validation-related
+    'message_type',
+    'incoming_msg_type',
+    'source_code',
+    'incoming_format',
+    
+    # Derived ID features that are just length proxies
+    # (keep specific validation features like bic_valid_format)
+}
 
-# Try to import enhanced features
-try:
-    from enhanced_features import EnhancedFeatureExtractor
-    ENHANCED_AVAILABLE = True
-except ImportError:
-    ENHANCED_AVAILABLE = False
-    print("Note: enhanced_features.py not found. Using base parser only.")
-
+# Features to KEEP for decision trees (validation-relevant)
+# These are the features that actually determine if a code fires
+VALIDATION_FEATURES = {
+    # BIC validation (8001, 8005, 8006)
+    'has_bic', 'bic_valid_format', 'bic_valid_country', 'bic4_valid',
+    'bic_length', 'bic_country',
+    
+    # IBAN validation (8004, 8894, 8898)
+    'has_iban', 'iban_valid_format', 'iban_checksum_valid',
+    'needs_iban', 'iban_country',
+    
+    # NCH/ABA validation (8895, 8026)
+    'has_nch', 'nch_valid', 'fedaba_checksum_valid',
+    'has_adr_bank_id', 'nch_validation_applicable',
+    
+    # Account validation (8892, 8896)
+    'has_account', 'account_valid', 'account_type',
+    
+    # Country validation (8006, 8027)
+    'has_country', 'country_valid', 'country',
+    
+    # Currency validation (8124)
+    'has_currency', 'currency_valid',
+    
+    # Cross-party consistency (8022, 8023, 8026)
+    'wirekey_bic_bnp_iban_match', 'bic_iban_country_match',
+    
+    # Party presence (context)
+    'present', 'has_id', 'has_name',
+    
+    # Domestic/international (context for 8895, 8896)
+    'is_domestic', 'is_international',
+    
+    # 9XXX repair detection
+    'intm_has_multiple', 'intm_has_redundant_info', 'intm_count',
+    'intm_entries_share_adr_bank_id', 'intm_entries_share_country',
+    'intm_entries_share_bic_prefix',
+    'account_has_dirty_chars', 'name_has_dirty_chars',
+    'iban_needs_formatting', 'nch_needs_formatting',
+    'has_multiple_ids', 'has_duplicate_info',
+    'any_id_needs_cleaning', 'id_needs_cleaning',
+    
+    # Structural features (relevant for 9017, 9018)
+    'bank_party_count', 'non_bank_party_count', 'party_count',
+    'has_intermediary', 'address_line_count',
+}
 
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
-# Codes that require directory lookup - EXCLUDE from training
-DIRECTORY_DEPENDENT_CODES = {
-    # 8XXX directory-dependent
-    '8035', '8036', '8464', '8465', '8472',
-    # 9XXX directory-dependent
-    '9004', '9005', '9007', '9008', '9013', '9023', '9032',
-    '9475', '9476', '9477', '9478', '9479', '9480', '9481',
-    '9485', '9486', '9490', '9961', '9985', '9986',
+VALID_COUNTRY_CODES = {
+    'AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AO', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AW', 'AX', 'AZ',
+    'BA', 'BB', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ', 'BL', 'BM', 'BN', 'BO', 'BQ', 'BR', 'BS',
+    'BT', 'BV', 'BW', 'BY', 'BZ', 'CA', 'CC', 'CD', 'CF', 'CG', 'CH', 'CI', 'CK', 'CL', 'CM', 'CN',
+    'CO', 'CR', 'CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DE', 'DJ', 'DK', 'DM', 'DO', 'DZ', 'EC', 'EE',
+    'EG', 'EH', 'ER', 'ES', 'ET', 'FI', 'FJ', 'FK', 'FM', 'FO', 'FR', 'GA', 'GB', 'GD', 'GE', 'GF',
+    'GG', 'GH', 'GI', 'GL', 'GM', 'GN', 'GP', 'GQ', 'GR', 'GS', 'GT', 'GU', 'GW', 'GY', 'HK', 'HM',
+    'HN', 'HR', 'HT', 'HU', 'ID', 'IE', 'IL', 'IM', 'IN', 'IO', 'IQ', 'IR', 'IS', 'IT', 'JE', 'JM',
+    'JO', 'JP', 'KE', 'KG', 'KH', 'KI', 'KM', 'KN', 'KP', 'KR', 'KW', 'KY', 'KZ', 'LA', 'LB', 'LC',
+    'LI', 'LK', 'LR', 'LS', 'LT', 'LU', 'LV', 'LY', 'MA', 'MC', 'MD', 'ME', 'MF', 'MG', 'MH', 'MK',
+    'ML', 'MM', 'MN', 'MO', 'MP', 'MQ', 'MR', 'MS', 'MT', 'MU', 'MV', 'MW', 'MX', 'MY', 'MZ', 'NA',
+    'NC', 'NE', 'NF', 'NG', 'NI', 'NL', 'NO', 'NP', 'NR', 'NU', 'NZ', 'OM', 'PA', 'PE', 'PF', 'PG',
+    'PH', 'PK', 'PL', 'PM', 'PN', 'PR', 'PS', 'PT', 'PW', 'PY', 'QA', 'RE', 'RO', 'RS', 'RU', 'RW',
+    'SA', 'SB', 'SC', 'SD', 'SE', 'SG', 'SH', 'SI', 'SJ', 'SK', 'SL', 'SM', 'SN', 'SO', 'SR', 'SS',
+    'ST', 'SV', 'SX', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK', 'TL', 'TM', 'TN', 'TO',
+    'TR', 'TT', 'TV', 'TW', 'TZ', 'UA', 'UG', 'UM', 'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI',
+    'VN', 'VU', 'WF', 'WS', 'XK', 'YE', 'YT', 'ZA', 'ZM', 'ZW'
 }
 
-# Codes that are unpredictable (system/config/security)
-UNPREDICTABLE_CODES = {
-    '8003',  # File name derivation
-    '8034',  # Forced Debit
-    '8851',  # Field size (schema)
-    '8853',  # Number format (schema)
-    '8905',  # Hash mismatch
-    '8906',  # Wrong flow
-    '9439',  # No Pattern Found
-    '9999',  # Field Repair (generic)
+IBAN_LENGTHS = {
+    'AL': 28, 'AD': 24, 'AT': 20, 'AZ': 28, 'BH': 22, 'BY': 28, 'BE': 16, 'BA': 20,
+    'BR': 29, 'BG': 22, 'CR': 22, 'HR': 21, 'CY': 28, 'CZ': 24, 'DK': 18, 'DO': 28,
+    'TL': 23, 'EE': 20, 'FO': 18, 'FI': 18, 'FR': 27, 'GE': 22, 'DE': 22, 'GI': 23,
+    'GR': 27, 'GL': 18, 'GT': 28, 'HU': 28, 'IS': 26, 'IQ': 23, 'IE': 22, 'IL': 23,
+    'IT': 27, 'JO': 30, 'KZ': 20, 'XK': 20, 'KW': 30, 'LV': 21, 'LB': 28, 'LI': 21,
+    'LT': 20, 'LU': 20, 'MK': 19, 'MT': 31, 'MR': 27, 'MU': 30, 'MC': 27, 'MD': 24,
+    'ME': 22, 'NL': 18, 'NO': 15, 'PK': 24, 'PS': 29, 'PL': 28, 'PT': 25, 'QA': 29,
+    'RO': 24, 'SM': 27, 'SA': 24, 'RS': 22, 'SC': 31, 'SK': 24, 'SI': 19, 'ES': 24,
+    'SE': 24, 'CH': 21, 'TN': 24, 'TR': 26, 'AE': 23, 'GB': 22, 'VA': 22, 'VG': 24,
 }
 
-# All codes to exclude
-EXCLUDED_CODES = DIRECTORY_DEPENDENT_CODES | UNPREDICTABLE_CODES
+IBAN_COUNTRIES = set(IBAN_LENGTHS.keys())
 
-# Trainable 8XXX codes (deterministic from message)
-TRAINABLE_8XXX = {
-    '8001', '8004', '8005', '8006', '8007', '8022', '8023', '8024',
-    '8025', '8026', '8027', '8028', '8029', '8030', '8033', '8124',
-    '8852', '8892', '8894', '8895', '8896', '8897', '8898',
+PARTY_PREFIXES = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'bnp', 'acwi', 'ordi']
+
+PARTY_MAPPING = {
+    'OriginatingPartyInf': 'orig', 'OriginatingPartyInfo': 'orig',
+    'SendingBankInf': 'send', 'SendingBankInfo': 'send',
+    'DebitPartyInf': 'dbt', 'DebitPartyInfo': 'dbt',
+    'CreditPartyInf': 'cdt', 'CreditPartyInfo': 'cdt',
+    'IntermediaryBankInf': 'intm', 'IntermediaryBankInfo': 'intm',
+    'BeneficiaryBankInf': 'bnf', 'BeneficiaryBankInfo': 'bnf',
+    'BeneficiaryPartyInf': 'bnp', 'BeneficiaryPartyInfo': 'bnp',
+    'AccountWithInstitution': 'acwi',
+    'OrderingInstitution': 'ordi',
 }
-
-# Trainable 9XXX codes
-TRAINABLE_9XXX = {
-    '9000', '9002', '9006', '9009', '9012', '9014', '9015', '9017',
-    '9018', '9019', '9020', '9021', '9022', '9024', '9025', '9028',
-}
-
-# Party suffixes
-PARTY_SUFFIXES = ['ORGPTY', 'SNDBNK', 'DBTPTY', 'CDTPTY', 'INTBNK', 'BNFBNK', 'BNPPTY']
-
-# Feature prefixes for parties
-PARTY_PREFIXES = ['orig', 'send', 'dbt', 'cdt', 'intm', 'bnf', 'bnp']
 
 
 # =============================================================================
-# DATA CLASSES
+# VALIDATION FUNCTIONS
 # =============================================================================
 
-@dataclass
-class CodeOccurrence:
-    """Record of an error code occurrence."""
-    code: str
-    party: Optional[str]
-    info: str
-    
-    @property
-    def full_code(self) -> str:
-        if self.party:
-            return f"{self.code}_{self.party}"
-        return self.code
-    
-    @property 
-    def base_code(self) -> str:
-        return self.code.split('_')[0]
+def validate_bic(bic: str) -> Tuple[bool, bool]:
+    """Returns (format_valid, country_valid)"""
+    if not bic:
+        return False, False
+    bic = bic.upper().strip()
+    if len(bic) not in (8, 11):
+        return False, False
+    pattern = r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$'
+    format_valid = bool(re.match(pattern, bic))
+    country_code = bic[4:6] if len(bic) >= 6 else ''
+    country_valid = country_code in VALID_COUNTRY_CODES
+    return format_valid, country_valid
 
 
-@dataclass
-class ProcessedRecord:
-    """A single processed IFML record with features and codes."""
-    transaction_id: str
-    features: Dict[str, Any]
-    actual_codes: List[str]  # Full codes like "8894_BNFBNK"
-    base_codes: Set[str]     # Just base codes like "8894"
-    source_file: str
+def validate_iban(iban: str) -> Tuple[bool, bool]:
+    """Returns (format_valid, checksum_valid)"""
+    if not iban:
+        return False, False
+    iban = iban.upper().replace(' ', '').replace('-', '')
+    if len(iban) < 5:
+        return False, False
+    country_code = iban[:2]
+    if not country_code.isalpha():
+        return False, False
+    expected_length = IBAN_LENGTHS.get(country_code)
+    if expected_length:
+        format_valid = len(iban) == expected_length
+    else:
+        format_valid = 15 <= len(iban) <= 34
+    try:
+        rearranged = iban[4:] + iban[:4]
+        numeric = ''
+        for char in rearranged:
+            if char.isdigit():
+                numeric += char
+            elif char.isalpha():
+                numeric += str(ord(char) - ord('A') + 10)
+            else:
+                return format_valid, False
+        checksum_valid = int(numeric) % 97 == 1
+    except (ValueError, OverflowError):
+        checksum_valid = False
+    return format_valid, checksum_valid
+
+
+def validate_fedaba(aba: str) -> Tuple[bool, bool]:
+    """Returns (format_valid, checksum_valid)"""
+    if not aba:
+        return False, False
+    aba = aba.strip()
+    if len(aba) != 9 or not aba.isdigit():
+        return False, False
+    try:
+        weights = [3, 7, 1, 3, 7, 1, 3, 7, 1]
+        total = sum(int(d) * w for d, w in zip(aba, weights))
+        checksum_valid = (total % 10 == 0)
+    except (ValueError, TypeError):
+        checksum_valid = False
+    return True, checksum_valid
+
+
+# =============================================================================
+# FEATURE EXTRACTOR
+# =============================================================================
+
+class FeatureExtractor:
+    """Extract features from IFML data for ML analysis."""
+    
+    def __init__(self, debug: bool = False):
+        self.features = {}
+        self.debug = debug
+    
+    def extract(self, data: Dict) -> Dict:
+        """Extract all features from IFML request."""
+        self.features = {}
+        
+        message = self._find_message(data)
+        if not message:
+            return self.features
+        
+        basic_payment = message.get('BasicPayment', {})
+        if not basic_payment:
+            return self.features
+        
+        self._parse_basic_info(basic_payment)
+        self._parse_amounts(basic_payment)
+        self._parse_parties(basic_payment)
+        self._parse_intermediary_array(basic_payment)
+        self._compute_derived_features()
+        
+        return self.features
+    
+    def _find_message(self, data: Dict) -> Optional[Dict]:
+        """Navigate to Message node."""
+        paths = [
+            ['Request', 'IFML', 'File', 'Message'],
+            ['IFML', 'File', 'Message'],
+            ['File', 'Message'],
+            ['Message'],
+        ]
+        for path in paths:
+            current = data
+            for key in path:
+                if isinstance(current, dict):
+                    current = current.get(key)
+                else:
+                    current = None
+                    break
+            if current and isinstance(current, dict):
+                return current
+        
+        # Try with transaction ID wrapper
+        if isinstance(data, dict) and len(data) == 1:
+            key = list(data.keys())[0]
+            nested = data[key]
+            for path in paths:
+                current = nested
+                for key in path:
+                    if isinstance(current, dict):
+                        current = current.get(key)
+                    else:
+                        current = None
+                        break
+                if current and isinstance(current, dict):
+                    return current
+        return None
+    
+    def _parse_basic_info(self, basic_payment: Dict):
+        """Parse basic transaction info."""
+        self.features['transaction_id'] = basic_payment.get('TransactionID', '')
+        self.features['transaction_uid'] = basic_payment.get('TransactionUID', '')
+        self.features['source_code'] = basic_payment.get('SourceCode', '')
+        self.features['incoming_msg_type'] = basic_payment.get('IncomingMsgType', '')
+        
+        # Convert message type to numeric for tree
+        msg_type = basic_payment.get('IncomingMsgType', '')
+        try:
+            self.features['message_type'] = int(msg_type) if msg_type else 0
+        except ValueError:
+            self.features['message_type'] = 0
+    
+    def _parse_amounts(self, basic_payment: Dict):
+        """Parse monetary amounts."""
+        amounts = basic_payment.get('MonetaryAmount', [])
+        if isinstance(amounts, dict):
+            amounts = [amounts]
+        
+        self.features['primary_amount'] = 0.0
+        self.features['primary_currency'] = ''
+        self.features['has_currency'] = False
+        self.features['currency_valid'] = False
+        
+        for amt in amounts:
+            amt_type = amt.get('@Type') or amt.get('Type') or 'Unknown'
+            currency = amt.get('@Currency') or amt.get('Currency') or ''
+            amount_str = str(amt.get('Amount', '0'))
+            
+            if amt_type == 'Amount':
+                try:
+                    self.features['primary_amount'] = float(amount_str.replace(',', ''))
+                except ValueError:
+                    pass
+                self.features['primary_currency'] = currency
+                self.features['has_currency'] = bool(currency)
+                # Simple currency validation (3 uppercase letters)
+                self.features['currency_valid'] = bool(re.match(r'^[A-Z]{3}$', currency))
+    
+    def _parse_parties(self, basic_payment: Dict):
+        """Parse all party information."""
+        party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
+        
+        if not isinstance(party_info, dict):
+            return
+        
+        # Initialize party counts
+        bank_count = 0
+        non_bank_count = 0
+        
+        processed = set()
+        for ifml_name, prefix in PARTY_MAPPING.items():
+            party_data = party_info.get(ifml_name)
+            if party_data:
+                if isinstance(party_data, list):
+                    party_data = party_data[0] if party_data else None
+                if party_data and isinstance(party_data, dict):
+                    if prefix not in processed:
+                        self._extract_party(party_data, prefix)
+                        processed.add(prefix)
+                        
+                        # Count party types
+                        if prefix in ('send', 'intm', 'bnf'):
+                            bank_count += 1
+                        else:
+                            non_bank_count += 1
+        
+        self.features['bank_party_count'] = bank_count
+        self.features['non_bank_party_count'] = non_bank_count
+        self.features['party_count'] = bank_count + non_bank_count
+    
+    def _extract_party(self, party_data: Dict, prefix: str):
+        """Extract features from a single party."""
+        self.features[f'{prefix}_present'] = True
+        
+        basic = (
+            party_data.get('BasicPartyInfo') or
+            party_data.get('BasicPartyInf') or
+            party_data.get('BasicIDInfo') or
+            party_data.get('AccountPartyInfo') or
+            party_data.get('AccountPartyInf') or
+            party_data.get('BasicPartyBankInfo') or
+            party_data.get('BasicPartyBankInf') or
+            party_data
+        )
+        
+        if isinstance(basic, list):
+            basic = basic[0] if basic else {}
+        
+        if not isinstance(basic, dict):
+            return
+        
+        # Parse ID field
+        id_field = basic.get('ID')
+        bic, iban = None, None
+        id_value = ''
+        
+        if id_field:
+            self.features[f'{prefix}_has_id'] = True
+            if isinstance(id_field, dict):
+                id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
+                id_value = id_field.get('text') or id_field.get('#text') or ''
+                
+                if id_type in ('S', 'SWIFT', 'BIC'):
+                    bic = id_value
+                elif id_type == 'IBAN':
+                    iban = id_value
+                elif self._looks_like_bic(id_value):
+                    bic = id_value
+                elif self._looks_like_iban(id_value):
+                    iban = id_value
+            else:
+                id_value = str(id_field)
+                if self._looks_like_iban(id_value):
+                    iban = id_value
+                elif self._looks_like_bic(id_value):
+                    bic = id_value
+            
+            self.features[f'{prefix}_id_length'] = len(id_value)
+            
+            # Check if ID needs cleaning (for 9019)
+            if id_value:
+                cleaned = re.sub(r'[^A-Za-z0-9]', '', id_value)
+                self.features[f'{prefix}_id_needs_cleaning'] = (cleaned != id_value)
+        
+        # BIC features
+        if bic:
+            self.features[f'{prefix}_has_bic'] = True
+            self.features[f'{prefix}_bic_length'] = len(bic)
+            fmt_valid, ctry_valid = validate_bic(bic)
+            self.features[f'{prefix}_bic_valid_format'] = fmt_valid
+            self.features[f'{prefix}_bic_valid_country'] = ctry_valid
+            self.features[f'{prefix}_bic4_valid'] = bic[:4].isalpha() if len(bic) >= 4 else False
+            if len(bic) >= 6:
+                self.features[f'{prefix}_bic_country'] = bic[4:6].upper()
+        
+        # IBAN features
+        if iban:
+            self.features[f'{prefix}_has_iban'] = True
+            fmt_valid, cksum_valid = validate_iban(iban)
+            self.features[f'{prefix}_iban_valid_format'] = fmt_valid
+            self.features[f'{prefix}_iban_checksum_valid'] = cksum_valid
+            if len(iban) >= 2:
+                self.features[f'{prefix}_iban_country'] = iban[:2].upper()
+            
+            # Check if IBAN needs formatting (for 9006)
+            cleaned = iban.upper().replace(' ', '').replace('-', '')
+            self.features[f'{prefix}_iban_needs_formatting'] = (cleaned != iban)
+        
+        # Account info
+        acct_info = basic.get('AcctIDInfo') or basic.get('AcctIDInf')
+        if acct_info and isinstance(acct_info, dict):
+            self.features[f'{prefix}_has_account'] = True
+            acct_id = acct_info.get('ID', {})
+            if isinstance(acct_id, dict):
+                acct_type = acct_id.get('@Type') or acct_id.get('Type')
+                acct_value = acct_id.get('#text') or acct_id.get('text') or ''
+                self.features[f'{prefix}_account_type'] = acct_type
+                self.features[f'{prefix}_account_length'] = len(acct_value)
+                
+                if acct_type == 'IBAN' and acct_value:
+                    self.features[f'{prefix}_has_iban'] = True
+                    fmt_valid, cksum_valid = validate_iban(acct_value)
+                    self.features[f'{prefix}_iban_valid_format'] = fmt_valid
+                    self.features[f'{prefix}_iban_checksum_valid'] = cksum_valid
+                
+                # Check for dirty chars (for 9002)
+                if acct_value:
+                    self.features[f'{prefix}_account_has_dirty_chars'] = bool(
+                        re.search(r'[^a-zA-Z0-9]', acct_value)
+                    )
+        
+        # AdrBankID (NCH)
+        adr_bank_id = basic.get('AdrBankID')
+        if adr_bank_id:
+            self.features[f'{prefix}_has_adr_bank_id'] = True
+            if isinstance(adr_bank_id, dict):
+                adr_type = adr_bank_id.get('@Type') or adr_bank_id.get('Type')
+                adr_value = adr_bank_id.get('#text') or adr_bank_id.get('text') or ''
+            else:
+                adr_type = None
+                adr_value = str(adr_bank_id)
+            
+            # FEDABA validation
+            if adr_type in ['FEDABA', 'FW', 'FEDWIRE'] or (adr_value and len(adr_value) == 9 and adr_value.isdigit()):
+                self.features[f'{prefix}_has_nch'] = True
+                self.features[f'{prefix}_nch_type'] = 'FEDABA'
+                fmt_valid, cksum_valid = validate_fedaba(adr_value)
+                self.features[f'{prefix}_nch_valid'] = fmt_valid
+                self.features[f'{prefix}_fedaba_checksum_valid'] = cksum_valid
+                self.features[f'{prefix}_nch_validation_applicable'] = True
+        
+        # Country
+        country = basic.get('Country') or party_data.get('Country')
+        if country:
+            self.features[f'{prefix}_has_country'] = True
+            self.features[f'{prefix}_country'] = country
+            self.features[f'{prefix}_country_valid'] = country.upper() in VALID_COUNTRY_CODES
+        
+        # Name
+        name_field = basic.get('Name')
+        if name_field:
+            self.features[f'{prefix}_has_name'] = True
+            if isinstance(name_field, dict):
+                name_value = name_field.get('#text') or name_field.get('text') or ''
+            else:
+                name_value = str(name_field)
+            
+            if name_value:
+                self.features[f'{prefix}_name_has_dirty_chars'] = bool(
+                    re.search(r'[@#$%^*=+\[\]{}|\\<>]', name_value)
+                )
+        
+        # Address
+        address_info = basic.get('AddressInfo') or basic.get('AddressInf') or party_data.get('AddressInfo')
+        if address_info:
+            if isinstance(address_info, list):
+                self.features[f'{prefix}_address_line_count'] = len(address_info)
+                # Extract country from address
+                self._extract_address_country(address_info, prefix)
+        
+        # IBAN requirement
+        party_country = (
+            self.features.get(f'{prefix}_bic_country') or
+            self.features.get(f'{prefix}_iban_country') or
+            self.features.get(f'{prefix}_country') or
+            self.features.get(f'{prefix}_address_country')
+        )
+        if party_country and party_country.upper() in IBAN_COUNTRIES:
+            has_iban = self.features.get(f'{prefix}_has_iban', False)
+            has_account = self.features.get(f'{prefix}_has_account', False)
+            if not has_iban and not has_account:
+                self.features[f'{prefix}_needs_iban'] = True
+    
+    def _extract_address_country(self, address_info: list, prefix: str):
+        """Extract country from address lines."""
+        if not address_info:
+            return
+        
+        # Check last address line for country code
+        for item in reversed(address_info):
+            if isinstance(item, dict):
+                text = item.get('text') or item.get('Text') or ''
+            elif isinstance(item, str):
+                text = item
+            else:
+                continue
+            
+            text = text.upper().strip()
+            words = text.split()
+            if words:
+                last_word = ''.join(c for c in words[-1] if c.isalpha())
+                if len(last_word) == 2 and last_word in VALID_COUNTRY_CODES:
+                    self.features[f'{prefix}_address_country'] = last_word
+                    self.features[f'{prefix}_is_domestic'] = (last_word == 'US')
+                    self.features[f'{prefix}_is_international'] = (last_word != 'US')
+                    return
+    
+    def _parse_intermediary_array(self, basic_payment: Dict):
+        """Parse intermediary array for redundancy detection (9018)."""
+        party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
+        intm_data = party_info.get('IntermediaryBankInf') or party_info.get('IntermediaryBankInfo')
+        
+        if not intm_data:
+            self.features['intm_count'] = 0
+            self.features['intm_has_multiple'] = False
+            return
+        
+        if isinstance(intm_data, dict):
+            intm_list = [intm_data]
+        elif isinstance(intm_data, list):
+            intm_list = intm_data
+        else:
+            self.features['intm_count'] = 0
+            self.features['intm_has_multiple'] = False
+            return
+        
+        self.features['intm_count'] = len(intm_list)
+        self.features['intm_has_multiple'] = len(intm_list) > 1
+        self.features['has_intermediary'] = len(intm_list) > 0
+        
+        if len(intm_list) < 2:
+            return
+        
+        # Check for redundancy
+        adr_bank_ids = []
+        countries = []
+        bic_prefixes = []
+        
+        for entry in intm_list:
+            if not isinstance(entry, dict):
+                continue
+            
+            basic = (
+                entry.get('BasicPartyInf') or
+                entry.get('BasicPartyInfo') or
+                entry.get('BasicPartyBankInf') or
+                entry.get('BasicPartyBankInfo') or
+                entry
+            )
+            
+            if not isinstance(basic, dict):
+                continue
+            
+            # AdrBankID
+            adr_id = basic.get('AdrBankID')
+            if adr_id:
+                if isinstance(adr_id, dict):
+                    adr_id = adr_id.get('text') or adr_id.get('#text') or str(adr_id)
+                adr_bank_ids.append(str(adr_id))
+            
+            # Country
+            country = basic.get('Country')
+            if country:
+                countries.append(country.upper())
+            
+            # BIC prefix
+            id_info = basic.get('ID', {})
+            if isinstance(id_info, dict):
+                bic = id_info.get('text') or id_info.get('#text') or ''
+                if bic and len(bic) >= 6 and bic[:4].isalpha():
+                    bic_prefixes.append(bic[:6].upper())
+        
+        # Check for shared values (redundancy signals)
+        if len(adr_bank_ids) >= 2:
+            self.features['intm_entries_share_adr_bank_id'] = len(set(adr_bank_ids)) < len(adr_bank_ids)
+        
+        if len(countries) >= 2:
+            self.features['intm_entries_share_country'] = len(set(countries)) < len(countries)
+        
+        if len(bic_prefixes) >= 2:
+            self.features['intm_entries_share_bic_prefix'] = len(set(bic_prefixes)) < len(bic_prefixes)
+        
+        # Combined redundancy signal
+        redundancy_signals = sum([
+            self.features.get('intm_entries_share_adr_bank_id', False),
+            self.features.get('intm_entries_share_country', False),
+            self.features.get('intm_entries_share_bic_prefix', False),
+        ])
+        self.features['intm_has_redundant_info'] = redundancy_signals >= 2
+    
+    def _compute_derived_features(self):
+        """Compute derived/aggregate features."""
+        # Any ID needs cleaning (for 9019)
+        any_cleaning = False
+        for prefix in PARTY_PREFIXES:
+            if self.features.get(f'{prefix}_id_needs_cleaning'):
+                any_cleaning = True
+                break
+        self.features['any_id_needs_cleaning'] = any_cleaning
+        
+        # Has duplicate BIC4 (for tree analysis)
+        bic4s = []
+        for prefix in PARTY_PREFIXES:
+            bic = self.features.get(f'{prefix}_bic_country')
+            if bic:
+                bic4s.append(bic)
+        self.features['has_duplicate_bic4'] = len(bic4s) != len(set(bic4s)) if bic4s else False
+        
+        # Has duplicate BIC
+        bics = []
+        for prefix in PARTY_PREFIXES:
+            if self.features.get(f'{prefix}_has_bic'):
+                bic_len = self.features.get(f'{prefix}_bic_length', 0)
+                bics.append(bic_len)
+        self.features['has_duplicate_bic'] = len(bics) != len(set(bics)) if len(bics) > 1 else False
+        
+        # All same country
+        countries = []
+        for prefix in PARTY_PREFIXES:
+            country = (
+                self.features.get(f'{prefix}_bic_country') or
+                self.features.get(f'{prefix}_country') or
+                self.features.get(f'{prefix}_address_country')
+            )
+            if country:
+                countries.append(country.upper())
+        self.features['all_same_country'] = len(set(countries)) <= 1 if countries else False
+        
+        # Is SEPA payment (all EU countries)
+        sepa_countries = {'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR',
+                         'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK',
+                         'SI', 'ES', 'SE', 'GB', 'IS', 'LI', 'NO', 'CH'}
+        self.features['is_sepa_payment'] = all(c in sepa_countries for c in countries) if countries else False
+    
+    def _looks_like_bic(self, s: str) -> bool:
+        if not s or len(s) not in (8, 11):
+            return False
+        return bool(re.match(r'^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2,5}$', s.upper()))
+    
+    def _looks_like_iban(self, s: str) -> bool:
+        if not s:
+            return False
+        s = s.upper().replace(' ', '').replace('-', '')
+        if len(s) < 15 or len(s) > 34:
+            return False
+        return s[:2].isalpha() and s[2:4].isdigit()
 
 
 # =============================================================================
 # RESPONSE PARSER
 # =============================================================================
 
-class ACEResponseParser:
-    """Parse ACE response to extract fired error codes."""
+def extract_codes_from_response(response: Dict) -> Set[str]:
+    """Extract all codes from ACE response."""
+    codes = set()
     
-    def parse_file(self, filepath: str) -> Tuple[Optional[str], List[CodeOccurrence]]:
-        """Parse response file."""
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        return self.parse(data)
+    audit = None
+    paths = [
+        ['AuditTrail'],
+        ['IFML', 'File', 'Message', 'AuditTrail'],
+        ['Response', 'IFML', 'File', 'Message', 'AuditTrail'],
+    ]
     
-    def parse(self, data: dict) -> Tuple[Optional[str], List[CodeOccurrence]]:
-        """
-        Parse response and extract error codes.
-        Returns (transaction_id, list of CodeOccurrence).
-        """
-        message = self._find_message(data)
-        
-        if not message:
-            # Try finding at File level
-            file_node = self._find_file(data)
-            if file_node:
-                audit_trail = file_node.get('AuditTrail', {})
-                transaction_id = None
+    for path in paths:
+        current = response
+        for key in path:
+            if isinstance(current, dict):
+                current = current.get(key)
             else:
-                return None, []
-        else:
-            basic_payment = message.get('BasicPayment', {})
-            transaction_id = (
-                basic_payment.get('TransactionUID') or 
-                basic_payment.get('TransactionID') or
-                message.get('TransactionUID')
-            )
-            audit_trail = message.get('AuditTrail', {})
-        
-        # Extract codes from MsgStatus
-        msg_status = audit_trail.get('MsgStatus', [])
-        if isinstance(msg_status, dict):
-            msg_status = [msg_status]
-        
-        codes = []
-        for status in msg_status:
-            code = status.get('Code', '')
-            if not code:
-                continue
-            
-            info = status.get('InformationalData', '')
-            party = self._extract_party(info)
-            
-            codes.append(CodeOccurrence(
-                code=code,
-                party=party,
-                info=info
-            ))
-        
-        return transaction_id, codes
+                current = None
+                break
+        if current:
+            audit = current
+            break
     
-    def _find_message(self, data: dict) -> Optional[dict]:
-        """Find Message node."""
-        def safe_get(d, *keys):
-            current = d
-            for key in keys:
-                if not isinstance(current, dict):
-                    return None
-                current = current.get(key)
-                if current is None:
-                    return None
-            return current if isinstance(current, dict) else None
-        
-        patterns = [
-            ('Response', 'IFML', 'File', 'Message'),
-            ('IFML', 'File', 'Message'),
-            ('File', 'Message'),
-            ('Message',),
-        ]
-        
-        for path in patterns:
-            result = safe_get(data, *path)
-            if result:
-                return result
-        
-        # Try with transaction ID key
-        if isinstance(data, dict) and len(data) == 1:
-            key = list(data.keys())[0]
-            nested = data[key]
-            for path in patterns:
-                result = safe_get(nested, *path)
-                if result:
-                    return result
-        
-        return None
+    if not audit:
+        return codes
     
-    def _find_file(self, data: dict) -> Optional[dict]:
-        """Find File node."""
-        def safe_get(d, *keys):
-            current = d
-            for key in keys:
-                if not isinstance(current, dict):
-                    return None
-                current = current.get(key)
-            return current if isinstance(current, dict) else None
-        
-        patterns = [
-            ('Response', 'IFML', 'File'),
-            ('IFML', 'File'),
-            ('File',),
-        ]
-        
-        for path in patterns:
-            result = safe_get(data, *path)
-            if result:
-                return result
-        
-        return None
+    msg_status = audit.get('MsgStatus', [])
+    if isinstance(msg_status, dict):
+        msg_status = [msg_status]
     
-    def _extract_party(self, info: str) -> Optional[str]:
-        """Extract party suffix from informational data."""
-        if not info:
-            return None
-        
-        # Pattern: starts with party suffix
-        for suffix in PARTY_SUFFIXES:
-            if info.startswith(suffix):
-                return suffix
-        
-        # Pattern: contains party suffix
-        for suffix in PARTY_SUFFIXES:
-            if suffix in info:
-                return suffix
-        
-        return None
+    for item in msg_status:
+        code = item.get('Code', '')
+        if code:
+            codes.add(code)
+    
+    return codes
 
 
 # =============================================================================
 # DATA COLLECTOR
 # =============================================================================
 
-class ACEDataCollector:
-    """Collect and process IFML data for analysis."""
+class DataCollector:
+    """Collect features and codes from IFML files."""
     
-    def __init__(self, use_enhanced: bool = True):
-        self.parser = IFMLParser()
-        self.response_parser = ACEResponseParser()
-        self.records: List[ProcessedRecord] = []
-        
-        # Use enhanced features if available
-        self.use_enhanced = use_enhanced and ENHANCED_AVAILABLE
-        if self.use_enhanced:
-            self.enhanced_extractor = EnhancedFeatureExtractor()
-            print(f"Using enhanced feature extraction ({PARSER_VERSION})")
-        else:
-            self.enhanced_extractor = None
-            print(f"Using base parser only ({PARSER_VERSION})")
+    def __init__(self, debug: bool = False):
+        self.extractor = FeatureExtractor(debug=debug)
+        self.debug = debug
     
-    def _extract_features(self, ifml_data: dict) -> Dict[str, Any]:
-        """Extract features using enhanced extractor if available."""
-        if self.use_enhanced and self.enhanced_extractor:
-            return self.enhanced_extractor.extract(ifml_data)
-        else:
-            features_obj = self.parser.parse(ifml_data)
-            return self.parser.to_dict(features_obj)
-    
-    def process_combined_file(self, filepath: str) -> int:
-        """
-        Process a single JSON file containing multiple request/response pairs.
+    def process_file(self, filepath: Path) -> List[Dict]:
+        """Process a single file and return list of records."""
+        records = []
         
-        Expected format (from data_pipeline.py):
-        {
-            "2025092900000192": {
-                "Request": { "IFML": { "File": { "Message": {...} } } },
-                "Response": { "IFML": { "File": { "Message": {...} } } }
-            },
-            "2025092900000193": { ... }
-        }
-        
-        Returns number of records processed.
-        """
         try:
             with open(filepath) as f:
                 data = json.load(f)
         except Exception as e:
-            print(f"Error loading {filepath}: {e}")
-            return 0
+            if self.debug:
+                print(f"Error reading {filepath}: {e}")
+            return records
         
-        if not isinstance(data, dict):
-            print(f"Expected dict, got {type(data).__name__} in {filepath}")
-            return 0
+        if isinstance(data, dict):
+            if 'Request' in data and 'Response' in data:
+                record = self._process_payment(data, data.get('Response', {}))
+                if record:
+                    records.append(record)
+            else:
+                for key, val in data.items():
+                    if isinstance(val, dict) and 'Request' in val and 'Response' in val:
+                        record = self._process_payment(val, val.get('Response', {}))
+                        if record:
+                            records.append(record)
         
-        processed = 0
-        
-        for txn_id, payment_data in data.items():
-            try:
-                if not isinstance(payment_data, dict):
-                    continue
-                
-                # Extract Request and Response (matching data_pipeline.py logic)
-                request_data = payment_data.get('Request')
-                response_data = payment_data.get('Response')
-                
-                if not request_data:
-                    # Maybe the IFML is directly nested
-                    if 'IFML' in payment_data:
-                        request_data = payment_data
-                        response_data = None
-                    else:
-                        continue
-                
-                # Parse request using enhanced extractor
-                features = self._extract_features(request_data)
-                
-                # Parse response if present
-                if response_data:
-                    _, code_occurrences = self.response_parser.parse(response_data)
-                else:
-                    code_occurrences = []
-                
-                # Filter out excluded codes
-                actual_codes = []
-                base_codes = set()
-                
-                for occ in code_occurrences:
-                    if occ.base_code not in EXCLUDED_CODES:
-                        actual_codes.append(occ.full_code)
-                        base_codes.add(occ.base_code)
-                
-                record = ProcessedRecord(
-                    transaction_id=txn_id,
-                    features=features,
-                    actual_codes=actual_codes,
-                    base_codes=base_codes,
-                    source_file=f"{filepath}#{txn_id}"
-                )
-                
-                self.records.append(record)
-                processed += 1
-                
-            except Exception as e:
-                print(f"Error processing {txn_id} in {filepath}: {e}")
-        
-        return processed
+        return records
     
-    def _extract_tx_id(self, tx_data: Any, fallback_idx: int) -> str:
-        """Extract transaction ID from transaction data."""
-        if isinstance(tx_data, dict):
-            # Check common ID fields
-            for key in ['TransactionID', 'TransactionUID', 'transaction_id', 'id', 'ID']:
-                if key in tx_data:
-                    return str(tx_data[key])
-            
-            # Check if single key (the key is the TX ID)
-            if len(tx_data) == 1:
-                return list(tx_data.keys())[0]
-            
-            # Try to find in nested Request
-            request = tx_data.get('Request') or tx_data.get('request')
-            if request:
-                return self._extract_tx_id(request, fallback_idx)
+    def _process_payment(self, request: Dict, response: Dict) -> Optional[Dict]:
+        """Process a single payment."""
+        features = self.extractor.extract(request)
+        codes = extract_codes_from_response(response)
         
-        return f"TX_{fallback_idx:06d}"
-    
-    def _process_combined_entry(self, tx_id: str, tx_data: dict, 
-                                 source_file: str) -> Optional[ProcessedRecord]:
-        """Process a single request/response entry from a combined file."""
-        try:
-            # Find Request and Response in the data
-            request_data = None
-            response_data = None
-            
-            # Direct Request/Response keys
-            if 'Request' in tx_data:
-                request_data = tx_data['Request']
-            elif 'request' in tx_data:
-                request_data = tx_data['request']
-            
-            if 'Response' in tx_data:
-                response_data = tx_data['Response']
-            elif 'response' in tx_data:
-                response_data = tx_data['response']
-            
-            # Sometimes the whole tx_data IS the request, with Response nested
-            if not request_data and 'IFML' in tx_data:
-                request_data = tx_data
-            
-            # Nested under tx_id key: {"TX001": {"Request": {...}}}
-            if not request_data and len(tx_data) == 1:
-                inner = list(tx_data.values())[0]
-                if isinstance(inner, dict):
-                    if 'Request' in inner:
-                        request_data = inner['Request']
-                        response_data = inner.get('Response')
-                    elif 'IFML' in inner:
-                        request_data = inner
-            
-            if not request_data:
-                return None
-            
-            # Wrap request in expected format if needed
-            if 'IFML' in request_data and tx_id not in request_data:
-                request_data = {tx_id: {'Request': request_data}}
-            elif 'Request' not in str(request_data)[:100]:
-                request_data = {tx_id: {'Request': request_data}}
-            
-            # Parse request using enhanced extractor
-            features = self._extract_features(request_data)
-            
-            # Parse response (if available)
-            actual_codes = []
-            base_codes = set()
-            
-            if response_data:
-                # Wrap response in expected format if needed
-                if 'IFML' in response_data or 'Response' not in str(response_data)[:100]:
-                    response_data = {tx_id: {'Response': response_data}}
-                
-                _, code_occurrences = self.response_parser.parse(response_data)
-                
-                for occ in code_occurrences:
-                    if occ.base_code not in EXCLUDED_CODES:
-                        actual_codes.append(occ.full_code)
-                        base_codes.add(occ.base_code)
-            
-            return ProcessedRecord(
-                transaction_id=tx_id,
-                features=features,
-                actual_codes=actual_codes,
-                base_codes=base_codes,
-                source_file=f"{source_file}#{tx_id}"
-            )
-            
-        except Exception as e:
-            print(f"Error processing {tx_id} in {source_file}: {e}")
+        if not features:
             return None
+        
+        # Add codes as separate columns
+        for code in codes:
+            features[f'code_{code}'] = 1
+        
+        return features
     
-    def process_pair(self, request_path: str, response_path: str) -> Optional[ProcessedRecord]:
-        """Process a request/response pair."""
-        try:
-            # Parse request
-            with open(request_path) as f:
-                request_data = json.load(f)
+    def collect_directory(self, dirpath: Path) -> List[Dict]:
+        """Collect data from all JSON files in directory."""
+        records = []
+        
+        json_files = list(dirpath.glob('*.json'))
+        total = len(json_files)
+        
+        for i, filepath in enumerate(json_files):
+            if self.debug and (i + 1) % 100 == 0:
+                print(f"Processing {i+1}/{total}...")
             
-            # Use enhanced feature extraction
-            features = self._extract_features(request_data)
-            
-            # Parse response
-            tx_id, code_occurrences = self.response_parser.parse_file(response_path)
-            
-            # Filter out excluded codes
-            filtered_codes = []
-            base_codes = set()
-            
-            for occ in code_occurrences:
-                if occ.base_code not in EXCLUDED_CODES:
-                    filtered_codes.append(occ.full_code)
-                    base_codes.add(occ.base_code)
-            
-            record = ProcessedRecord(
-                transaction_id=tx_id or features.get('transaction_id', 'unknown'),
-                features=features,
-                actual_codes=filtered_codes,
-                base_codes=base_codes,
-                source_file=request_path
-            )
-            
-            self.records.append(record)
-            return record
-            
-        except Exception as e:
-            print(f"Error processing {request_path}: {e}")
-            return None
-    
-    def process_directory(self, input_dir: str, 
-                         request_pattern: str = '*request*.json',
-                         response_pattern: str = '*response*.json') -> int:
-        """
-        Process all IFML files in a directory.
+            file_records = self.process_file(filepath)
+            records.extend(file_records)
         
-        Primary method: Each JSON file contains multiple {txn_id: {Request, Response}} pairs.
-        This matches the data_pipeline.py format.
-        
-        Falls back to separate request/response file matching if the primary method fails.
-        """
-        input_path = Path(input_dir)
-        
-        if not input_path.is_dir():
-            print(f"ERROR: Directory not found: {input_dir}")
-            return 0
-        
-        # Primary: Process all JSON files as combined files (data_pipeline.py format)
-        all_json_files = sorted(input_path.glob('*.json'))
-        
-        print(f"Found {len(all_json_files)} JSON files in {input_dir}")
-        print("-" * 60)
-        
-        total_processed = 0
-        
-        for json_file in all_json_files:
-            count = self.process_combined_file(str(json_file))
-            if count > 0:
-                print(f"  {json_file.name}: {count} transactions")
-                total_processed += count
-        
-        if total_processed > 0:
-            print("-" * 60)
-            print(f"Total: {total_processed} transactions from {len(all_json_files)} files")
-            return total_processed
-        
-        # Fallback: Try separate request/response files
-        print("No combined files found, trying separate request/response files...")
-        
-        # Strategy: requests/responses subdirectories
-        req_dir = input_path / 'requests'
-        resp_dir = input_path / 'responses'
-        
-        if req_dir.exists() and resp_dir.exists():
-            for req_file in req_dir.glob('*.json'):
-                resp_file = resp_dir / req_file.name.replace('request', 'response')
-                if not resp_file.exists():
-                    resp_file = resp_dir / req_file.name
-                
-                if resp_file.exists():
-                    if self.process_pair(str(req_file), str(resp_file)):
-                        total_processed += 1
-            return total_processed
-        
-        # Strategy: Same directory with naming patterns
-        request_files = list(input_path.glob(request_pattern))
-        
-        for req_file in request_files:
-            base_name = req_file.stem
-            possible_resp_names = [
-                base_name.replace('request', 'response'),
-                base_name.replace('req', 'resp'),
-                base_name.replace('_request', '_response'),
-            ]
-            
-            for resp_name in possible_resp_names:
-                resp_file = req_file.parent / f"{resp_name}.json"
-                if resp_file.exists():
-                    if self.process_pair(str(req_file), str(resp_file)):
-                        total_processed += 1
-                    break
-        
-        return total_processed
-    
-    def to_dataframe_dict(self) -> Tuple[List[str], List[Dict]]:
-        """
-        Convert records to a format suitable for DataFrame/CSV.
-        Returns (column_names, list of row dicts).
-        """
-        if not self.records:
-            return [], []
-        
-        # Collect all feature names
-        all_features = set()
-        all_codes = set()
-        
-        for record in self.records:
-            all_features.update(record.features.keys())
-            all_codes.update(record.base_codes)
-        
-        # Filter to trainable codes only
-        trainable_codes = sorted(all_codes - EXCLUDED_CODES)
-        feature_names = sorted(all_features)
-        
-        # Build column names
-        columns = ['transaction_id', 'source_file'] + feature_names + \
-                  [f'code_{c}' for c in trainable_codes] + ['all_codes']
-        
-        # Build rows
-        rows = []
-        for record in self.records:
-            row = {
-                'transaction_id': record.transaction_id,
-                'source_file': record.source_file,
-            }
-            
-            # Add features
-            for feat in feature_names:
-                val = record.features.get(feat)
-                # Convert to simple types for CSV
-                if isinstance(val, bool):
-                    row[feat] = 1 if val else 0
-                elif val is None:
-                    row[feat] = ''
-                else:
-                    row[feat] = val
-            
-            # Add code columns (1 if fired, 0 if not)
-            for code in trainable_codes:
-                row[f'code_{code}'] = 1 if code in record.base_codes else 0
-            
-            # Add all codes as string
-            row['all_codes'] = ','.join(sorted(record.actual_codes))
-            
-            rows.append(row)
-        
-        return columns, rows
-    
-    def save_csv(self, output_path: str):
-        """Save collected data to CSV."""
-        columns, rows = self.to_dataframe_dict()
-        
-        if not rows:
-            print("No data to save!")
-            return
-        
-        with open(output_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=columns)
-            writer.writeheader()
-            writer.writerows(rows)
-        
-        print(f"Saved {len(rows)} records to {output_path}")
-        print(f"Columns: {len(columns)} ({len(columns) - len(rows[0])} features)")
-    
-    def get_code_statistics(self) -> Dict[str, int]:
-        """Get count of each error code."""
-        stats = defaultdict(int)
-        for record in self.records:
-            for code in record.base_codes:
-                stats[code] += 1
-        return dict(sorted(stats.items(), key=lambda x: -x[1]))
+        return records
 
 
 # =============================================================================
 # DECISION TREE BUILDER
 # =============================================================================
 
-class DecisionTreeBuilder:
-    """Build decision trees to understand error code triggers."""
+def filter_features_for_tree(df, exclude_spurious: bool = True):
+    """
+    Filter DataFrame columns to exclude spurious features.
+    Returns feature columns suitable for decision tree analysis.
+    """
+    feature_cols = []
     
-    def __init__(self):
-        self.trees: Dict[str, DecisionTreeClassifier] = {}
-        self.feature_names: List[str] = []
-        self.feature_importance: Dict[str, Dict[str, float]] = {}
-    
-    def load_csv(self, csv_path: str) -> Tuple[List[Dict], List[str], List[str]]:
-        """Load data from CSV file."""
-        rows = []
-        with open(csv_path, 'r') as f:
-            reader = csv.DictReader(f)
-            columns = reader.fieldnames
-            for row in reader:
-                rows.append(row)
+    for col in df.columns:
+        # Skip target columns (code_*)
+        if col.startswith('code_'):
+            continue
         
-        # Separate feature columns from code columns
-        feature_cols = [c for c in columns if not c.startswith('code_') 
-                       and c not in ['transaction_id', 'source_file', 'all_codes']]
-        code_cols = [c for c in columns if c.startswith('code_')]
-        
-        return rows, feature_cols, code_cols
-    
-    def build_tree(self, rows: List[Dict], feature_cols: List[str], 
-                   target_code: str, max_depth: int = 5,
-                   min_samples_leaf: int = 5) -> Optional[DecisionTreeClassifier]:
-        """Build a decision tree for a specific code."""
-        if not ML_AVAILABLE:
-            print("scikit-learn not available. Cannot build tree.")
-            return None
-        
-        # Prepare data
-        X = []
-        y = []
-        
-        code_col = f'code_{target_code}'
-        if code_col not in rows[0]:
-            print(f"Code {target_code} not found in data")
-            return None
-        
-        for row in rows:
-            # Extract features (convert to numeric)
-            features = []
-            for col in feature_cols:
-                val = row.get(col, 0)
-                if val == '' or val is None:
-                    features.append(0)
-                elif isinstance(val, str):
-                    try:
-                        features.append(float(val))
-                    except:
-                        features.append(0)
-                else:
-                    features.append(float(val))
-            
-            X.append(features)
-            y.append(int(row.get(code_col, 0)))
-        
-        X = np.array(X)
-        y = np.array(y)
-        
-        # Check if we have enough positive samples
-        positive_count = y.sum()
-        if positive_count < min_samples_leaf:
-            print(f"Not enough positive samples for {target_code}: {positive_count}")
-            return None
-        
-        # Build tree
-        tree = DecisionTreeClassifier(
-            max_depth=max_depth,
-            min_samples_leaf=min_samples_leaf,
-            class_weight='balanced',
-            random_state=42
-        )
-        
-        tree.fit(X, y)
-        
-        self.trees[target_code] = tree
-        self.feature_names = feature_cols
-        
-        # Calculate feature importance
-        importance = dict(zip(feature_cols, tree.feature_importances_))
-        self.feature_importance[target_code] = {
-            k: v for k, v in sorted(importance.items(), key=lambda x: -x[1]) if v > 0
-        }
-        
-        return tree
-    
-    def build_all_trees(self, csv_path: str, max_depth: int = 5,
-                        min_samples: int = 10, code_prefix: str = None) -> Dict[str, str]:
-        """Build trees for all codes with sufficient samples.
-        
-        Args:
-            csv_path: Path to CSV file
-            max_depth: Maximum tree depth
-            min_samples: Minimum positive samples required
-            code_prefix: Only build trees for codes starting with this (e.g., '8' for 8xxx)
-        """
-        rows, feature_cols, code_cols = self.load_csv(csv_path)
-        
-        results = {}
-        
-        for code_col in code_cols:
-            code = code_col.replace('code_', '')
-            
-            # Filter by prefix if specified
-            if code_prefix and not code.startswith(code_prefix):
+        # Skip excluded features if requested
+        if exclude_spurious:
+            skip = False
+            for excluded in EXCLUDED_FEATURES:
+                if excluded in col.lower():
+                    skip = True
+                    break
+            if skip:
                 continue
-            
-            # Count positive samples
-            positive = sum(1 for r in rows if int(r.get(code_col, 0)) == 1)
-            
-            if positive < min_samples:
-                continue
-            
-            print(f"\nBuilding tree for {code} ({positive} positive samples)...")
-            
-            tree = self.build_tree(rows, feature_cols, code, max_depth)
-            
-            if tree:
-                # Get tree rules
-                rules = export_text(tree, feature_names=feature_cols, max_depth=max_depth)
-                results[code] = rules
-                
-                # Show top features
-                print(f"  Top features for {code}:")
-                for feat, imp in list(self.feature_importance[code].items())[:5]:
-                    print(f"    {feat}: {imp:.3f}")
         
-        return results
+        # Keep boolean and numeric columns
+        if df[col].dtype in ['bool', 'int64', 'float64']:
+            feature_cols.append(col)
+        elif df[col].dtype == 'object':
+            # Skip string columns (they need encoding)
+            continue
     
-    def extract_rules(self, code: str) -> List[Dict]:
-        """
-        Extract human-readable rules from a decision tree.
-        Returns list of rule dicts with conditions and outcome.
-        """
-        if code not in self.trees:
-            return []
-        
-        tree = self.trees[code]
-        rules = []
-        
-        def recurse(node_id: int, conditions: List[str], depth: int = 0):
-            tree_ = tree.tree_
-            
-            # Check if leaf
-            if tree_.feature[node_id] == -2:  # Leaf node
-                # Get class prediction
-                values = tree_.value[node_id][0]
-                predicted_class = np.argmax(values)
-                confidence = values[predicted_class] / values.sum()
-                
-                if predicted_class == 1:  # Fires
-                    rules.append({
-                        'conditions': conditions.copy(),
-                        'fires': True,
-                        'confidence': confidence,
-                        'samples': int(values.sum())
-                    })
-                return
-            
-            # Get split info
-            feature_idx = tree_.feature[node_id]
-            feature_name = self.feature_names[feature_idx]
-            threshold = tree_.threshold[node_id]
-            
-            # Left child (<=)
-            left_conditions = conditions + [f"{feature_name} <= {threshold:.2f}"]
-            recurse(tree_.children_left[node_id], left_conditions, depth + 1)
-            
-            # Right child (>)
-            right_conditions = conditions + [f"{feature_name} > {threshold:.2f}"]
-            recurse(tree_.children_right[node_id], right_conditions, depth + 1)
-        
-        recurse(0, [])
-        
-        # Sort by confidence
-        rules.sort(key=lambda x: -x['confidence'])
-        
-        return rules
-    
-    def generate_precondition_rules(self, code: str) -> Dict:
-        """
-        Generate precondition_rules.json format from decision tree.
-        """
-        rules = self.extract_rules(code)
-        
-        if not rules:
-            return {}
-        
-        # Find the most confident rule
-        best_rule = rules[0]
-        
-        require_true = []
-        require_false = []
-        
-        for condition in best_rule['conditions']:
-            # Parse condition
-            match = re.match(r'(\w+)\s*(<=|>)\s*([\d.]+)', condition)
-            if match:
-                feature, op, val = match.groups()
-                val = float(val)
-                
-                # For boolean features (0/1)
-                if val == 0.5:
-                    if op == '>':
-                        require_true.append(feature)
-                    else:
-                        require_false.append(feature)
-        
-        return {
-            'require_true': require_true,
-            'require_false': require_false,
-            'confidence': best_rule['confidence'],
-            'samples': best_rule['samples'],
-            'full_conditions': best_rule['conditions']
-        }
+    return feature_cols
 
 
-# =============================================================================
-# ANALYSIS UTILITIES
-# =============================================================================
-
-def analyze_feature_correlation(csv_path: str, target_code: str):
-    """Analyze which features correlate with a specific code."""
-    with open(csv_path, 'r') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+def build_decision_tree(df, target_code: str, feature_cols: List[str], 
+                        max_depth: int = 6, min_samples: int = 50) -> Optional[str]:
+    """Build a decision tree for a specific code."""
+    try:
+        from sklearn.tree import DecisionTreeClassifier, export_text
+    except ImportError:
+        print("Error: sklearn not installed. Run: pip install scikit-learn")
+        return None
     
-    code_col = f'code_{target_code}'
-    if code_col not in rows[0]:
-        print(f"Code {target_code} not found")
+    # Create target column
+    target_col = f'code_{target_code}'
+    if target_col not in df.columns:
+        return None
+    
+    y = df[target_col].fillna(0).astype(int)
+    
+    # Check minimum samples
+    positive_count = y.sum()
+    if positive_count < min_samples:
+        return None
+    
+    # Prepare features
+    X = df[feature_cols].fillna(0)
+    
+    # Convert boolean columns to int
+    for col in X.columns:
+        if X[col].dtype == 'bool':
+            X[col] = X[col].astype(int)
+    
+    # Build tree
+    clf = DecisionTreeClassifier(
+        max_depth=max_depth,
+        min_samples_leaf=max(10, min_samples // 10),
+        min_samples_split=max(20, min_samples // 5),
+        class_weight='balanced'
+    )
+    
+    clf.fit(X, y)
+    
+    # Export tree
+    tree_text = export_text(clf, feature_names=list(X.columns))
+    
+    # Generate suggested rules
+    rules = extract_rules_from_tree(clf, list(X.columns))
+    
+    return tree_text, rules, positive_count
+
+
+def extract_rules_from_tree(clf, feature_names: List[str]) -> Dict:
+    """Extract precondition rules from decision tree."""
+    tree = clf.tree_
+    
+    # Find the path to class 1 (code fires)
+    require_true = []
+    require_false = []
+    full_conditions = []
+    
+    # Simple heuristic: look at feature importances
+    importances = clf.feature_importances_
+    important_features = [
+        (feature_names[i], importances[i])
+        for i in range(len(feature_names))
+        if importances[i] > 0.05
+    ]
+    important_features.sort(key=lambda x: -x[1])
+    
+    for feat, imp in important_features[:5]:
+        # Determine if this is a require_true or require_false
+        if 'valid' in feat.lower():
+            require_false.append(feat.replace('_valid_format', '').replace('_valid_country', '').replace('_valid', ''))
+        elif 'has_' in feat.lower():
+            require_true.append(feat)
+        
+        full_conditions.append(f"{feat} (importance: {imp:.3f})")
+    
+    return {
+        'require_true': list(set(require_true)),
+        'require_false': list(set(require_false)),
+        'important_features': full_conditions,
+        'confidence': float(clf.score(clf.tree_.feature, clf.tree_.value.argmax(axis=2).flatten()[:len(clf.tree_.feature)])) if hasattr(clf, 'score') else 0.0
+    }
+
+
+def analyze_codes(csv_path: str, output_dir: str, prefix: str = '8', 
+                  min_samples: int = 50, max_depth: int = 6):
+    """Analyze codes and build decision trees."""
+    try:
+        import pandas as pd
+    except ImportError:
+        print("Error: pandas not installed")
         return
     
-    # Separate positive and negative samples
-    positive = [r for r in rows if int(r.get(code_col, 0)) == 1]
-    negative = [r for r in rows if int(r.get(code_col, 0)) == 0]
+    print(f"Loading data from {csv_path}...")
+    df = pd.read_csv(csv_path)
+    print(f"Loaded {len(df)} records")
     
-    print(f"\nAnalysis for code {target_code}:")
-    print(f"  Positive samples: {len(positive)}")
-    print(f"  Negative samples: {len(negative)}")
-    print(f"  Ratio: {len(positive)/(len(positive)+len(negative))*100:.1f}%")
+    # Get feature columns (excluding spurious)
+    feature_cols = filter_features_for_tree(df, exclude_spurious=True)
+    print(f"Using {len(feature_cols)} features (spurious features excluded)")
+    print(f"Excluded: {EXCLUDED_FEATURES}")
     
-    if not positive:
-        return
+    # Find code columns
+    code_cols = [c for c in df.columns if c.startswith(f'code_{prefix}')]
+    print(f"Found {len(code_cols)} codes starting with {prefix}")
     
-    # Find distinguishing features
-    feature_cols = [c for c in rows[0].keys() 
-                   if not c.startswith('code_') 
-                   and c not in ['transaction_id', 'source_file', 'all_codes']]
+    # Create output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
     
-    print(f"\n  Features that differ between positive/negative:")
-    
-    differences = []
-    for col in feature_cols:
-        try:
-            pos_vals = [float(r.get(col, 0) or 0) for r in positive]
-            neg_vals = [float(r.get(col, 0) or 0) for r in negative]
+    # Build trees
+    results = []
+    for code_col in sorted(code_cols):
+        code = code_col.replace('code_', '')
+        
+        result = build_decision_tree(df, code, feature_cols, max_depth, min_samples)
+        if result:
+            tree_text, rules, count = result
             
-            pos_mean = sum(pos_vals) / len(pos_vals) if pos_vals else 0
-            neg_mean = sum(neg_vals) / len(neg_vals) if neg_vals else 0
+            # Save tree
+            tree_file = output_path / f"tree_{code}.txt"
+            with open(tree_file, 'w') as f:
+                f.write(f"Decision Tree for {code}\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"Samples: {count}\n")
+                f.write(f"Features used: {len(feature_cols)} (spurious excluded)\n\n")
+                f.write(tree_text)
+                f.write("\n\nSuggested Precondition Rules:\n")
+                f.write("-" * 50 + "\n")
+                f.write(json.dumps(rules, indent=2))
             
-            diff = abs(pos_mean - neg_mean)
-            if diff > 0.1:  # Significant difference
-                differences.append((col, pos_mean, neg_mean, diff))
-        except:
-            pass
+            print(f"  {code}: {count} samples -> {tree_file}")
+            results.append({'code': code, 'samples': count, 'rules': rules})
+        else:
+            print(f"  {code}: skipped (< {min_samples} samples)")
     
-    # Sort by difference
-    differences.sort(key=lambda x: -x[3])
+    # Save summary
+    summary_file = output_path / "summary.json"
+    with open(summary_file, 'w') as f:
+        json.dump({
+            'total_records': len(df),
+            'features_used': len(feature_cols),
+            'excluded_features': list(EXCLUDED_FEATURES),
+            'codes_analyzed': results
+        }, f, indent=2)
     
-    for col, pos_mean, neg_mean, diff in differences[:20]:
-        print(f"    {col}: pos={pos_mean:.2f}, neg={neg_mean:.2f}, diff={diff:.2f}")
-
-
-def show_code_summary(csv_path: str):
-    """Show summary of codes in dataset."""
-    with open(csv_path, 'r') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    
-    code_cols = [c for c in rows[0].keys() if c.startswith('code_')]
-    
-    print(f"\nCode Summary ({len(rows)} total records):")
-    print("-" * 50)
-    
-    stats = []
-    for col in code_cols:
-        code = col.replace('code_', '')
-        count = sum(1 for r in rows if int(r.get(col, 0)) == 1)
-        if count > 0:
-            stats.append((code, count, count/len(rows)*100))
-    
-    stats.sort(key=lambda x: -x[1])
-    
-    for code, count, pct in stats:
-        trainable = "✓" if code in TRAINABLE_8XXX or code in TRAINABLE_9XXX else "○"
-        print(f"  {trainable} {code}: {count:5d} ({pct:5.1f}%)")
-    
-    print("-" * 50)
-    print("✓ = Trainable (deterministic)")
-    print("○ = May need directory lookup")
+    print(f"\nSummary saved to {summary_file}")
 
 
 # =============================================================================
@@ -1011,184 +999,55 @@ def show_code_summary(csv_path: str):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='ACE Error Code Data Collector & Decision Tree Builder',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Collect data from IFML files
-  python ace_data_collector.py collect -i ./ifml_data -o dataset.csv
-  
-  # Build decision trees
-  python ace_data_collector.py analyze -i dataset.csv -o ./trees
-  
-  # Analyze specific code
-  python ace_data_collector.py explain -i dataset.csv -c 8894
-  
-  # Show dataset summary
-  python ace_data_collector.py summary -i dataset.csv
-        """
-    )
-    
-    subparsers = parser.add_subparsers(dest='command', help='Command')
+    parser = argparse.ArgumentParser(description='ACE Data Collector v2 - Excludes spurious features')
+    subparsers = parser.add_subparsers(dest='command')
     
     # Collect command
     collect_parser = subparsers.add_parser('collect', help='Collect data from IFML files')
-    collect_parser.add_argument('-i', '--input-dir', required=True,
-                               help='Directory containing IFML files')
-    collect_parser.add_argument('-o', '--output', required=True,
-                               help='Output CSV file')
-    collect_parser.add_argument('--combined', action='store_true',
-                               help='Treat each file as containing multiple request/response pairs')
-    collect_parser.add_argument('--request-pattern', default='*request*.json',
-                               help='Glob pattern for request files (ignored if --combined)')
-    collect_parser.add_argument('--response-pattern', default='*response*.json',
-                               help='Glob pattern for response files (ignored if --combined)')
-    collect_parser.add_argument('--recursive', '-r', action='store_true',
-                               help='Recursively process subdirectories')
+    collect_parser.add_argument('-i', '--input', required=True, help='Input directory')
+    collect_parser.add_argument('-o', '--output', required=True, help='Output CSV file')
+    collect_parser.add_argument('--debug', action='store_true')
     
     # Analyze command
     analyze_parser = subparsers.add_parser('analyze', help='Build decision trees')
-    analyze_parser.add_argument('-i', '--input', required=True,
-                               help='Input CSV file from collect')
-    analyze_parser.add_argument('-o', '--output-dir', default='./trees',
-                               help='Output directory for trees')
-    analyze_parser.add_argument('--max-depth', type=int, default=5,
-                               help='Maximum tree depth')
-    analyze_parser.add_argument('--min-samples', type=int, default=10,
-                               help='Minimum samples to build tree')
-    analyze_parser.add_argument('--prefix', type=str, default=None,
-                               help='Only analyze codes starting with this (e.g., 8 for 8xxx)')
-    
-    # Explain command
-    explain_parser = subparsers.add_parser('explain', help='Explain specific code')
-    explain_parser.add_argument('-i', '--input', required=True,
-                               help='Input CSV file')
-    explain_parser.add_argument('-c', '--code', required=True,
-                               help='Error code to explain')
-    explain_parser.add_argument('--max-depth', type=int, default=5,
-                               help='Maximum tree depth')
-    
-    # Summary command
-    summary_parser = subparsers.add_parser('summary', help='Show dataset summary')
-    summary_parser.add_argument('-i', '--input', required=True,
-                               help='Input CSV file')
-    
-    # Single command
-    single_parser = subparsers.add_parser('single', help='Process single file pair')
-    single_parser.add_argument('--request', required=True,
-                              help='Request JSON file')
-    single_parser.add_argument('--response', required=True,
-                              help='Response JSON file')
+    analyze_parser.add_argument('-i', '--input', required=True, help='Input CSV file')
+    analyze_parser.add_argument('-o', '--output', required=True, help='Output directory')
+    analyze_parser.add_argument('--prefix', default='8', help='Code prefix (8 or 9)')
+    analyze_parser.add_argument('--min-samples', type=int, default=50)
+    analyze_parser.add_argument('--max-depth', type=int, default=6)
     
     args = parser.parse_args()
     
-    if not args.command:
-        parser.print_help()
-        return
-    
-    # Execute command
     if args.command == 'collect':
-        print(f"Collecting data from {args.input_dir}...")
-        collector = ACEDataCollector()
+        collector = DataCollector(debug=args.debug)
+        records = collector.collect_directory(Path(args.input))
         
-        input_path = Path(args.input_dir)
-        
-        if args.combined or getattr(args, 'recursive', False):
-            # Process as combined files
-            glob_pattern = '**/*.json' if getattr(args, 'recursive', False) else '*.json'
-            json_files = list(input_path.glob(glob_pattern))
-            
-            total_count = 0
-            for json_file in json_files:
-                count = collector.process_combined_file(str(json_file))
-                if count > 0:
-                    print(f"  {json_file.name}: {count} transactions")
-                    total_count += count
-            
-            print(f"\nTotal processed: {total_count} transactions from {len(json_files)} files")
-            count = total_count
-        else:
-            count = collector.process_directory(args.input_dir, 
-                                               args.request_pattern,
-                                               args.response_pattern)
-            print(f"Processed {count} file pairs")
-        
-        if count > 0:
-            print("\nCode statistics:")
-            for code, cnt in list(collector.get_code_statistics().items())[:20]:
-                print(f"  {code}: {cnt}")
-            if len(collector.get_code_statistics()) > 20:
-                print(f"  ... and {len(collector.get_code_statistics()) - 20} more codes")
-            
-            collector.save_csv(args.output)
+        if records:
+            try:
+                import pandas as pd
+                df = pd.DataFrame(records)
+                df.to_csv(args.output, index=False)
+                print(f"Saved {len(records)} records to {args.output}")
+            except ImportError:
+                # Fallback to csv module
+                if records:
+                    keys = set()
+                    for r in records:
+                        keys.update(r.keys())
+                    keys = sorted(keys)
+                    
+                    with open(args.output, 'w', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=keys)
+                        writer.writeheader()
+                        writer.writerows(records)
+                    print(f"Saved {len(records)} records to {args.output}")
     
     elif args.command == 'analyze':
-        if not ML_AVAILABLE:
-            print("ERROR: scikit-learn required for analysis")
-            print("Install with: pip install scikit-learn numpy")
-            return
-        
-        builder = DecisionTreeBuilder()
-        results = builder.build_all_trees(args.input, args.max_depth, args.min_samples, 
-                                          code_prefix=args.prefix)
-        
-        # Save results
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        for code, rules in results.items():
-            rule_file = output_dir / f"tree_{code}.txt"
-            with open(rule_file, 'w') as f:
-                f.write(f"Decision Tree for {code}\n")
-                f.write("=" * 50 + "\n\n")
-                f.write(rules)
-                
-                # Add precondition format
-                f.write("\n\nSuggested Precondition Rules:\n")
-                f.write("-" * 50 + "\n")
-                precond = builder.generate_precondition_rules(code)
-                f.write(json.dumps(precond, indent=2))
-        
-        print(f"\nSaved {len(results)} tree files to {args.output_dir}")
+        analyze_codes(args.input, args.output, args.prefix, 
+                     args.min_samples, args.max_depth)
     
-    elif args.command == 'explain':
-        if ML_AVAILABLE:
-            builder = DecisionTreeBuilder()
-            rows, feature_cols, code_cols = builder.load_csv(args.input)
-            
-            tree = builder.build_tree(rows, feature_cols, args.code, args.max_depth)
-            
-            if tree:
-                print(f"\nDecision Tree for {args.code}:")
-                print("=" * 50)
-                print(export_text(tree, feature_names=feature_cols, max_depth=args.max_depth))
-                
-                print("\nTop Features by Importance:")
-                for feat, imp in list(builder.feature_importance[args.code].items())[:10]:
-                    print(f"  {feat}: {imp:.3f}")
-                
-                print("\nSuggested Precondition Rules:")
-                precond = builder.generate_precondition_rules(args.code)
-                print(json.dumps(precond, indent=2))
-        
-        # Also show correlation analysis
-        analyze_feature_correlation(args.input, args.code)
-    
-    elif args.command == 'summary':
-        show_code_summary(args.input)
-    
-    elif args.command == 'single':
-        collector = ACEDataCollector()
-        record = collector.process_pair(args.request, args.response)
-        
-        if record:
-            print(f"\nTransaction: {record.transaction_id}")
-            print(f"Fired Codes: {record.actual_codes}")
-            print(f"\nKey Features:")
-            for key, val in sorted(record.features.items()):
-                if val and val != 0 and val != '' and val != False:
-                    print(f"  {key}: {val}")
+    else:
+        parser.print_help()
 
 
 if __name__ == '__main__':
