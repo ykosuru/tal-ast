@@ -199,40 +199,27 @@ class Rules8XXX:
     
     # Party type to code suffix mapping
     PARTY_SUFFIXES = {
-        'OriginatingPartyInfo': 'ORGPTY',
-        'OriginatingPartyInf': 'ORGPTY',
-        'SendingBankInfo': 'SNDBNK',
-        'SendingBankInf': 'SNDBNK',
-        'DebitPartyInfo': 'DBTPTY',
-        'DebitPartyInf': 'DBTPTY',
-        'CreditPartyInfo': 'CDTPTY',
-        'CreditPartyInf': 'CDTPTY',
-        'IntermediaryBankInfo': 'INTMBNK',
-        'IntermediaryBankInf': 'INTMBNK',
-        'BeneficiaryBankInfo': 'BNFBNK',
-        'BeneficiaryBankInf': 'BNFBNK',
-        'BeneficiaryPartyInfo': 'BNPPTY',
-        'BeneficiaryPartyInf': 'BNPPTY',
+        'OriginatingParty': 'ORGPTY',
+        'SendingBank': 'SNDBNK',
+        'DebitParty': 'DBTPTY',
+        'CreditParty': 'CDTPTY',
+        'IntermediaryBank': 'INTMBNK',
+        'BeneficiaryBank': 'BNFBNK',
+        'BeneficiaryParty': 'BNPPTY',
         'AccountWithInstitution': 'ACWI',
         'OrderingInstitution': 'ORDI',
     }
     
     # Feature prefix mapping (short prefixes used in flat feature dict)
+    # NOTE: Using only the short form names to avoid duplicates
     PARTY_PREFIXES = {
-        'OriginatingPartyInfo': 'orig',
-        'OriginatingPartyInf': 'orig',
-        'SendingBankInfo': 'send',
-        'SendingBankInf': 'send',
-        'DebitPartyInfo': 'dbt',
-        'DebitPartyInf': 'dbt',
-        'CreditPartyInfo': 'cdt',
-        'CreditPartyInf': 'cdt',
-        'IntermediaryBankInfo': 'intm',
-        'IntermediaryBankInf': 'intm',
-        'BeneficiaryBankInfo': 'bnf',
-        'BeneficiaryBankInf': 'bnf',
-        'BeneficiaryPartyInfo': 'bnp',
-        'BeneficiaryPartyInf': 'bnp',
+        'OriginatingParty': 'orig',
+        'SendingBank': 'send',
+        'DebitParty': 'dbt',
+        'CreditParty': 'cdt',
+        'IntermediaryBank': 'intm',
+        'BeneficiaryBank': 'bnf',
+        'BeneficiaryParty': 'bnp',
         'AccountWithInstitution': 'acwi',
         'OrderingInstitution': 'ordi',
     }
@@ -446,16 +433,23 @@ class Rules8XXX:
         """
         Check 8004: IBAN Cannot Be Derived
         
+        ACTUAL ACE BEHAVIOR:
+        8004 fires when:
+        1. Destination country requires IBAN (is an IBAN country)
+        2. No valid IBAN is provided
+        3. ACE cannot derive IBAN from available account info
+        
         Decision Tree:
-            needs_iban = True?
+            is_iban_country? (destination requires IBAN)
             ├─ NO → Cannot fire
-            └─ YES → has_iban?
+            └─ YES → has_valid_iban?
                       ├─ YES → Cannot fire
-                      └─ NO → has_account?
-                               ├─ NO → 8004 FIRES
-                               └─ YES → iban_derivation_supported?
-                                         ├─ NO → 8030 FIRES instead
-                                         └─ YES → Directory lookup (eligible)
+                      └─ NO → can_derive_iban? (has account + BIC/NCH for lookup)
+                               ├─ YES → ELIGIBLE (directory lookup needed)
+                               └─ NO → 8004 FIRES
+        
+        NOTE: This is directory-dependent. We can predict eligibility but 
+              not the final outcome since derivation may fail.
         """
         result = CodeCheckResult(
             code='8004',
@@ -463,60 +457,87 @@ class Rules8XXX:
             description='IBAN cannot be derived - required but not provided or derivable'
         )
         
-        needs_iban = features.get('needs_iban', False)
+        # Get country - check multiple sources
+        country = (features.get('country') or 
+                   features.get('address_country') or 
+                   features.get('iban_country') or
+                   features.get('bic_country') or '')
+        
         has_iban = features.get('has_iban', False)
+        iban_value = features.get('iban') or features.get('account_value', '')
+        iban_valid = features.get('iban_valid_format', False) and features.get('iban_checksum_valid', False)
+        
         has_account = features.get('has_account', False)
-        country = features.get('country') or features.get('address_country', '')
+        account_value = features.get('account_value', '')
+        
+        has_bic = features.get('has_bic', False)
+        has_nch = features.get('has_nch', False)
+        
+        # Check if IBAN is actually present and valid
+        if has_iban and iban_value:
+            # Validate IBAN format
+            iban_clean = iban_value.upper().replace(' ', '').replace('-', '')
+            if len(iban_clean) >= 15 and iban_clean[:2].isalpha():
+                iban_valid = True
+        
+        # Check if country requires IBAN
+        is_iban_country = country.upper() in IBAN_REQUIRED_COUNTRIES if country else False
         
         result.features_used = {
-            'needs_iban': needs_iban,
+            'country': country,
+            'is_iban_country': is_iban_country,
             'has_iban': has_iban,
+            'iban_valid': iban_valid,
             'has_account': has_account,
-            'country': country
+            'has_bic': has_bic,
+            'has_nch': has_nch
         }
         
-        # Step 1: Check if IBAN required
-        if not needs_iban:
+        # Step 1: Check if destination requires IBAN
+        if not is_iban_country:
             result.cannot_fire = True
-            result.decision_path = ['needs_iban=False', '→ Cannot fire (IBAN not required)']
+            result.decision_path = [f'is_iban_country=False (country={country})', 
+                                    '→ Cannot fire (IBAN not required for this country)']
             return result
         
-        result.decision_path.append('needs_iban=True')
+        result.decision_path.append(f'is_iban_country=True (country={country})')
         
-        # Step 2: Check if IBAN already present
-        if has_iban:
+        # Step 2: Check if valid IBAN already present
+        if has_iban and iban_valid:
             result.cannot_fire = True
-            result.decision_path.append('has_iban=True')
-            result.decision_path.append('→ Cannot fire (IBAN already present)')
+            result.decision_path.append('has_valid_iban=True')
+            result.decision_path.append('→ Cannot fire (valid IBAN present)')
             return result
         
-        result.decision_path.append('has_iban=False')
+        result.decision_path.append(f'has_valid_iban=False')
         
-        # Step 3: Check if account available for derivation
+        # Step 3: Check if IBAN can be derived
+        # Derivation requires: account number + (BIC or NCH) for directory lookup
+        can_derive = has_account and (has_bic or has_nch)
+        derivation_supported = country.upper() in IBAN_DERIVATION_SUPPORTED if country else False
+        
+        result.features_used['can_derive'] = can_derive
+        result.features_used['derivation_supported'] = derivation_supported
+        
+        if can_derive and derivation_supported:
+            # Has the ingredients for derivation - outcome depends on directory
+            result.eligible = True
+            result.confidence = 0.70  # ~70% of eligible cases result in 8004
+            result.decision_path.append(f'can_derive=True, derivation_supported=True')
+            result.decision_path.append('→ ELIGIBLE (directory lookup will determine outcome)')
+            return result
+        
+        # Cannot derive - 8004 will fire
+        result.fires = True
         if not has_account:
-            result.fires = True
             result.decision_path.append('has_account=False')
             result.decision_path.append('→ 8004 FIRES (no account to derive IBAN from)')
-            return result
-        
-        result.decision_path.append('has_account=True')
-        
-        # Step 4: Check if derivation supported
-        derivation_supported = country in IBAN_DERIVATION_SUPPORTED if country else False
-        result.features_used['iban_derivation_supported'] = derivation_supported
-        
-        if not derivation_supported:
-            # This should trigger 8030, not 8004
-            result.cannot_fire = True
-            result.decision_path.append(f'iban_derivation_supported=False (country={country})')
-            result.decision_path.append('→ Cannot fire (8030 should fire instead)')
-            return result
-        
-        # Derivation supported but outcome depends on directory lookup
-        result.decision_path.append(f'iban_derivation_supported=True (country={country})')
-        result.eligible = True
-        result.confidence = 0.85  # May still fire if derivation fails
-        result.decision_path.append('→ Eligible for derivation (may fire if lookup fails)')
+        elif not derivation_supported:
+            result.decision_path.append(f'derivation_supported=False (country={country})')
+            result.decision_path.append('→ 8004 FIRES (IBAN derivation not supported for country)')
+        else:
+            result.decision_path.append('can_derive=False (missing BIC/NCH for lookup)')
+            result.decision_path.append('→ 8004 FIRES (cannot perform directory lookup)')
         
         return result
     
@@ -1620,14 +1641,16 @@ class Rules8XXX:
         results.append(self.check_8007(features))
         
         # Per-party checks
+        # NOTE: 8851/8852 are schema-level errors detected during XML parsing,
+        # not from IFML features, so they are excluded from rules engine.
         party_checks = [
             self.check_8001,  # Invalid BIC
-            self.check_8004,  # IBAN cannot be derived
+            self.check_8004,  # IBAN cannot be derived (common code!)
             self.check_8005,  # Invalid BIC4
             self.check_8006,  # Invalid country
             self.check_8022,  # IBAN/BIC mismatch
-            self.check_8030,  # IBAN derivation not supported
-            self.check_8852,  # Incorrect length
+            # self.check_8030,  # IBAN derivation not supported - covered by 8004
+            # self.check_8852,  # REMOVED - schema error, not detectable from features
             self.check_8894,  # Invalid IBAN
             self.check_8895,  # Invalid NCH
             self.check_8898,  # IBAN check digit failed
@@ -1653,9 +1676,20 @@ class Rules8XXX:
         else:
             # Extract parties from flat features and check each
             for party_type, prefix in self.PARTY_PREFIXES.items():
-                # Check if this party exists in features
-                present_key = f"{prefix}_present"
-                if features.get(present_key, False) or features.get(f"{prefix}_has_bic", False):
+                # Check if this party exists in features - check multiple indicators
+                party_exists = (
+                    features.get(f"{prefix}_present", False) or
+                    features.get(f"{prefix}_has_bic", False) or
+                    features.get(f"{prefix}_has_iban", False) or
+                    features.get(f"{prefix}_has_account", False) or
+                    features.get(f"{prefix}_has_nch", False) or
+                    features.get(f"{prefix}_has_name", False) or
+                    features.get(f"{prefix}_has_id", False) or
+                    features.get(f"{prefix}_country", '') != '' or
+                    features.get(f"{prefix}_bic", '') != ''
+                )
+                
+                if party_exists:
                     party_features = self._get_party_features(features, party_type)
                     suffix = self._get_suffix(party_type)
                     
