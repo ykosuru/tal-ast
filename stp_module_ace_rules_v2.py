@@ -145,7 +145,7 @@ SUPPRESSED = {
 }
 
 # Global codes (not party-specific)
-GLOBAL_CODES = {'8007', '8023', '8024', '8025', '8026', '8027', '8028', 
+GLOBAL_CODES = {'8007', '8022', '8023', '8024', '8025', '8027', '8028', 
                 '8029', '8033', '8124', '9018', '9024'}
 
 # Bank party types - these don't need IBANs (they need BICs)
