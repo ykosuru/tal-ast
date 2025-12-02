@@ -200,8 +200,8 @@
 
   "8894": {
     "require_true": ["has_iban"],
-    "require_false": ["iban_valid_format", "iban_checksum_valid"],
-    "description": "Invalid IBAN - format invalid or checksum failed"
+    "require_false": ["iban_valid_format", "iban_checksum_valid", "iban_bban_valid"],
+    "description": "Invalid IBAN - format invalid, checksum failed, or BBAN structure invalid"
   },
 
   "8895": {
