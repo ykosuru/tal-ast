@@ -162,40 +162,27 @@ class Rules9XXX:
     
     # Party type to code suffix mapping
     PARTY_SUFFIXES = {
-        'OriginatingPartyInfo': 'ORGPTY',
-        'OriginatingPartyInf': 'ORGPTY',
-        'SendingBankInfo': 'SNDBNK',
-        'SendingBankInf': 'SNDBNK',
-        'DebitPartyInfo': 'DBTPTY',
-        'DebitPartyInf': 'DBTPTY',
-        'CreditPartyInfo': 'CDTPTY',
-        'CreditPartyInf': 'CDTPTY',
-        'IntermediaryBankInfo': 'INTMBNK',
-        'IntermediaryBankInf': 'INTMBNK',
-        'BeneficiaryBankInfo': 'BNFBNK',
-        'BeneficiaryBankInf': 'BNFBNK',
-        'BeneficiaryPartyInfo': 'BNPPTY',
-        'BeneficiaryPartyInf': 'BNPPTY',
+        'OriginatingParty': 'ORGPTY',
+        'SendingBank': 'SNDBNK',
+        'DebitParty': 'DBTPTY',
+        'CreditParty': 'CDTPTY',
+        'IntermediaryBank': 'INTMBNK',
+        'BeneficiaryBank': 'BNFBNK',
+        'BeneficiaryParty': 'BNPPTY',
         'AccountWithInstitution': 'ACWI',
         'OrderingInstitution': 'ORDI',
     }
     
     # Feature prefix mapping
+    # NOTE: Using only the short form names to avoid duplicates
     PARTY_PREFIXES = {
-        'OriginatingPartyInfo': 'orig',
-        'OriginatingPartyInf': 'orig',
-        'SendingBankInfo': 'send',
-        'SendingBankInf': 'send',
-        'DebitPartyInfo': 'dbt',
-        'DebitPartyInf': 'dbt',
-        'CreditPartyInfo': 'cdt',
-        'CreditPartyInf': 'cdt',
-        'IntermediaryBankInfo': 'intm',
-        'IntermediaryBankInf': 'intm',
-        'BeneficiaryBankInfo': 'bnf',
-        'BeneficiaryBankInf': 'bnf',
-        'BeneficiaryPartyInfo': 'bnp',
-        'BeneficiaryPartyInf': 'bnp',
+        'OriginatingParty': 'orig',
+        'SendingBank': 'send',
+        'DebitParty': 'dbt',
+        'CreditParty': 'cdt',
+        'IntermediaryBank': 'intm',
+        'BeneficiaryBank': 'bnf',
+        'BeneficiaryParty': 'bnp',
         'AccountWithInstitution': 'acwi',
         'OrderingInstitution': 'ordi',
     }
@@ -1389,8 +1376,20 @@ class Rules9XXX:
         else:
             # Extract parties from flat features
             for party_type, prefix in self.PARTY_PREFIXES.items():
-                present_key = f"{prefix}_present"
-                if features.get(present_key, False) or features.get(f"{prefix}_has_bic", False) or features.get(f"{prefix}_has_account", False):
+                # Check if this party exists in features - check multiple indicators
+                party_exists = (
+                    features.get(f"{prefix}_present", False) or
+                    features.get(f"{prefix}_has_bic", False) or
+                    features.get(f"{prefix}_has_iban", False) or
+                    features.get(f"{prefix}_has_account", False) or
+                    features.get(f"{prefix}_has_nch", False) or
+                    features.get(f"{prefix}_has_name", False) or
+                    features.get(f"{prefix}_has_id", False) or
+                    features.get(f"{prefix}_country", '') != '' or
+                    features.get(f"{prefix}_bic", '') != ''
+                )
+                
+                if party_exists:
                     party_features = self._get_party_features(features, party_type)
                     suffix = self._get_suffix(party_type)
                     
