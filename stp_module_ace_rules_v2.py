@@ -530,7 +530,7 @@ def main():
     parser.add_argument('--rules', default='precondition_rules_v2.json',
                        help='Path to precondition rules JSON')
     parser.add_argument('--list', choices=['all', '8xxx', '9xxx', 'global', 'party'],
-                       help='List available codes')
+                       help='List available codes (ignored if file provided)')
     parser.add_argument('--explain', help='Explain a specific code')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Show detailed output')
@@ -539,6 +539,23 @@ def main():
     
     engine = ACERulesEngine(args.rules)
     
+    # Process file first (takes priority)
+    if args.ifml_file:
+        result = engine.process_file(args.ifml_file)
+        
+        print(f"\n{result.summary()}")
+        print(f"\nFIRED: {sorted(result.fired)}")
+        
+        if args.verbose:
+            print(f"\nELIGIBLE: {sorted(result.eligible)}")
+            print(f"\nCANNOT_FIRE: {sorted(result.cannot_fire)[:20]}...")
+            print("\nFIRED DETAILS:")
+            for detail in result.details:
+                if detail.status == 'fires':
+                    print(f"  {detail.code_with_party}: {detail.reason}")
+        return
+    
+    # List codes if no file
     if args.list:
         codes = engine.list_codes(args.list)
         print(f"\n{args.list.upper()} Codes ({len(codes)}):")
@@ -547,21 +564,7 @@ def main():
             print(f"  {code}: {desc}...")
         return
     
-    if args.ifml_file:
-        result = engine.process_file(args.ifml_file)
-        
-        print(f"\n{result.summary()}")
-        print(f"\nFIRED: {sorted(result.fired)}")
-        print(f"ELIGIBLE: {sorted(result.eligible)[:10]}..." if len(result.eligible) > 10 
-              else f"ELIGIBLE: {sorted(result.eligible)}")
-        
-        if args.verbose:
-            print("\nDETAILS:")
-            for detail in result.details:
-                if detail.status == 'fires':
-                    print(f"  {detail.code_with_party}: {detail.reason}")
-    else:
-        parser.print_help()
+    parser.print_help()
 
 
 if __name__ == '__main__':
