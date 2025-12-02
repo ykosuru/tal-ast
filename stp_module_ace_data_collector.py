@@ -340,10 +340,14 @@ class ACEDataCollector:
         """
         Process a single JSON file containing multiple request/response pairs.
         
-        Supports formats:
-        1. Dict keyed by transaction ID: {"TX001": {"Request": {...}, "Response": {...}}, ...}
-        2. Array of transactions: [{"Request": {...}, "Response": {...}}, ...]
-        3. Wrapper with Transactions array: {"Transactions": [...]}
+        Expected format (from data_pipeline.py):
+        {
+            "2025092900000192": {
+                "Request": { "IFML": { "File": { "Message": {...} } } },
+                "Response": { "IFML": { "File": { "Message": {...} } } }
+            },
+            "2025092900000193": { ... }
+        }
         
         Returns number of records processed.
         """
@@ -354,47 +358,60 @@ class ACEDataCollector:
             print(f"Error loading {filepath}: {e}")
             return 0
         
+        if not isinstance(data, dict):
+            print(f"Expected dict, got {type(data).__name__} in {filepath}")
+            return 0
+        
         processed = 0
         
-        # Format 1: Dict keyed by transaction ID
-        if isinstance(data, dict):
-            # Check for wrapper keys
-            if 'Transactions' in data:
-                data = data['Transactions']
-            elif 'transactions' in data:
-                data = data['transactions']
-            elif 'Data' in data:
-                data = data['Data']
-            
-            if isinstance(data, dict):
-                # Each key is a transaction ID
-                for tx_id, tx_data in data.items():
-                    if tx_id.startswith('_'):  # Skip metadata keys
+        for txn_id, payment_data in data.items():
+            try:
+                if not isinstance(payment_data, dict):
+                    continue
+                
+                # Extract Request and Response (matching data_pipeline.py logic)
+                request_data = payment_data.get('Request')
+                response_data = payment_data.get('Response')
+                
+                if not request_data:
+                    # Maybe the IFML is directly nested
+                    if 'IFML' in payment_data:
+                        request_data = payment_data
+                        response_data = None
+                    else:
                         continue
-                    
-                    if isinstance(tx_data, dict):
-                        record = self._process_combined_entry(tx_id, tx_data, filepath)
-                        if record:
-                            self.records.append(record)
-                            processed += 1
-            
-            elif isinstance(data, list):
-                # Array of transactions
-                for idx, tx_data in enumerate(data):
-                    tx_id = self._extract_tx_id(tx_data, idx)
-                    record = self._process_combined_entry(tx_id, tx_data, filepath)
-                    if record:
-                        self.records.append(record)
-                        processed += 1
-        
-        # Format 2: Top-level array
-        elif isinstance(data, list):
-            for idx, tx_data in enumerate(data):
-                tx_id = self._extract_tx_id(tx_data, idx)
-                record = self._process_combined_entry(tx_id, tx_data, filepath)
-                if record:
-                    self.records.append(record)
-                    processed += 1
+                
+                # Parse request using enhanced extractor
+                features = self._extract_features(request_data)
+                
+                # Parse response if present
+                if response_data:
+                    _, code_occurrences = self.response_parser.parse(response_data)
+                else:
+                    code_occurrences = []
+                
+                # Filter out excluded codes
+                actual_codes = []
+                base_codes = set()
+                
+                for occ in code_occurrences:
+                    if occ.base_code not in EXCLUDED_CODES:
+                        actual_codes.append(occ.full_code)
+                        base_codes.add(occ.base_code)
+                
+                record = ProcessedRecord(
+                    transaction_id=txn_id,
+                    features=features,
+                    actual_codes=actual_codes,
+                    base_codes=base_codes,
+                    source_file=f"{filepath}#{txn_id}"
+                )
+                
+                self.records.append(record)
+                processed += 1
+                
+            except Exception as e:
+                print(f"Error processing {txn_id} in {filepath}: {e}")
         
         return processed
     
@@ -533,119 +550,73 @@ class ACEDataCollector:
         """
         Process all IFML files in a directory.
         
-        Supports multiple directory structures:
-        1. Combined files: Each JSON contains multiple {TX: {Request, Response}} pairs
-        2. Same directory with naming convention: *_request.json / *_response.json
-        3. Subdirectories: requests/*.json / responses/*.json
-        4. Transaction ID matching: {txid}_req.json / {txid}_resp.json
+        Primary method: Each JSON file contains multiple {txn_id: {Request, Response}} pairs.
+        This matches the data_pipeline.py format.
         
-        The method auto-detects the format.
+        Falls back to separate request/response file matching if the primary method fails.
         """
         input_path = Path(input_dir)
-        processed = 0
         
-        # First, try processing all JSON files as combined files
-        all_json_files = list(input_path.glob('*.json'))
+        if not input_path.is_dir():
+            print(f"ERROR: Directory not found: {input_dir}")
+            return 0
         
-        # Check if files contain combined request/response pairs
-        combined_processed = 0
+        # Primary: Process all JSON files as combined files (data_pipeline.py format)
+        all_json_files = sorted(input_path.glob('*.json'))
+        
+        print(f"Found {len(all_json_files)} JSON files in {input_dir}")
+        print("-" * 60)
+        
+        total_processed = 0
+        
         for json_file in all_json_files:
-            # Peek at the file to determine format
-            try:
-                with open(json_file) as f:
-                    # Read first 2000 chars to detect format
-                    peek = f.read(2000)
-                    
-                # Check if this looks like a combined file
-                # (contains both Request and Response at similar levels)
-                has_request = '"Request"' in peek or '"request"' in peek or '"IFML"' in peek
-                has_response = '"Response"' in peek or '"response"' in peek or '"AuditTrail"' in peek
-                
-                if has_request and has_response:
-                    count = self.process_combined_file(str(json_file))
-                    if count > 0:
-                        print(f"  Processed {count} transactions from {json_file.name}")
-                        combined_processed += count
-            except Exception as e:
-                pass  # Not a combined file, try other methods
+            count = self.process_combined_file(str(json_file))
+            if count > 0:
+                print(f"  {json_file.name}: {count} transactions")
+                total_processed += count
         
-        if combined_processed > 0:
-            print(f"Total from combined files: {combined_processed}")
-            return combined_processed
+        if total_processed > 0:
+            print("-" * 60)
+            print(f"Total: {total_processed} transactions from {len(all_json_files)} files")
+            return total_processed
         
-        # Strategy 2: requests/responses subdirectories
+        # Fallback: Try separate request/response files
+        print("No combined files found, trying separate request/response files...")
+        
+        # Strategy: requests/responses subdirectories
         req_dir = input_path / 'requests'
         resp_dir = input_path / 'responses'
         
         if req_dir.exists() and resp_dir.exists():
             for req_file in req_dir.glob('*.json'):
-                # Try to find matching response
                 resp_file = resp_dir / req_file.name.replace('request', 'response')
                 if not resp_file.exists():
                     resp_file = resp_dir / req_file.name
                 
                 if resp_file.exists():
                     if self.process_pair(str(req_file), str(resp_file)):
-                        processed += 1
-            return processed
+                        total_processed += 1
+            return total_processed
         
-        # Strategy 3: Same directory with naming patterns
+        # Strategy: Same directory with naming patterns
         request_files = list(input_path.glob(request_pattern))
         
         for req_file in request_files:
-            # Try different response file patterns
             base_name = req_file.stem
             possible_resp_names = [
                 base_name.replace('request', 'response'),
                 base_name.replace('req', 'resp'),
                 base_name.replace('_request', '_response'),
-                base_name + '_response',
             ]
             
-            resp_file = None
             for resp_name in possible_resp_names:
-                candidate = req_file.parent / f"{resp_name}.json"
-                if candidate.exists():
-                    resp_file = candidate
+                resp_file = req_file.parent / f"{resp_name}.json"
+                if resp_file.exists():
+                    if self.process_pair(str(req_file), str(resp_file)):
+                        total_processed += 1
                     break
-            
-            if resp_file:
-                if self.process_pair(str(req_file), str(resp_file)):
-                    processed += 1
         
-        if processed > 0:
-            return processed
-        
-        # Strategy 4: All JSON files, match by transaction ID
-        all_files = list(input_path.glob('*.json'))
-        requests = {}
-        responses = {}
-        
-        for f in all_files:
-            try:
-                with open(f) as fp:
-                    data = json.load(fp)
-                
-                # Detect if request or response
-                if 'Request' in str(data) or 'request' in f.name.lower():
-                    # Extract transaction ID
-                    if isinstance(data, dict) and len(data) == 1:
-                        tx_id = list(data.keys())[0]
-                        requests[tx_id] = str(f)
-                elif 'Response' in str(data) or 'response' in f.name.lower():
-                    if isinstance(data, dict) and len(data) == 1:
-                        tx_id = list(data.keys())[0]
-                        responses[tx_id] = str(f)
-            except:
-                pass
-        
-        # Match by transaction ID
-        for tx_id, req_path in requests.items():
-            if tx_id in responses:
-                if self.process_pair(req_path, responses[tx_id]):
-                    processed += 1
-        
-        return processed
+        return total_processed
     
     def to_dataframe_dict(self) -> Tuple[List[str], List[Dict]]:
         """
