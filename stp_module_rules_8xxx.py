@@ -75,6 +75,7 @@ SUFFIX_TO_PREFIX = {
 
 # Codes that are deterministically predictable
 PREDICTABLE_CODES = {
+    # 8XXX Validation Errors
     '8001',  # Invalid BIC
     '8004',  # IBAN cannot be derived
     '8005',  # Invalid BIC4
@@ -86,6 +87,9 @@ PREDICTABLE_CODES = {
     '8894',  # Invalid IBAN
     '8895',  # Invalid NCH
     '8898',  # IBAN checksum failed
+    # 9XXX Repair Codes (structurally detectable)
+    '9018',  # Duplicate party removed (multiple redundant intermediaries)
+    '9019',  # Party identifier cleaned (non-alphanumeric chars)
 }
 
 # Codes that require directory lookup - can predict eligibility but not certainty
@@ -511,6 +515,7 @@ class FeatureExtractor:
         # Parse ID field
         id_field = basic.get('ID')
         bic, iban = None, None
+        id_text = ''
         
         if id_field:
             self.features[f'{prefix}_has_id'] = True
@@ -532,6 +537,13 @@ class FeatureExtractor:
                     iban = id_text
                 elif self._looks_like_bic(id_text):
                     bic = id_text
+            
+            # 9019: Check if ID needs cleaning (contains non-alphanumeric chars)
+            if id_text:
+                cleaned_id = re.sub(r'[^A-Za-z0-9]', '', id_text)
+                self.features[f'{prefix}_id_needs_cleaning'] = (cleaned_id != id_text)
+                if self.debug and cleaned_id != id_text:
+                    print(f"[DEBUG] 9019: {prefix} ID needs cleaning: '{id_text}' -> '{cleaned_id}'")
         
         # Store BIC features
         if bic:
@@ -607,8 +619,100 @@ class FeatureExtractor:
             if not has_iban and not has_account:
                 self.features[f'{prefix}_needs_iban'] = True
     
+    def _parse_intermediary_array(self, basic_payment: Dict):
+        """Parse intermediary array for 9018 (duplicate removal) detection."""
+        party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
+        intm_data = party_info.get('IntermediaryBankInf') or party_info.get('IntermediaryBankInfo')
+        
+        if not intm_data:
+            self.features['intm_count'] = 0
+            self.features['intm_has_multiple'] = False
+            return
+        
+        if isinstance(intm_data, dict):
+            intm_list = [intm_data]
+        elif isinstance(intm_data, list):
+            intm_list = intm_data
+        else:
+            self.features['intm_count'] = 0
+            self.features['intm_has_multiple'] = False
+            return
+        
+        self.features['intm_count'] = len(intm_list)
+        self.features['intm_has_multiple'] = len(intm_list) > 1
+        
+        if len(intm_list) < 2:
+            return
+        
+        # Check for redundancy signals
+        adr_bank_ids = []
+        countries = []
+        bic_prefixes = []
+        
+        for entry in intm_list:
+            if not isinstance(entry, dict):
+                continue
+            
+            basic = (
+                entry.get('BasicPartyInf') or
+                entry.get('BasicPartyInfo') or
+                entry.get('BasicPartyBankInf') or
+                entry.get('BasicPartyBankInfo') or
+                entry
+            )
+            
+            if not isinstance(basic, dict):
+                continue
+            
+            # AdrBankID
+            adr_id = basic.get('AdrBankID')
+            if adr_id:
+                if isinstance(adr_id, dict):
+                    adr_id = adr_id.get('text') or adr_id.get('#text') or str(adr_id)
+                adr_bank_ids.append(str(adr_id))
+            
+            # Country
+            country = basic.get('Country')
+            if country:
+                countries.append(country.upper())
+            
+            # BIC prefix (first 6 chars)
+            id_info = basic.get('ID', {})
+            if isinstance(id_info, dict):
+                bic = id_info.get('text') or id_info.get('#text') or ''
+                if bic and len(bic) >= 6 and bic[:4].isalpha():
+                    bic_prefixes.append(bic[:6].upper())
+        
+        # Check for shared values (redundancy)
+        self.features['intm_entries_share_adr_bank_id'] = (
+            len(set(adr_bank_ids)) < len(adr_bank_ids) if len(adr_bank_ids) >= 2 else False
+        )
+        self.features['intm_entries_share_country'] = (
+            len(set(countries)) < len(countries) if len(countries) >= 2 else False
+        )
+        self.features['intm_entries_share_bic_prefix'] = (
+            len(set(bic_prefixes)) < len(bic_prefixes) if len(bic_prefixes) >= 2 else False
+        )
+        
+        # Combined redundancy signal (2+ signals = redundant)
+        redundancy_signals = sum([
+            self.features.get('intm_entries_share_adr_bank_id', False),
+            self.features.get('intm_entries_share_country', False),
+            self.features.get('intm_entries_share_bic_prefix', False),
+        ])
+        self.features['intm_has_redundant_info'] = redundancy_signals >= 2
+        
+        if self.debug and self.features['intm_has_redundant_info']:
+            print(f"[DEBUG] 9018: Multiple intermediaries with redundant info detected")
+            print(f"  AdrBankIDs: {adr_bank_ids}")
+            print(f"  Countries: {countries}")
+            print(f"  BIC prefixes: {bic_prefixes}")
+    
     def _parse_cross_party(self, basic_payment: Dict):
         """Parse cross-party validation features."""
+        # First parse intermediary array for 9018
+        self._parse_intermediary_array(basic_payment)
+        
         # 8022: WireKey BIC vs BNP IBAN country match
         party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
         
@@ -739,6 +843,22 @@ class ValidationEngine:
                 features_checked={'currency_valid': False}
             ))
         
+        # 9018: Duplicate party information removed (redundant intermediaries)
+        if f.get('intm_has_multiple') and f.get('intm_has_redundant_info'):
+            results.append(ValidationResult(
+                code='9018',
+                party=None,
+                fires=True,
+                reason=f"Multiple intermediaries ({f.get('intm_count', 0)}) with redundant info",
+                features_checked={
+                    'intm_has_multiple': True,
+                    'intm_has_redundant_info': True,
+                    'intm_entries_share_adr_bank_id': f.get('intm_entries_share_adr_bank_id'),
+                    'intm_entries_share_country': f.get('intm_entries_share_country'),
+                    'intm_entries_share_bic_prefix': f.get('intm_entries_share_bic_prefix'),
+                }
+            ))
+        
         return results
     
     def _check_party_codes(self, f: Dict, prefix: str, suffix: str) -> List[ValidationResult]:
@@ -854,6 +974,18 @@ class ValidationEngine:
                 }
             ))
         
+        # 9019: Party identifier cleaned of non-alphanumeric characters
+        if get('id_needs_cleaning'):
+            results.append(ValidationResult(
+                code='9019',
+                party=suffix,
+                fires=True,
+                reason=f"ID contains non-alphanumeric characters that will be cleaned",
+                features_checked={
+                    'id_needs_cleaning': True
+                }
+            ))
+        
         return results
 
 
@@ -861,8 +993,14 @@ class ValidationEngine:
 # RESPONSE PARSER
 # =============================================================================
 
-def extract_actual_codes(response: Dict, filter_8xxx: bool = True) -> Set[str]:
-    """Extract actual codes from ACE response."""
+def extract_actual_codes(response: Dict, filter_prefix: str = None) -> Set[str]:
+    """Extract actual codes from ACE response.
+    
+    Args:
+        response: ACE response dictionary
+        filter_prefix: If provided, only return codes starting with this prefix
+                      (e.g., '8' for 8XXX, '9' for 9XXX, None for all)
+    """
     codes = set()
     
     # Find AuditTrail
@@ -899,7 +1037,8 @@ def extract_actual_codes(response: Dict, filter_8xxx: bool = True) -> Set[str]:
         party = item.get('Party', '')
         
         if code:
-            if filter_8xxx and not code.startswith('8'):
+            # Filter by prefix if specified
+            if filter_prefix and not code.startswith(filter_prefix):
                 continue
             
             # Include party suffix if present
@@ -957,8 +1096,10 @@ class ACEValidator:
         results = self.engine.validate(features)
         predicted = {r.code_with_party for r in results if r.fires}
         
-        # Get actual codes (8XXX only)
-        actual_raw = extract_actual_codes(response, filter_8xxx=True)
+        # Get actual codes (both 8XXX and 9XXX that we can predict)
+        actual_8xxx = extract_actual_codes(response, filter_prefix='8')
+        actual_9xxx = extract_actual_codes(response, filter_prefix='9')
+        actual_raw = actual_8xxx | actual_9xxx
         
         # Separate predictable vs directory-dependent
         actual_predictable = set()
@@ -968,8 +1109,11 @@ class ACEValidator:
             base_code = code_str.split('_')[0]
             if base_code in DIRECTORY_DEPENDENT:
                 excluded.add(code_str)
-            else:
+            elif base_code in PREDICTABLE_CODES:
                 actual_predictable.add(code_str)
+            else:
+                # Code not in our prediction set - exclude
+                excluded.add(code_str)
         
         # Compare (using predictable codes only)
         correct = predicted & actual_predictable
