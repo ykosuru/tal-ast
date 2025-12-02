@@ -596,6 +596,16 @@ class FeatureExtractor:
             self.features[f'{prefix}_iban_checksum_valid'] = cksum_valid
             if len(iban) >= 2:
                 self.features[f'{prefix}_iban_country'] = iban[:2].upper()
+            
+            # Is this a real IBAN attempt? (starts with 2 letters, length >= 15)
+            # If not, it's garbage and should be treated as "no IBAN" for 8004 purposes
+            is_iban_attempt = (len(iban) >= 15 and 
+                              len(iban) <= 34 and 
+                              iban[:2].isalpha())
+            self.features[f'{prefix}_iban_is_attempt'] = is_iban_attempt
+            
+            if self.debug and not is_iban_attempt:
+                print(f"[DEBUG] {prefix} IBAN '{iban}' is not a real IBAN attempt (too short or bad format)")
         
         # Parse account info
         acct_info = basic.get('AcctIDInfo') or basic.get('AcctIDInf')
@@ -609,11 +619,21 @@ class FeatureExtractor:
                 
                 if acct_type == 'IBAN' and acct_value:
                     self.features[f'{prefix}_has_iban'] = True
+                    self.features[f'{prefix}_iban'] = acct_value
                     fmt_valid, cksum_valid = validate_iban(acct_value)
                     self.features[f'{prefix}_iban_valid_format'] = fmt_valid
                     self.features[f'{prefix}_iban_checksum_valid'] = cksum_valid
                     if len(acct_value) >= 2:
                         self.features[f'{prefix}_iban_country'] = acct_value[:2].upper()
+                    
+                    # Is this a real IBAN attempt?
+                    is_iban_attempt = (len(acct_value) >= 15 and 
+                                      len(acct_value) <= 34 and 
+                                      acct_value[:2].isalpha())
+                    self.features[f'{prefix}_iban_is_attempt'] = is_iban_attempt
+                    
+                    if self.debug and not is_iban_attempt:
+                        print(f"[DEBUG] {prefix} account IBAN '{acct_value}' is not a real IBAN attempt")
         
         # Parse AdrBankID (NCH/routing number)
         adr_bank_id = basic.get('AdrBankID')
@@ -744,8 +764,98 @@ class FeatureExtractor:
         # First parse intermediary array for 9018
         self._parse_intermediary_array(basic_payment)
         
-        # 8022: WireKey BIC vs BNP IBAN country match
         party_info = basic_payment.get('PartyInfo') or basic_payment.get('PartyInf') or {}
+        
+        # =====================================================================
+        # 9018: Cross-party duplicate detection
+        # 9018 fires when duplicate party info is removed, which can happen:
+        # 1. Multiple intermediaries with same info (checked in _parse_intermediary_array)
+        # 2. Intermediary Bank matches Beneficiary Bank
+        # 3. Any party has same BIC/routing as another party
+        # =====================================================================
+        
+        # Collect BICs and routing numbers from all parties
+        party_bics = {}  # party_type -> BIC
+        party_routing = {}  # party_type -> routing number
+        
+        # Get Beneficiary Bank info
+        bnf_bank_data = party_info.get('BeneficiaryBankInfo') or party_info.get('BeneficiaryBankInf')
+        if isinstance(bnf_bank_data, list):
+            bnf_bank_data = bnf_bank_data[0] if bnf_bank_data else {}
+        if isinstance(bnf_bank_data, dict):
+            basic = (bnf_bank_data.get('BasicPartyBankInf') or 
+                    bnf_bank_data.get('BasicPartyBankInfo') or
+                    bnf_bank_data.get('BasicPartyInf') or
+                    bnf_bank_data.get('BasicPartyInfo') or bnf_bank_data)
+            if isinstance(basic, dict):
+                bic = self._extract_bic_from_basic(basic)
+                routing = self._extract_routing_from_basic(basic)
+                if bic:
+                    party_bics['bnf_bank'] = bic
+                if routing:
+                    party_routing['bnf_bank'] = routing
+        
+        # Get Intermediary Bank info(s)
+        intm_data = party_info.get('IntermediaryBankInf') or party_info.get('IntermediaryBankInfo')
+        if intm_data:
+            if isinstance(intm_data, dict):
+                intm_list = [intm_data]
+            elif isinstance(intm_data, list):
+                intm_list = intm_data
+            else:
+                intm_list = []
+            
+            for i, entry in enumerate(intm_list):
+                if isinstance(entry, dict):
+                    basic = (entry.get('BasicPartyBankInf') or 
+                            entry.get('BasicPartyBankInfo') or
+                            entry.get('BasicPartyInf') or
+                            entry.get('BasicPartyInfo') or entry)
+                    if isinstance(basic, dict):
+                        bic = self._extract_bic_from_basic(basic)
+                        routing = self._extract_routing_from_basic(basic)
+                        if bic:
+                            party_bics[f'intm_{i}'] = bic
+                        if routing:
+                            party_routing[f'intm_{i}'] = routing
+        
+        # Check for cross-party duplicates
+        # If intermediary BIC matches beneficiary bank BIC, that's a duplicate
+        intm_matches_bnf_bank = False
+        for key, bic in party_bics.items():
+            if key.startswith('intm_') and 'bnf_bank' in party_bics:
+                if bic == party_bics['bnf_bank']:
+                    intm_matches_bnf_bank = True
+                    if self.debug:
+                        print(f"[DEBUG] 9018: Intermediary BIC '{bic}' matches Beneficiary Bank BIC")
+                    break
+        
+        self.features['intm_matches_bnf_bank'] = intm_matches_bnf_bank
+        
+        # Also check routing numbers
+        intm_routing_matches_bnf = False
+        for key, routing in party_routing.items():
+            if key.startswith('intm_') and 'bnf_bank' in party_routing:
+                if routing == party_routing['bnf_bank']:
+                    intm_routing_matches_bnf = True
+                    if self.debug:
+                        print(f"[DEBUG] 9018: Intermediary routing '{routing}' matches Beneficiary Bank routing")
+                    break
+        
+        self.features['intm_routing_matches_bnf_bank'] = intm_routing_matches_bnf
+        
+        # Update 9018 detection: fires if any duplicate condition is met
+        has_intm_redundancy = self.features.get('intm_has_redundant_info', False)
+        has_cross_party_dup = intm_matches_bnf_bank or intm_routing_matches_bnf
+        
+        self.features['has_duplicate_party_info'] = has_intm_redundancy or has_cross_party_dup
+        
+        if self.debug and has_cross_party_dup:
+            print(f"[DEBUG] 9018: Cross-party duplicate detected (intm=bnf_bank)")
+        
+        # =====================================================================
+        # 8022: WireKey BIC vs BNP IBAN country match (removed - now directory-dependent)
+        # =====================================================================
         
         cdt_data = party_info.get('CreditPartyInfo') or party_info.get('CreditPartyInf') or {}
         if isinstance(cdt_data, list):
@@ -773,11 +883,34 @@ class FeatureExtractor:
         # Get BNP IBAN country
         bnp_iban_country = self.features.get('bnp_iban_country')
         
-        # Compare
+        # Compare (stored for reference even though 8022 is now excluded)
         if wirekey_bic_country and bnp_iban_country:
             self.features['wirekey_bic_bnp_iban_match'] = (wirekey_bic_country == bnp_iban_country)
             if self.debug and wirekey_bic_country != bnp_iban_country:
                 print(f"[DEBUG] 8022: WireKey BIC country={wirekey_bic_country}, BNP IBAN country={bnp_iban_country}")
+    
+    def _extract_bic_from_basic(self, basic: Dict) -> Optional[str]:
+        """Extract BIC from a BasicParty structure."""
+        # Try ID field
+        id_info = basic.get('ID', {})
+        if isinstance(id_info, dict):
+            bic = id_info.get('text') or id_info.get('#text')
+            if bic and self._looks_like_bic(bic):
+                return bic.upper()
+        # Try direct BIC field
+        bic = basic.get('BIC') or basic.get('Bic')
+        if bic and self._looks_like_bic(bic):
+            return bic.upper()
+        return None
+    
+    def _extract_routing_from_basic(self, basic: Dict) -> Optional[str]:
+        """Extract routing/AdrBankID from a BasicParty structure."""
+        adr_id = basic.get('AdrBankID')
+        if adr_id:
+            if isinstance(adr_id, dict):
+                return adr_id.get('text') or adr_id.get('#text') or str(adr_id)
+            return str(adr_id)
+        return None
     
     def _looks_like_bic(self, s: str) -> bool:
         if not s or len(s) not in (8, 11):
@@ -866,19 +999,29 @@ class ValidationEngine:
                 features_checked={'currency_valid': False}
             ))
         
-        # 9018: Duplicate party information removed (redundant intermediaries)
-        if f.get('intm_has_multiple') and f.get('intm_has_redundant_info'):
+        # 9018: Duplicate party information removed
+        # Fires when: multiple intermediaries with shared info OR intermediary matches beneficiary bank
+        if f.get('has_duplicate_party_info'):
+            # Build reason based on what triggered it
+            reasons = []
+            if f.get('intm_has_multiple') and f.get('intm_has_redundant_info'):
+                reasons.append(f"Multiple intermediaries ({f.get('intm_count', 0)}) with redundant info")
+            if f.get('intm_matches_bnf_bank'):
+                reasons.append("Intermediary BIC matches Beneficiary Bank BIC")
+            if f.get('intm_routing_matches_bnf_bank'):
+                reasons.append("Intermediary routing matches Beneficiary Bank routing")
+            
             results.append(ValidationResult(
                 code='9018',
                 party=None,
                 fires=True,
-                reason=f"Multiple intermediaries ({f.get('intm_count', 0)}) with redundant info",
+                reason="; ".join(reasons) if reasons else "Duplicate party info detected",
                 features_checked={
-                    'intm_has_multiple': True,
-                    'intm_has_redundant_info': True,
-                    'intm_entries_share_adr_bank_id': f.get('intm_entries_share_adr_bank_id'),
-                    'intm_entries_share_country': f.get('intm_entries_share_country'),
-                    'intm_entries_share_bic_prefix': f.get('intm_entries_share_bic_prefix'),
+                    'has_duplicate_party_info': True,
+                    'intm_has_multiple': f.get('intm_has_multiple'),
+                    'intm_has_redundant_info': f.get('intm_has_redundant_info'),
+                    'intm_matches_bnf_bank': f.get('intm_matches_bnf_bank'),
+                    'intm_routing_matches_bnf_bank': f.get('intm_routing_matches_bnf_bank'),
                 }
             ))
         
@@ -896,16 +1039,27 @@ class ValidationEngine:
         # Our format-based validation produces too many false positives
         
         # 8004: IBAN cannot be derived (only for party accounts, not banks)
+        # Fires when: needs IBAN but either no IBAN present OR IBAN is garbage (not a real attempt)
         if suffix not in BANK_SUFFIXES:  # Banks don't need IBANs
-            if get('needs_iban') and not get('has_iban'):
+            needs_iban = get('needs_iban')
+            has_iban = get('has_iban')
+            iban_is_attempt = get('iban_is_attempt', False)
+            
+            # 8004 fires if: needs IBAN AND (no IBAN OR IBAN is garbage)
+            if needs_iban and (not has_iban or not iban_is_attempt):
+                iban_value = get('iban', '')
+                reason = "Party in IBAN country but no IBAN present"
+                if has_iban and not iban_is_attempt:
+                    reason = f"Party has garbage IBAN '{iban_value}' (not a valid IBAN attempt)"
                 results.append(ValidationResult(
                     code='8004',
                     party=suffix,
                     fires=True,
-                    reason=f"Party in IBAN country but no IBAN present",
+                    reason=reason,
                     features_checked={
                         'needs_iban': True,
-                        'has_iban': False
+                        'has_iban': has_iban,
+                        'iban_is_attempt': iban_is_attempt
                     }
                 ))
         
@@ -925,7 +1079,9 @@ class ValidationEngine:
             ))
         
         # 8894: Invalid IBAN
-        if get('has_iban'):
+        # Only fires if the IBAN is a real attempt (proper format structure)
+        # Garbage values like '"!3' trigger 8004 (no IBAN), not 8894 (invalid IBAN)
+        if get('has_iban') and get('iban_is_attempt'):
             fmt_valid = get('iban_valid_format', True)
             cksum_valid = get('iban_checksum_valid', True)
             if not fmt_valid or not cksum_valid:
@@ -936,6 +1092,7 @@ class ValidationEngine:
                     reason=f"IBAN invalid: format_valid={fmt_valid}, checksum_valid={cksum_valid}",
                     features_checked={
                         'has_iban': True,
+                        'iban_is_attempt': True,
                         'iban_valid_format': fmt_valid,
                         'iban_checksum_valid': cksum_valid
                     }
@@ -1361,18 +1518,26 @@ def main():
                     party_info.append(f"BIC(valid={valid})")
                 if features.get(f'{prefix}_has_iban'):
                     valid = features.get(f'{prefix}_iban_checksum_valid', '?')
-                    party_info.append(f"IBAN(valid={valid})")
+                    is_attempt = features.get(f'{prefix}_iban_is_attempt', '?')
+                    party_info.append(f"IBAN(valid={valid}, attempt={is_attempt})")
                 if features.get(f'{prefix}_has_nch'):
                     valid = features.get(f'{prefix}_fedaba_checksum_valid', '?')
                     party_info.append(f"NCH(valid={valid})")
+                if features.get(f'{prefix}_needs_iban'):
+                    party_info.append("NEEDS_IBAN")
                 if features.get(f'{prefix}_id_needs_cleaning'):
                     party_info.append("ID_DIRTY")
                 if party_info:
                     print(f"  {prefix}: {', '.join(party_info)}")
             
-            # Show intermediary info for 9018
-            if features.get('intm_has_multiple'):
-                print(f"  Intermediary: count={features.get('intm_count')}, redundant={features.get('intm_has_redundant_info')}")
+            # Show 9018 duplicate detection info
+            print(f"\n  9018 Detection:")
+            print(f"    intm_count={features.get('intm_count', 0)}")
+            print(f"    intm_has_multiple={features.get('intm_has_multiple', False)}")
+            print(f"    intm_has_redundant_info={features.get('intm_has_redundant_info', False)}")
+            print(f"    intm_matches_bnf_bank={features.get('intm_matches_bnf_bank', False)}")
+            print(f"    intm_routing_matches_bnf_bank={features.get('intm_routing_matches_bnf_bank', False)}")
+            print(f"    has_duplicate_party_info={features.get('has_duplicate_party_info', False)}")
     
     elif args.command == 'validate':
         path = Path(args.input)
