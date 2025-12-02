@@ -1021,16 +1021,21 @@ class ValidationEngine:
         if f.get('has_duplicate_party_info'):
             # Build reason based on what triggered it
             reasons = []
+            party = None
+            
             if f.get('intm_has_multiple') and f.get('intm_has_redundant_info'):
                 reasons.append(f"Multiple intermediaries ({f.get('intm_count', 0)}) with redundant info")
+                party = 'INTBNK'  # Tag to intermediary bank
             if f.get('intm_matches_bnf_bank'):
                 reasons.append("Intermediary BIC matches Beneficiary Bank BIC")
+                party = 'INTBNK'  # The intermediary is the duplicate
             if f.get('intm_routing_matches_bnf_bank'):
                 reasons.append("Intermediary routing matches Beneficiary Bank routing")
+                party = 'INTBNK'  # The intermediary is the duplicate
             
             results.append(ValidationResult(
                 code='9018',
-                party=None,
+                party=party,
                 fires=True,
                 reason="; ".join(reasons) if reasons else "Duplicate party info detected",
                 features_checked={
