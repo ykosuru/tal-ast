@@ -791,14 +791,25 @@ class DecisionTreeBuilder:
         return tree
     
     def build_all_trees(self, csv_path: str, max_depth: int = 5,
-                        min_samples: int = 10) -> Dict[str, str]:
-        """Build trees for all codes with sufficient samples."""
+                        min_samples: int = 10, code_prefix: str = None) -> Dict[str, str]:
+        """Build trees for all codes with sufficient samples.
+        
+        Args:
+            csv_path: Path to CSV file
+            max_depth: Maximum tree depth
+            min_samples: Minimum positive samples required
+            code_prefix: Only build trees for codes starting with this (e.g., '8' for 8xxx)
+        """
         rows, feature_cols, code_cols = self.load_csv(csv_path)
         
         results = {}
         
         for code_col in code_cols:
             code = code_col.replace('code_', '')
+            
+            # Filter by prefix if specified
+            if code_prefix and not code.startswith(code_prefix):
+                continue
             
             # Count positive samples
             positive = sum(1 for r in rows if int(r.get(code_col, 0)) == 1)
@@ -1046,6 +1057,8 @@ Examples:
                                help='Maximum tree depth')
     analyze_parser.add_argument('--min-samples', type=int, default=10,
                                help='Minimum samples to build tree')
+    analyze_parser.add_argument('--prefix', type=str, default=None,
+                               help='Only analyze codes starting with this (e.g., 8 for 8xxx)')
     
     # Explain command
     explain_parser = subparsers.add_parser('explain', help='Explain specific code')
@@ -1117,7 +1130,8 @@ Examples:
             return
         
         builder = DecisionTreeBuilder()
-        results = builder.build_all_trees(args.input, args.max_depth, args.min_samples)
+        results = builder.build_all_trees(args.input, args.max_depth, args.min_samples, 
+                                          code_prefix=args.prefix)
         
         # Save results
         output_dir = Path(args.output_dir)
