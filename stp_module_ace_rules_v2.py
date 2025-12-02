@@ -126,12 +126,37 @@ DIRECTORY_DEPENDENT = {
     '9485', '9486', '9961', '9985', '9986'
 }
 
-# Codes that are unpredictable
-SUPPRESSED = {'9999', '9490'}
+# Codes that are unpredictable (directory-dependent, schema-level, system config, etc.)
+SUPPRESSED = {
+    '8003',  # File name derivation - system config
+    '8034',  # Forced Debit - business rule
+    '8035',  # FCDA validation - directory
+    '8036',  # FCDA name matching - directory
+    '8464',  # Target Channel - routing config
+    '8465',  # Product code - product directory
+    '8472',  # Fee code - fee directory
+    '8851',  # Field size - schema validation
+    '8852',  # Attribute length - schema validation
+    '8853',  # Number format - schema validation
+    '8905',  # Hash mismatch - security check
+    '8906',  # Wrong flow - workflow routing
+    '9490',  # Fee Code Updated - fee directory
+    '9999',  # Field Repair - generic catch-all
+}
 
 # Global codes (not party-specific)
 GLOBAL_CODES = {'8007', '8023', '8024', '8025', '8026', '8027', '8028', 
                 '8029', '8033', '8124', '9018', '9024'}
+
+# Bank party types - these don't need IBANs (they need BICs)
+BANK_SUFFIXES = {'SNDBNK', 'INTBNK', 'BNFBNK'}
+
+# Party account types - these may need IBANs
+PARTY_SUFFIXES_ACCOUNT = {'ORGPTY', 'DBTPTY', 'CDTPTY', 'BNPPTY'}
+
+# Codes that only apply to party accounts, not banks
+# 8004 = IBAN cannot be derived - only relevant for party accounts
+PARTY_ONLY_CODES = {'8004', '8030'}
 
 
 # =============================================================================
@@ -197,6 +222,16 @@ class ACERulesEngine:
                 code=code,
                 status='suppressed',
                 reason=f"{code} is unpredictable (generic/directory-only)",
+                party=party_suffix
+            )
+        
+        # Skip bank parties for party-only codes (8004, 8030)
+        # Banks need BICs, not IBANs - IBAN requirements only apply to party accounts
+        if code in PARTY_ONLY_CODES and party_suffix in BANK_SUFFIXES:
+            return CodeResult(
+                code=code,
+                status='cannot_fire',
+                reason=f"{code} only applies to party accounts, not banks",
                 party=party_suffix
             )
         
