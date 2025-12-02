@@ -128,6 +128,69 @@ def validate_iban(iban: str) -> Tuple[bool, bool]:
     return format_valid, checksum_valid
 
 
+def validate_iban_bban(iban: str) -> bool:
+    """
+    Validate IBAN's BBAN structure for countries with known rules.
+    Returns True if BBAN structure is valid or unknown, False if definitely invalid.
+    
+    This catches IBANs that pass mod-97 but have invalid internal structure.
+    """
+    if not iban:
+        return False
+    
+    iban = iban.upper().replace(' ', '').replace('-', '')
+    if len(iban) < 5:
+        return False
+    
+    country = iban[:2]
+    bban = iban[4:]
+    
+    # Finnish BBAN validation
+    # Format: BBB (3-digit bank code, 0-padded) + AAAAAAAAAAA (11-digit account)
+    # Valid bank codes: 
+    #   001-009 (Nordea group), 031, 033, 034, 036-039 (various),
+    #   4xx (OP Group), 5xx (various), 6xx (Ålandsbanken etc),
+    #   7xx (various), 8xx (Swedbank etc)
+    if country == 'FI':
+        if len(bban) != 14:
+            return False
+        if not bban.isdigit():
+            return False
+        
+        bank_code = bban[0:3]  # 3-digit bank code
+        
+        # Valid Finnish bank code ranges
+        valid_bank_codes = set()
+        # Nordea group: 001-009
+        for i in range(1, 10):
+            valid_bank_codes.add(f'{i:03d}')
+        # Handelsbanken, SEB, Danske, etc: 031, 033, 034, 036-039
+        valid_bank_codes.update(['031', '033', '034', '036', '037', '038', '039'])
+        # OP Group: 400-499
+        for i in range(400, 500):
+            valid_bank_codes.add(f'{i:03d}')
+        # 500-599 (various)
+        for i in range(500, 600):
+            valid_bank_codes.add(f'{i:03d}')
+        # 600-699 (Ålandsbanken etc)
+        for i in range(600, 700):
+            valid_bank_codes.add(f'{i:03d}')
+        # 700-799 (various)
+        for i in range(700, 800):
+            valid_bank_codes.add(f'{i:03d}')
+        # 800-899 (Swedbank etc)
+        for i in range(800, 900):
+            valid_bank_codes.add(f'{i:03d}')
+        
+        if bank_code not in valid_bank_codes:
+            return False
+        
+        return True
+    
+    # For other countries, assume valid (we don't have rules)
+    return True
+
+
 def validate_fedaba(aba: str) -> Tuple[bool, bool]:
     """
     Validate US ABA routing number (FEDABA).
@@ -313,6 +376,7 @@ class PartyInfo:
     iban_country: Optional[str] = None  # Country code from IBAN (first 2 chars)
     iban_valid_format: bool = False  # Is IBAN format valid?
     iban_checksum_valid: bool = False  # Does IBAN pass mod-97 check?
+    iban_bban_valid: bool = False  # Is IBAN's BBAN structure valid?
     bic_iban_country_match: Optional[bool] = None  # Do BIC and IBAN countries match?
     bic_party_country_match: Optional[bool] = None  # Does BIC country match party country?
     # Account identifier types detected
@@ -1092,6 +1156,8 @@ class IFMLParser:
                 party.iban_country = party.account_value[0:2].upper()
             # Validate IBAN format and checksum
             party.iban_valid_format, party.iban_checksum_valid = validate_iban(party.account_value)
+            # Validate BBAN structure (catches IBANs with valid checksum but invalid bank code)
+            party.iban_bban_valid = validate_iban_bban(party.account_value)
         
         # Detect account type (CLABE, FEDABA, etc.) and get length
         if party.account_value:
@@ -1508,6 +1574,7 @@ class IFMLParser:
                 result[f'{prefix}_iban_country'] = party.iban_country
                 result[f'{prefix}_iban_valid_format'] = party.iban_valid_format
                 result[f'{prefix}_iban_checksum_valid'] = party.iban_checksum_valid
+                result[f'{prefix}_iban_bban_valid'] = party.iban_bban_valid
                 result[f'{prefix}_bic_iban_match'] = party.bic_iban_country_match
                 result[f'{prefix}_bic_party_country_match'] = party.bic_party_country_match
                 result[f'{prefix}_is_clabe'] = party.is_clabe
@@ -1581,6 +1648,7 @@ class IFMLParser:
                 result[f'{prefix}_iban_country'] = None
                 result[f'{prefix}_iban_valid_format'] = False
                 result[f'{prefix}_iban_checksum_valid'] = False
+                result[f'{prefix}_iban_bban_valid'] = False
                 result[f'{prefix}_bic_iban_match'] = None
                 result[f'{prefix}_bic_party_country_match'] = None
                 result[f'{prefix}_is_clabe'] = False
