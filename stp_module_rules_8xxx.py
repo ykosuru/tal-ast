@@ -849,15 +849,25 @@ class FeatureExtractor:
         
         self.features['intm_matches_bnf_bank'] = intm_matches_bnf_bank
         
-        # Also check routing numbers
+        # Also check routing numbers - but only if they're valid 9-digit ABA numbers
         intm_routing_matches_bnf = False
         for key, routing in party_routing.items():
             if key.startswith('intm_') and 'bnf_bank' in party_routing:
-                if routing == party_routing['bnf_bank']:
+                bnf_routing = party_routing['bnf_bank']
+                # Only compare if both are valid 9-digit routing numbers
+                if (routing and bnf_routing and 
+                    len(routing) == 9 and routing.isdigit() and
+                    len(bnf_routing) == 9 and bnf_routing.isdigit() and
+                    routing == bnf_routing):
                     intm_routing_matches_bnf = True
                     if self.debug:
                         print(f"[DEBUG] 9018: Intermediary routing '{routing}' matches Beneficiary Bank routing")
                     break
+                elif self.debug and routing and 'bnf_bank' in party_routing:
+                    # Debug: show why we're NOT matching
+                    bnf_routing = party_routing.get('bnf_bank', '')
+                    if routing == bnf_routing and (len(routing) != 9 or not routing.isdigit()):
+                        print(f"[DEBUG] 9018: Skipping routing match '{routing}' - not a valid 9-digit ABA")
         
         self.features['intm_routing_matches_bnf_bank'] = intm_routing_matches_bnf
         
