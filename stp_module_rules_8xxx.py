@@ -935,20 +935,25 @@ class FeatureExtractor:
             if cross_party_dup_detected:
                 break
         
-        # Check routing duplicates across all parties (including short IDs like '121')
-        # ACE seems to compare these even if not valid ABA routing numbers
+        # Check routing duplicates - ONLY for valid 9-digit ABA routing numbers
+        # Short IDs like '121' appear in many payments but ACE doesn't always treat as duplicates
         if not cross_party_dup_detected:
             routing_parties = list(party_routing.keys())
             for i, p1 in enumerate(routing_parties):
                 for p2 in routing_parties[i+1:]:
                     r1, r2 = party_routing[p1], party_routing[p2]
-                    if r1 and r2 and r1 == r2:
+                    # Only match if BOTH are valid 9-digit routing numbers
+                    if (r1 and r2 and r1 == r2 and
+                        len(r1) == 9 and r1.isdigit() and
+                        len(r2) == 9 and r2.isdigit()):
                         cross_party_dup_detected = True
                         dup_party1, dup_party2 = p1, p2
                         dup_type = 'routing'
                         if self.debug:
                             print(f"[DEBUG] 9018: Routing duplicate detected: {p1} and {p2} both have routing '{r1}'")
                         break
+                    elif self.debug and r1 and r2 and r1 == r2:
+                        print(f"[DEBUG] 9018: Skipping routing match '{r1}' ({p1}={p2}) - not valid 9-digit ABA")
                 if cross_party_dup_detected:
                     break
         
