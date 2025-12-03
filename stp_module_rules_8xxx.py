@@ -837,6 +837,55 @@ class FeatureExtractor:
                 if routing:
                     party_routing['bnf_bank'] = routing
         
+        # Get Sending Bank info
+        snd_bank_data = party_info.get('SendingBankInf') or party_info.get('SendingBankInfo')
+        if isinstance(snd_bank_data, list):
+            snd_bank_data = snd_bank_data[0] if snd_bank_data else {}
+        if isinstance(snd_bank_data, dict):
+            basic = (snd_bank_data.get('BasicPartyBankInf') or 
+                    snd_bank_data.get('BasicPartyBankInfo') or
+                    snd_bank_data.get('BasicPartyInf') or
+                    snd_bank_data.get('BasicPartyInfo') or snd_bank_data)
+            if isinstance(basic, dict):
+                bic = self._extract_bic_from_basic(basic)
+                routing = self._extract_routing_from_basic(basic)
+                if bic:
+                    party_bics['snd_bank'] = bic
+                if routing:
+                    party_routing['snd_bank'] = routing
+        
+        # Get Debit Party's bank info (AdrBankID)
+        dbt_data = party_info.get('DebitPartyInf') or party_info.get('DebitPartyInfo')
+        if isinstance(dbt_data, list):
+            dbt_data = dbt_data[0] if dbt_data else {}
+        if isinstance(dbt_data, dict):
+            acct_info = dbt_data.get('AccountPartyInf') or dbt_data.get('AccountPartyInfo') or dbt_data
+            if isinstance(acct_info, dict):
+                adr_bank_id = acct_info.get('AdrBankID')
+                if adr_bank_id:
+                    if isinstance(adr_bank_id, dict):
+                        adr_bank_id = adr_bank_id.get('text') or adr_bank_id.get('#text') or ''
+                    party_routing['dbt_bank'] = str(adr_bank_id)
+        
+        # Get Credit Party's bank info (from WireKey or AdrBankID)
+        cdt_data = party_info.get('CreditPartyInf') or party_info.get('CreditPartyInfo')
+        if isinstance(cdt_data, list):
+            cdt_data = cdt_data[0] if cdt_data else {}
+        if isinstance(cdt_data, dict):
+            acct_info = cdt_data.get('AccountPartyInf') or cdt_data.get('AccountPartyInfo') or cdt_data
+            if isinstance(acct_info, dict):
+                # Check WireKey for BIC
+                wirekey = acct_info.get('WireKey')
+                if wirekey and isinstance(wirekey, dict):
+                    wk_acct = wirekey.get('AcctIDInf') or wirekey.get('AcctIDInfo')
+                    if wk_acct and isinstance(wk_acct, dict):
+                        wk_id = wk_acct.get('ID')
+                        if wk_id and isinstance(wk_id, dict):
+                            wk_type = (wk_id.get('@Type') or wk_id.get('Type') or '').upper()
+                            wk_text = wk_id.get('#text') or wk_id.get('text') or ''
+                            if wk_type in ['S', 'SWIFT', 'BIC'] and wk_text:
+                                party_bics['cdt_wirekey'] = wk_text
+        
         # Get Intermediary Bank info(s)
         intm_data = party_info.get('IntermediaryBankInf') or party_info.get('IntermediaryBankInfo')
         if intm_data:
@@ -866,58 +915,67 @@ class FeatureExtractor:
             print(f"[DEBUG] 9018 Party BICs found: {party_bics if party_bics else 'None'}")
             print(f"[DEBUG] 9018 Party routing found: {party_routing if party_routing else 'None'}")
         
-        # Check for cross-party duplicates
-        # If intermediary BIC matches beneficiary bank BIC, that's a duplicate
-        intm_matches_bnf_bank = False
-        for key, bic in party_bics.items():
-            if key.startswith('intm_') and 'bnf_bank' in party_bics:
-                if bic == party_bics['bnf_bank']:
-                    intm_matches_bnf_bank = True
+        # Check for cross-party duplicates - compare ALL party pairs
+        cross_party_dup_detected = False
+        dup_party1 = None
+        dup_party2 = None
+        dup_type = None  # 'bic' or 'routing'
+        
+        # Check BIC duplicates across all parties
+        bic_parties = list(party_bics.keys())
+        for i, p1 in enumerate(bic_parties):
+            for p2 in bic_parties[i+1:]:
+                if party_bics[p1] == party_bics[p2]:
+                    cross_party_dup_detected = True
+                    dup_party1, dup_party2 = p1, p2
+                    dup_type = 'bic'
                     if self.debug:
-                        print(f"[DEBUG] 9018: Intermediary BIC '{bic}' matches Beneficiary Bank BIC")
+                        print(f"[DEBUG] 9018: BIC duplicate detected: {p1} and {p2} both have BIC '{party_bics[p1]}'")
+                    break
+            if cross_party_dup_detected:
+                break
+        
+        # Check routing duplicates across all parties (including short IDs like '121')
+        # ACE seems to compare these even if not valid ABA routing numbers
+        if not cross_party_dup_detected:
+            routing_parties = list(party_routing.keys())
+            for i, p1 in enumerate(routing_parties):
+                for p2 in routing_parties[i+1:]:
+                    r1, r2 = party_routing[p1], party_routing[p2]
+                    if r1 and r2 and r1 == r2:
+                        cross_party_dup_detected = True
+                        dup_party1, dup_party2 = p1, p2
+                        dup_type = 'routing'
+                        if self.debug:
+                            print(f"[DEBUG] 9018: Routing duplicate detected: {p1} and {p2} both have routing '{r1}'")
+                        break
+                if cross_party_dup_detected:
                     break
         
-        self.features['intm_matches_bnf_bank'] = intm_matches_bnf_bank
-        
-        # Also check routing numbers - but only if they're valid 9-digit ABA numbers
-        intm_routing_matches_bnf = False
-        for key, routing in party_routing.items():
-            if key.startswith('intm_') and 'bnf_bank' in party_routing:
-                bnf_routing = party_routing['bnf_bank']
-                # Only compare if both are valid 9-digit routing numbers
-                if (routing and bnf_routing and 
-                    len(routing) == 9 and routing.isdigit() and
-                    len(bnf_routing) == 9 and bnf_routing.isdigit() and
-                    routing == bnf_routing):
-                    intm_routing_matches_bnf = True
-                    if self.debug:
-                        print(f"[DEBUG] 9018: Intermediary routing '{routing}' matches Beneficiary Bank routing")
-                    break
-                elif self.debug and routing and 'bnf_bank' in party_routing:
-                    # Debug: show why we're NOT matching
-                    bnf_routing = party_routing.get('bnf_bank', '')
-                    if routing == bnf_routing and (len(routing) != 9 or not routing.isdigit()):
-                        print(f"[DEBUG] 9018: Skipping routing match '{routing}' - not a valid 9-digit ABA")
-        
-        self.features['intm_routing_matches_bnf_bank'] = intm_routing_matches_bnf
+        # Store for backward compatibility
+        self.features['intm_matches_bnf_bank'] = cross_party_dup_detected and 'intm' in str(dup_party1) + str(dup_party2)
+        self.features['intm_routing_matches_bnf_bank'] = cross_party_dup_detected and dup_type == 'routing'
+        self.features['cross_party_dup_detected'] = cross_party_dup_detected
+        self.features['cross_party_dup_parties'] = (dup_party1, dup_party2) if cross_party_dup_detected else None
+        self.features['cross_party_dup_type'] = dup_type
         
         # Update 9018 detection: fires if any duplicate condition is met
         has_intm_redundancy = self.features.get('intm_has_redundant_info', False)
-        has_cross_party_dup = intm_matches_bnf_bank or intm_routing_matches_bnf
         
-        self.features['has_duplicate_party_info'] = has_intm_redundancy or has_cross_party_dup
+        self.features['has_duplicate_party_info'] = has_intm_redundancy or cross_party_dup_detected
         
-        if self.debug and has_cross_party_dup:
-            print(f"[DEBUG] 9018: Cross-party duplicate detected (intm=bnf_bank)")
+        if self.debug and cross_party_dup_detected:
+            print(f"[DEBUG] 9018: Cross-party duplicate detected ({dup_party1}={dup_party2})")
         
         # =====================================================================
         # WARNING: Potential directory-derived 9018
         # If one party has a BIC and another doesn't, ACE may derive the missing
         # BIC from directory lookup, potentially creating a duplicate we can't predict
         # =====================================================================
-        if self.debug and not has_cross_party_dup:
+        if self.debug and not cross_party_dup_detected:
             intm_bics = [bic for key, bic in party_bics.items() if key.startswith('intm_')]
             bnf_bank_bic = party_bics.get('bnf_bank')
+            has_intm = any(k.startswith('intm') for k in party_bics.keys()) or any(k.startswith('intm') for k in party_routing.keys())
             
             # Case 1: Intermediary has BIC, BeneficiaryBank doesn't
             if intm_bics and not bnf_bank_bic:
@@ -927,7 +985,7 @@ class FeatureExtractor:
                 print(f"[DEBUG]   -> We CANNOT predict this without directory access")
             
             # Case 2: BeneficiaryBank has BIC, Intermediary doesn't
-            if bnf_bank_bic and not intm_bics and intm_data:
+            if bnf_bank_bic and not intm_bics and has_intm:
                 print(f"[DEBUG] 9018 WARNING: BeneficiaryBank has BIC {bnf_bank_bic}, but IntermediaryBank has NO BIC")
                 print(f"[DEBUG]   -> ACE may derive IntermediaryBank BIC from directory lookup")
                 print(f"[DEBUG]   -> If derived BIC matches BeneficiaryBank, 9018_INTBNK will fire")
@@ -1080,7 +1138,7 @@ class ValidationEngine:
             ))
         
         # 9018: Duplicate party information removed
-        # Fires when: multiple intermediaries with shared info OR intermediary matches beneficiary bank
+        # Fires when: multiple intermediaries with shared info OR any cross-party duplicate
         if f.get('has_duplicate_party_info'):
             # Build reason based on what triggered it
             reasons = []
@@ -1088,13 +1146,32 @@ class ValidationEngine:
             
             if f.get('intm_has_multiple') and f.get('intm_has_redundant_info'):
                 reasons.append(f"Multiple intermediaries ({f.get('intm_count', 0)}) with redundant info")
-                party = 'INTBNK'  # Tag to intermediary bank
-            if f.get('intm_matches_bnf_bank'):
-                reasons.append("Intermediary BIC matches Beneficiary Bank BIC")
-                party = 'INTBNK'  # The intermediary is the duplicate
-            if f.get('intm_routing_matches_bnf_bank'):
-                reasons.append("Intermediary routing matches Beneficiary Bank routing")
-                party = 'INTBNK'  # The intermediary is the duplicate
+                party = 'INTBNK'
+            
+            if f.get('cross_party_dup_detected'):
+                dup_parties = f.get('cross_party_dup_parties', (None, None))
+                dup_type = f.get('cross_party_dup_type', 'unknown')
+                if dup_parties[0] and dup_parties[1]:
+                    reasons.append(f"Cross-party {dup_type} duplicate: {dup_parties[0]} = {dup_parties[1]}")
+                    # Determine party suffix - ACE typically tags the "receiving" party
+                    # Map internal names to suffixes
+                    party_map = {
+                        'bnf_bank': 'BNFBNK',
+                        'snd_bank': 'SNDBNK', 
+                        'dbt_bank': 'DBTPTY',
+                        'cdt_wirekey': 'CDTPTY',
+                        'intm_0': 'INTBNK',
+                        'intm_1': 'INTBNK',
+                    }
+                    # Prefer BNFBNK, then INTBNK as the tagged party
+                    for p in [dup_parties[0], dup_parties[1]]:
+                        if 'bnf' in str(p):
+                            party = 'BNFBNK'
+                            break
+                        elif 'intm' in str(p):
+                            party = 'INTBNK'
+                    if not party:
+                        party = party_map.get(dup_parties[1], party_map.get(dup_parties[0], 'INTBNK'))
             
             results.append(ValidationResult(
                 code='9018',
@@ -1105,8 +1182,8 @@ class ValidationEngine:
                     'has_duplicate_party_info': True,
                     'intm_has_multiple': f.get('intm_has_multiple'),
                     'intm_has_redundant_info': f.get('intm_has_redundant_info'),
-                    'intm_matches_bnf_bank': f.get('intm_matches_bnf_bank'),
-                    'intm_routing_matches_bnf_bank': f.get('intm_routing_matches_bnf_bank'),
+                    'cross_party_dup_detected': f.get('cross_party_dup_detected'),
+                    'cross_party_dup_parties': f.get('cross_party_dup_parties'),
                 }
             ))
         
