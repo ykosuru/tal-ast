@@ -1144,34 +1144,39 @@ class ValidationEngine:
             reasons = []
             party = None
             
+            # PRIORITY 1: Intermediary redundancy (multiple intermediaries with same info)
+            # This takes precedence over cross-party duplicates
             if f.get('intm_has_multiple') and f.get('intm_has_redundant_info'):
                 reasons.append(f"Multiple intermediaries ({f.get('intm_count', 0)}) with redundant info")
                 party = 'INTBNK'
             
+            # PRIORITY 2: Cross-party duplicates (only if no intermediary redundancy)
             if f.get('cross_party_dup_detected'):
                 dup_parties = f.get('cross_party_dup_parties', (None, None))
                 dup_type = f.get('cross_party_dup_type', 'unknown')
                 if dup_parties[0] and dup_parties[1]:
                     reasons.append(f"Cross-party {dup_type} duplicate: {dup_parties[0]} = {dup_parties[1]}")
-                    # Determine party suffix - ACE typically tags the "receiving" party
-                    # Map internal names to suffixes
-                    party_map = {
-                        'bnf_bank': 'BNFBNK',
-                        'snd_bank': 'SNDBNK', 
-                        'dbt_bank': 'DBTPTY',
-                        'cdt_wirekey': 'CDTPTY',
-                        'intm_0': 'INTBNK',
-                        'intm_1': 'INTBNK',
-                    }
-                    # Prefer BNFBNK, then INTBNK as the tagged party
-                    for p in [dup_parties[0], dup_parties[1]]:
-                        if 'bnf' in str(p):
-                            party = 'BNFBNK'
-                            break
-                        elif 'intm' in str(p):
-                            party = 'INTBNK'
-                    if not party:
-                        party = party_map.get(dup_parties[1], party_map.get(dup_parties[0], 'INTBNK'))
+                    
+                    # Only determine party from cross-party if not already set by intermediary redundancy
+                    if party is None:
+                        # Map internal names to suffixes
+                        party_map = {
+                            'bnf_bank': 'BNFBNK',
+                            'snd_bank': 'SNDBNK', 
+                            'dbt_bank': 'DBTPTY',
+                            'cdt_wirekey': 'CDTPTY',
+                            'intm_0': 'INTBNK',
+                            'intm_1': 'INTBNK',
+                        }
+                        # Prefer BNFBNK, then INTBNK as the tagged party
+                        for p in [dup_parties[0], dup_parties[1]]:
+                            if 'bnf' in str(p):
+                                party = 'BNFBNK'
+                                break
+                            elif 'intm' in str(p):
+                                party = 'INTBNK'
+                        if not party:
+                            party = party_map.get(dup_parties[1], party_map.get(dup_parties[0], 'INTBNK'))
             
             results.append(ValidationResult(
                 code='9018',
