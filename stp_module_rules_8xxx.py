@@ -13,15 +13,17 @@ This tool:
 4. Reports accuracy metrics (precision, recall, F1)
 
 PREDICTABLE CODES (deterministic validation):
-- 8004: IBAN cannot be derived (needs IBAN but missing)
+- 8004: IBAN cannot be derived (needs IBAN but missing/invalid length)
 - 8006: Invalid country code
 - 8007: Amount decimal places exceeded
 - 8124: Invalid currency code
-- 8852: Attribute length violation
-- 8894: Invalid IBAN (format or checksum)
-- 8895: Invalid NCH/FEDABA (checksum)
-- 8898: IBAN checksum failed
+- 8852: Attribute length violation (name, account, address)
+- 8894: Invalid IBAN (correct length but bad checksum)
+- 8895: Invalid NCH/FEDABA (checksum failed)
 - 9018: Duplicate party removed (redundant intermediaries)
+
+REMOVED CODES (ACE doesn't use):
+- 8898: IBAN checksum failed - ACE uses 8894 instead
 
 DIRECTORY-DEPENDENT CODES (excluded from prediction):
 - 8001: Invalid BIC - requires BICPlus directory
@@ -42,7 +44,7 @@ Usage:
     python ace_8xxx_validator.py accuracy -i /path/to/data
 
 Author: ACE Pelican Team
-Version: 1.1 (December 2025) - Removed directory-dependent codes
+Version: 1.2 (December 2025) - Fixed 8852, 8894, 8895; removed 8898
 ================================================================================
 """
 
@@ -87,7 +89,7 @@ PREDICTABLE_CODES = {
     '8852',  # Attribute length violation
     '8894',  # Invalid IBAN (format or checksum)
     '8895',  # Invalid NCH (FEDABA checksum)
-    '8898',  # IBAN checksum failed
+    # NOTE: 8898 removed - ACE never fires this code (uses 8894 instead)
     # 9XXX Repair Codes (structurally detectable)
     '9018',  # Duplicate party removed (multiple redundant intermediaries)
 }
@@ -542,6 +544,29 @@ class FeatureExtractor:
         
         if not isinstance(basic, dict):
             return
+        
+        # Extract name for 8852 length check
+        name = basic.get('Name') or basic.get('PartyName') or party_data.get('Name') or ''
+        if isinstance(name, dict):
+            name = name.get('text') or name.get('#text') or ''
+        if name:
+            self.features[f'{prefix}_name'] = name
+            self.features[f'{prefix}_name_length'] = len(name)
+        
+        # Extract address lines for 8852 length check
+        address_inf = basic.get('AddressInf') or basic.get('AddressInfo') or []
+        if isinstance(address_inf, dict):
+            address_inf = [address_inf]
+        if isinstance(address_inf, list):
+            for addr in address_inf:
+                if isinstance(addr, dict):
+                    addr_text = addr.get('text') or addr.get('#text') or ''
+                    if addr_text and len(addr_text) > 35:
+                        self.features[f'{prefix}_has_long_address'] = True
+                        self.features[f'{prefix}_max_address_length'] = max(
+                            self.features.get(f'{prefix}_max_address_length', 0),
+                            len(addr_text)
+                        )
         
         # Parse ID field
         id_field = basic.get('ID')
@@ -1157,13 +1182,56 @@ class ValidationEngine:
                 }
             ))
         
+        # 8852: Attribute length violation
+        # Check common field length limits
+        field_limits = {
+            'name': 140,           # Party name max length
+            'address_line': 35,    # Address line max length  
+            'account': 34,         # Account number max length (IBAN max)
+            'reference': 35,       # Reference field max length
+        }
+        
+        # Check name length
+        name = get('name', '')
+        if name and len(name) > field_limits['name']:
+            results.append(ValidationResult(
+                code='8852',
+                party=suffix,
+                fires=True,
+                reason=f"Name exceeds {field_limits['name']} chars (len={len(name)})",
+                features_checked={'name_length': len(name)}
+            ))
+        
+        # Check account length
+        account = get('account', '') or get('iban', '')
+        if account and len(account) > field_limits['account']:
+            results.append(ValidationResult(
+                code='8852',
+                party=suffix,
+                fires=True,
+                reason=f"Account exceeds {field_limits['account']} chars (len={len(account)})",
+                features_checked={'account_length': len(account)}
+            ))
+        
+        # Check address line length
+        if get('has_long_address'):
+            max_addr_len = get('max_address_length', 0)
+            results.append(ValidationResult(
+                code='8852',
+                party=suffix,
+                fires=True,
+                reason=f"Address line exceeds {field_limits['address_line']} chars (max={max_addr_len})",
+                features_checked={'max_address_length': max_addr_len}
+            ))
+        
         # 8894: Invalid IBAN
-        # ACE Logic: Only fires if IBAN has CORRECT LENGTH but bad checksum
-        # If IBAN has wrong length (format invalid), ACE returns 8004 instead
+        # ACE fires 8894 when IBAN exists but is invalid (format OR checksum)
+        # Note: If IBAN is too short/garbage, 8004 fires instead
         if get('has_iban') and get('iban_is_attempt'):
             fmt_valid = get('iban_valid_format', True)
             cksum_valid = get('iban_checksum_valid', True)
-            # Only fire 8894 if format is valid but checksum fails
+            # Fire 8894 if format is valid but checksum fails
+            # (wrong length already handled by 8004)
             if fmt_valid and not cksum_valid:
                 results.append(ValidationResult(
                     code='8894',
@@ -1179,35 +1247,24 @@ class ValidationEngine:
                 ))
         
         # 8895: Invalid NCH (FEDABA checksum)
-        if get('has_nch') and get('nch_validation_applicable'):
+        # Relaxed check - fire if we detect an NCH-like value that fails validation
+        if get('has_nch'):
             nch_valid = get('nch_valid', True)
             fedaba_valid = get('fedaba_checksum_valid', True)
-            if not nch_valid or not fedaba_valid:
+            if not fedaba_valid:  # Only check checksum, not format
                 results.append(ValidationResult(
                     code='8895',
                     party=suffix,
                     fires=True,
-                    reason=f"NCH invalid: format_valid={nch_valid}, checksum_valid={fedaba_valid}",
+                    reason=f"NCH/ABA checksum failed",
                     features_checked={
                         'has_nch': True,
-                        'nch_valid': nch_valid,
-                        'fedaba_checksum_valid': fedaba_valid
+                        'fedaba_checksum_valid': False
                     }
                 ))
         
-        # 8898: IBAN checksum failed (more specific than 8894)
-        if get('has_iban') and get('iban_valid_format') and get('iban_checksum_valid') is False:
-            results.append(ValidationResult(
-                code='8898',
-                party=suffix,
-                fires=True,
-                reason=f"IBAN checksum validation failed (mod-97)",
-                features_checked={
-                    'has_iban': True,
-                    'iban_valid_format': True,
-                    'iban_checksum_valid': False
-                }
-            ))
+        # NOTE: 8898 removed - ACE never fires this code (Actual=0 in dataset)
+        # 8898 was supposed to be "IBAN checksum failed" but ACE uses 8894 instead
         
         # NOTE: 9019 (ID cleaned) removed - context-dependent rules, not just char presence
         
