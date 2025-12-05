@@ -190,6 +190,13 @@ def check_8894_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         reasons.append("BNF: missing both IBAN and BIC")
         matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 15: BNF has both IBAN and BIC - ACE validates the pair
+    # -------------------------------------------------------------------------
+    if bnf_has_iban and bnf_has_bic:
+        reasons.append("BNF: has both IBAN and BIC (ACE validates pair)")
+        matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
