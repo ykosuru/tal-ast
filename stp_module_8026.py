@@ -21,10 +21,10 @@ from data_pipeline import IFMLDataPipeline
 def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
     Check if 8026 should fire based on RF-extracted rules.
-    8026 fires when there's a BIC/IBAN country mismatch or IBAN derivation issue.
+    8026 fires when there's an IBAN derivation/validation issue.
     
     RF Patterns:
-    - needs_iban_count = True (75%)
+    - needs_iban_count = True (75%) - MAIN TRIGGER
     - bnf_bic_party_country_match = False (75%)
     
     Returns (should_fire, reasons)
@@ -39,22 +39,31 @@ def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
     matches = 0
     
     # -------------------------------------------------------------------------
-    # Rule 1: BIC/IBAN country mismatch (direct from RF)
-    # bnf_bic_party_country_match = False
+    # Rule 1: Party needs IBAN - MAIN TRIGGER from RF
+    # 8026 fires when IBAN derivation/validation is triggered
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
+        needs_iban = get(f'{prefix}needs_iban', False)
+        if needs_iban:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: needs_iban=True (IBAN derivation triggered)")
+            matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 2: BIC/IBAN country mismatch
     # -------------------------------------------------------------------------
     for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
         bic_party_country_match = get(f'{prefix}bic_party_country_match')
         has_bic = get(f'{prefix}has_bic', False)
         has_iban = get(f'{prefix}has_iban', False)
         
-        # If has both BIC and IBAN but countries don't match
         if has_bic and has_iban and bic_party_country_match == False:
             party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: bic_party_country_match=False (BIC/IBAN country mismatch)")
+            reasons.append(f"{party}: bic_party_country_match=False")
             matches += 1
     
     # -------------------------------------------------------------------------
-    # Rule 2: BIC/IBAN country mismatch using bic_iban_country_match
+    # Rule 3: BIC/IBAN country mismatch using bic_iban_match
     # -------------------------------------------------------------------------
     for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
         bic_iban_match = get(f'{prefix}bic_iban_match')
@@ -63,61 +72,11 @@ def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         
         if has_bic and has_iban and bic_iban_match == False:
             party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: bic_iban_match=False (BIC/IBAN country mismatch)")
+            reasons.append(f"{party}: bic_iban_match=False")
             matches += 1
     
     # -------------------------------------------------------------------------
-    # Rule 3: needs_iban but IBAN derivation may fail
-    # From RF: needs_iban_count = True correlates with 8026
-    # -------------------------------------------------------------------------
-    needs_iban_count = get('needs_iban_count', 0)
-    if needs_iban_count and needs_iban_count > 0:
-        # Check if any party needs IBAN but has BIC country issue
-        for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-            needs_iban = get(f'{prefix}needs_iban', False)
-            has_iban = get(f'{prefix}has_iban', False)
-            has_bic = get(f'{prefix}has_bic', False)
-            bic_valid_country = get(f'{prefix}bic_valid_country', True)
-            
-            # Needs IBAN, doesn't have it, but has BIC with invalid country
-            if needs_iban and not has_iban and has_bic and not bic_valid_country:
-                party = prefix.rstrip('_').upper()
-                reasons.append(f"{party}: needs_iban, has BIC but bic_valid_country=False")
-                matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 4: From RF Path 1 - bnf_has_bic + bnf_has_iban + orig conditions
-    # -------------------------------------------------------------------------
-    bnf_has_bic = get('bnf_has_bic', False)
-    bnf_has_iban = get('bnf_has_iban', False)
-    orig_bic_valid_country = get('orig_bic_valid_country', True)
-    orig_address_lines = get('orig_address_lines', 0)
-    
-    if bnf_has_bic and bnf_has_iban and orig_address_lines and orig_address_lines > 0:
-        # This pattern from RF - check for country validation issues
-        if not orig_bic_valid_country:
-            reasons.append("RF Path: bnf has BIC+IBAN, orig has address but invalid BIC country")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 5: From RF Path 3 - cdt_is_international with account issues
-    # -------------------------------------------------------------------------
-    cdt_is_international = get('cdt_is_international', False)
-    has_instructed_amount = get('has_instructed_amount', False)
-    account_count = get('account_count', 0)
-    
-    if cdt_is_international and has_instructed_amount:
-        # International credit party - may need IBAN derivation
-        cdt_needs_iban = get('cdt_needs_iban', False)
-        cdt_has_iban = get('cdt_has_iban', False)
-        
-        if cdt_needs_iban and not cdt_has_iban:
-            reasons.append("CDT: is_international, needs_iban but has_iban=False")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 6: dbt_account_has_dirty_chars (from RF Path 2)
-    # Dirty chars in account may cause IBAN derivation failure
+    # Rule 4: Account has dirty chars (may cause IBAN derivation failure)
     # -------------------------------------------------------------------------
     for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
         has_dirty_chars = get(f'{prefix}account_has_dirty_chars', False)
