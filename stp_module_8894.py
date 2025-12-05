@@ -97,6 +97,23 @@ def check_8894_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         matches += 1
     
     # -------------------------------------------------------------------------
+    # Rule 5b: bnf_has_bic but no IBAN (triggers IBAN derivation)
+    # Pattern from failures: bnf_has_bic=True, bnf_has_iban=False
+    # -------------------------------------------------------------------------
+    if bnf_has_bic and not bnf_has_iban:
+        reasons.append("BNF: has_bic but no IBAN (IBAN derivation triggered)")
+        matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 5c: Any party has BIC (triggers BIC/IBAN validation)
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}has_bic', False):
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has_bic=True")
+            matches += 1
+    
+    # -------------------------------------------------------------------------
     # Rule 6: Cross-border with BIC/IBAN match issues (from RF Path 3)
     # -------------------------------------------------------------------------
     is_cross_border = get('is_cross_border', False)
