@@ -142,15 +142,27 @@ def check_8027_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         matches += 1
     
     # -------------------------------------------------------------------------
-    # Rule 13: BNF missing critical account info (no IBAN, no NCH, no account)
-    # Pattern from failures: all account-related features are False/0/None
+    # Rule 13: BNF missing critical account info
+    # Pattern from failures: bnf_account_length=0 and no IBAN
     # -------------------------------------------------------------------------
     bnf_has_account = get('bnf_has_account', False)
-    bnf_nch_sources = get('bnf_nch_sources', 0)
-    bnf_account_length = get('bnf_account_length', 0)
+    bnf_nch_sources = get('bnf_nch_sources', 0) or 0
+    bnf_account_length = get('bnf_account_length', 0) or 0
     
-    if not bnf_has_iban and not bnf_has_account and (not bnf_nch_sources or bnf_nch_sources == 0) and (not bnf_account_length or bnf_account_length == 0):
-        reasons.append("BNF: missing all account info (no IBAN, no account, no NCH)")
+    # If BNF has no IBAN and account length is 0, there's a problem
+    # Explicit check for False or None
+    if (bnf_has_iban == False or bnf_has_iban is None) and bnf_account_length == 0:
+        reasons.append("BNF: no IBAN and account_length=0")
+        matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 14: Catch-all - BNF present but missing basic identifiers
+    # -------------------------------------------------------------------------
+    bnf_present = get('bnf_present', False)
+    bnf_has_bic = get('bnf_has_bic', False)
+    
+    if bnf_present and not bnf_has_iban and not bnf_has_bic and not bnf_has_account:
+        reasons.append("BNF: present but missing IBAN, BIC, and account")
         matches += 1
     
     should_fire = matches > 0
@@ -222,6 +234,7 @@ def main():
         else:
             debug_info = {
                 'bnf_has_iban': features.get('bnf_has_iban'),
+                'bnf_has_account': features.get('bnf_has_account'),
                 'bnf_nch_sources': features.get('bnf_nch_sources'),
                 'bnf_account_length': features.get('bnf_account_length'),
                 'cdt_account_has_dirty_chars': features.get('cdt_account_has_dirty_chars'),
