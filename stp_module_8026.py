@@ -137,6 +137,24 @@ def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
             reasons.append(f"{party}: has IBAN but no BIC (BIC derivation triggered)")
             matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 9: CDT is international - triggers cross-border validation
+    # Pattern: cdt_is_international=True triggers 8026 even without BNF identifiers
+    # -------------------------------------------------------------------------
+    cdt_is_international = get('cdt_is_international', False)
+    if cdt_is_international:
+        reasons.append("CDT: is_international=True (cross-border validation)")
+        matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 10: BNF missing both BIC and IBAN (ACE needs to derive routing)
+    # -------------------------------------------------------------------------
+    bnf_has_bic = get('bnf_has_bic', False)
+    bnf_has_iban = get('bnf_has_iban', False)
+    if not bnf_has_bic and not bnf_has_iban:
+        reasons.append("BNF: missing both BIC and IBAN (routing derivation needed)")
+        matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
