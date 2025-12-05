@@ -85,6 +85,19 @@ def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
             reasons.append(f"{party}: account_has_dirty_chars=True")
             matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 5: Has BIC but no IBAN - ACE may try to derive IBAN from BIC country
+    # Pattern from failures: bnf_has_bic=True, bnf_has_iban=False
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
+        has_bic = get(f'{prefix}has_bic', False)
+        has_iban = get(f'{prefix}has_iban', False)
+        
+        if has_bic and not has_iban:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has_bic but no IBAN (derivation may be attempted)")
+            matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
