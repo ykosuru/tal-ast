@@ -134,6 +134,22 @@ def check_8026_rules(features: Dict) -> Tuple[bool, List[str]]:
             party = prefix.rstrip('_').upper()
             reasons.append(f"{party}: has both BIC and IBAN")
     
+    # Rule 5: has IBAN but NO BIC (BIC derivation from IBAN triggered)
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        has_bic = get(f'{prefix}has_bic', False)
+        has_iban = get(f'{prefix}has_iban', False)
+        if has_iban and not has_bic:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has IBAN but no BIC (BIC derivation)")
+    
+    # Rule 6: CDT is international - triggers cross-border validation
+    if get('cdt_is_international', False):
+        reasons.append("CDT: is_international=True (cross-border validation)")
+    
+    # Rule 7: BNF missing both BIC and IBAN
+    if not get('bnf_has_bic', False) and not get('bnf_has_iban', False):
+        reasons.append("BNF: missing both BIC and IBAN")
+    
     return len(reasons) > 0, reasons
 
 
@@ -149,22 +165,46 @@ def check_8027_rules(features: Dict) -> Tuple[bool, List[str]]:
     if iban_checksum_valid_count > 0:
         reasons.append(f"iban_checksum_valid_count={iban_checksum_valid_count}")
     
-    # Rule 2: any party has_iban
-    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
-        if get(f'{prefix}has_iban', False):
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: has_iban=True")
+    # Rule 2: iban_format_valid_count > 0
+    iban_format_valid_count = get('iban_format_valid_count', 0) or 0
+    if iban_format_valid_count > 0:
+        reasons.append(f"iban_format_valid_count={iban_format_valid_count}")
     
     # Rule 3: bnf_nch_sources > 0
     bnf_nch_sources = get('bnf_nch_sources', 0) or 0
     if bnf_nch_sources > 0:
         reasons.append(f"bnf_nch_sources={bnf_nch_sources}")
     
-    # Rule 4: BNF missing all account info
+    # Rule 4: any party has_iban
+    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
+        if get(f'{prefix}has_iban', False):
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has_iban=True")
+    
+    # Rule 5: dbt_is_bic_derivable
+    if get('dbt_is_bic_derivable', False):
+        reasons.append("DBT: is_bic_derivable=True")
+    
+    # Rule 6: orig_nch_validation_applicable
+    if get('orig_nch_validation_applicable', False):
+        reasons.append("ORIG: nch_validation_applicable=True")
+    
+    # Rule 7: cdt_account_has_dirty_chars
+    if get('cdt_account_has_dirty_chars', False):
+        reasons.append("CDT: account_has_dirty_chars=True")
+    
+    # Rule 8: BNF missing all account info (no IBAN and account_length=0)
     bnf_has_iban = get('bnf_has_iban', False)
     bnf_account_length = get('bnf_account_length', 0) or 0
     if (bnf_has_iban == False or bnf_has_iban is None) and bnf_account_length == 0:
         reasons.append("BNF: no IBAN and account_length=0")
+    
+    # Rule 9: BNF present but missing basic identifiers
+    bnf_present = get('bnf_present', False)
+    bnf_has_bic = get('bnf_has_bic', False)
+    bnf_has_account = get('bnf_has_account', False)
+    if bnf_present and not bnf_has_iban and not bnf_has_bic and not bnf_has_account:
+        reasons.append("BNF: present but missing IBAN, BIC, and account")
     
     return len(reasons) > 0, reasons
 
