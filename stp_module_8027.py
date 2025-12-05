@@ -141,6 +141,18 @@ def check_8027_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         reasons.append(f"avg_address_lines={avg_address_lines}")
         matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 13: BNF missing critical account info (no IBAN, no NCH, no account)
+    # Pattern from failures: all account-related features are False/0/None
+    # -------------------------------------------------------------------------
+    bnf_has_account = get('bnf_has_account', False)
+    bnf_nch_sources = get('bnf_nch_sources', 0)
+    bnf_account_length = get('bnf_account_length', 0)
+    
+    if not bnf_has_iban and not bnf_has_account and (not bnf_nch_sources or bnf_nch_sources == 0) and (not bnf_account_length or bnf_account_length == 0):
+        reasons.append("BNF: missing all account info (no IBAN, no account, no NCH)")
+        matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
