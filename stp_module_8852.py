@@ -203,6 +203,16 @@ def main():
     print(f"Loaded {loaded} total records")
     print(f"Pipeline has {len(pipeline.records)} records")
     
+    # Count 8852 codes in responses
+    total_8852_in_responses = 0
+    for record in pipeline.records:
+        actual_codes = record.error_codes_only
+        composite_codes = record.composite_codes or []
+        if any('8852' in str(c) for c in actual_codes + composite_codes):
+            total_8852_in_responses += 1
+    
+    print(f"\n📊 Found {total_8852_in_responses} IFMLs with 8852 in responses")
+    
     # Track results
     successes = []
     failures = []
