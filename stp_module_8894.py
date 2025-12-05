@@ -179,6 +179,17 @@ def check_8894_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         reasons.append("DBT: is_international=True")
         matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 14: BNF missing both IBAN and BIC - missing critical identifiers
+    # -------------------------------------------------------------------------
+    bnf_has_iban = get('bnf_has_iban', False)
+    bnf_has_bic = get('bnf_has_bic', False)
+    bnf_present = get('bnf_present', False)
+    
+    if bnf_present and not bnf_has_iban and not bnf_has_bic:
+        reasons.append("BNF: missing both IBAN and BIC")
+        matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
