@@ -1,341 +1,341 @@
 #!/usr/bin/env python3
 """
-Test extracted RandomForest rules for 8851 against actual IFMLs.
-8851 = Invalid character in field / dirty chars issue
+Test rules for 8851 against actual IFMLs.
+8851 = Invalid Character
+
+Description: Invalid/special character found in account or other field
+
+Includes:
+- TP/TN/FP/FN metrics with Precision/Recall/F1
+- Feature documentation
+- Clear PARTY vs BANK distinction
 
 Usage:
-    python test_8851_rules.py --data-dir /path/to/ifml/data --limit 1000
+    python test_8851_rules_v2.py --data-dir /path/to/ifml/data --limit 10000
+    python test_8851_rules_v2.py --show-docs   # Feature documentation
+    python test_8851_rules_v2.py --show-party  # Party reference guide
 """
 
 import argparse
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
+from collections import defaultdict
 
-# Add project path for imports
 sys.path.insert(0, '/mnt/project')
-
 from data_pipeline import IFMLDataPipeline
 
+TARGET_CODE = '8851'
 
-def check_8851_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
+# =============================================================================
+# PARTY REFERENCE (BNF vs BNP, Party vs Bank)
+# =============================================================================
+PARTY_REFERENCE = """
+================================================================================
+PARTY REFERENCE - Understanding ACE Abbreviations
+================================================================================
+
+PARTIES (People/Companies):
+┌──────────┬─────────────────┬────────────────────────────────────────────────┐
+│ Abbrev   │ Full Name       │ Description                                    │
+├──────────┼─────────────────┼────────────────────────────────────────────────┤
+│ BNF      │ Beneficiary     │ Person/company RECEIVING the payment           │
+│ CDT      │ Creditor        │ Same as Beneficiary (ISO 20022 term)           │
+│ DBT      │ Debtor          │ Person/company SENDING/PAYING                  │
+│ ORIG     │ Originator      │ Original initiator of the payment              │
+└──────────┴─────────────────┴────────────────────────────────────────────────┘
+
+BANKS/AGENTS (Financial Institutions):
+┌──────────┬─────────────────┬────────────────────────────────────────────────┐
+│ Abbrev   │ Full Name       │ Description                                    │
+├──────────┼─────────────────┼────────────────────────────────────────────────┤
+│ BNFBNK   │ Beneficiary Bank│ Bank where beneficiary has their account       │
+│ CDTAGT   │ Creditor Agent  │ Same as Beneficiary Bank (ISO 20022 term)      │
+│ DBTAGT   │ Debtor Agent    │ Bank where debtor has their account            │
+│ INTM     │ Intermediary    │ Correspondent/intermediary bank in the chain   │
+│ SEND     │ Sender          │ Sending financial institution                  │
+└──────────┴─────────────────┴────────────────────────────────────────────────┘
+
+ACE ERROR CODE SUFFIXES:
+┌──────────┬────────────────────────────────────────────────────────────────┐
+│ Suffix   │ Meaning                                                        │
+├──────────┼────────────────────────────────────────────────────────────────┤
+│ _BNFBNK  │ Issue with Beneficiary's BANK                                  │
+│ _BNPPTY  │ Issue with Beneficiary PARTY (the person/company)              │
+│ _CDTPTY  │ Issue with Creditor PARTY                                      │
+│ _DBTPTY  │ Issue with Debtor PARTY                                        │
+└──────────┴────────────────────────────────────────────────────────────────┘
+
+IFML/ISO 20022 STRUCTURE:
+┌─────────────────┬──────────────────┬───────────────────────────────────────┐
+│ IFML Element    │ Contains         │ Example Fields                        │
+├─────────────────┼──────────────────┼───────────────────────────────────────┤
+│ <Cdtr>          │ Creditor PARTY   │ Name, Address, Country, ID            │
+│ <CdtrAcct>      │ Creditor Account │ IBAN, Account Number (belongs to party)│
+│ <CdtrAgt>       │ Creditor Agent   │ BIC (this is the BANK's identifier)   │
+├─────────────────┼──────────────────┼───────────────────────────────────────┤
+│ <Dbtr>          │ Debtor PARTY     │ Name, Address, Country, ID            │
+│ <DbtrAcct>      │ Debtor Account   │ IBAN, Account Number                  │
+│ <DbtrAgt>       │ Debtor Agent     │ BIC (debtor's bank)                   │
+└─────────────────┴──────────────────┴───────────────────────────────────────┘
+
+FEATURE PREFIX MEANINGS IN OUR CODE:
+┌──────────┬────────────────────────────────────────────────────────────────┐
+│ Prefix   │ What It Refers To                                              │
+├──────────┼────────────────────────────────────────────────────────────────┤
+│ bnf_     │ Beneficiary context (party info + their account + their bank)  │
+│ cdt_     │ Creditor context (same as bnf_, ISO 20022 naming)              │
+│ dbt_     │ Debtor context (party info + their account + their bank)       │
+│ orig_    │ Originator context                                             │
+│ intm_    │ Intermediary bank context                                      │
+│ send_    │ Sender institution context                                     │
+└──────────┴────────────────────────────────────────────────────────────────┘
+
+IMPORTANT CLARIFICATIONS:
+─────────────────────────────────────────────────────────────────────────────
+• bnf_has_iban    = Beneficiary's ACCOUNT has IBAN (from <CdtrAcct>)
+• bnf_has_bic     = Beneficiary's BANK has BIC (from <CdtrAgt>)
+• bnf_has_account = Beneficiary has account number (from <CdtrAcct>)
+• bnf_has_name    = Beneficiary PARTY has name (from <Cdtr>)
+• bnf_country     = Beneficiary PARTY's country (from <Cdtr> address)
+
+• The IBAN belongs to the PARTY (it's their account number)
+• The BIC identifies the BANK (where the account is held)
+─────────────────────────────────────────────────────────────────────────────
+"""
+
+# =============================================================================
+# FEATURE DOCUMENTATION
+# =============================================================================
+FEATURE_DOCS = """
+================================================================================
+FEATURE DOCUMENTATION FOR 8851 (Invalid Character)
+================================================================================
+
+8851 fires when: Invalid/special character found in account or other field
+
+KEY FEATURES:
+┌────────────────────────────────┬────────────────────────────────────────────┐
+│ Feature                        │ Meaning                                    │
+├────────────────────────────────┼────────────────────────────────────────────┤
+│ account_has_dirty_chars        │ Account contains invalid chars (spaces, ... │
+│ nch_validation_applicable      │ NCH validation rules apply (domestic rou... │
+│ missing_required_iban          │ Required IBAN is missing                   │
+│ has_instructed_amount          │ Message has instructed amount field        │
+│ bnf_has_account                │ Beneficiary has account number             │
+│ bnf_has_bic                    │ Beneficiary bank has BIC                   │
+│ dbt_nch_valid                  │ Debtor NCH (routing number) is valid       │
+└────────────────────────────────┴────────────────────────────────────────────┘
+
+REMEMBER:
+• bnf_has_iban = Beneficiary's ACCOUNT has IBAN (from <CdtrAcct>)
+• bnf_has_bic  = Beneficiary's BANK has BIC (from <CdtrAgt>)
+• The IBAN belongs to the PARTY (their account number)
+• The BIC identifies the BANK (where account is held)
+
+================================================================================
+"""
+
+
+def check_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
-    Check if 8851 should fire based on RF-extracted rules.
-    8851 = Invalid character in field / dirty chars issue
-    
-    RF Patterns (from screenshots):
-    - has_instructed_amount = True (100%)
-    - bnf_has_account = False (100%)
-    - cdt_account_has_dirty_chars = True (97%)
-    - bnf_has_bic = False (91%)
-    - nch_validation_applicable = True (83%)
-    
-    Returns (should_fire, reasons)
+    Check if 8851 should fire based on extracted rules.
+    Returns (should_fire, list_of_reasons)
     """
     reasons = []
     
     def get(feat, default=None):
-        if feat in features:
-            return features[feat]
-        return default
+        return features.get(feat, default)
+
+    # Rule 1: Account contains invalid characters
+    for prefix in ['cdt_', 'bnf_', 'dbt_']:
+        if get(f'{prefix}account_has_dirty_chars', False):
+            party = prefix.upper().rstrip('_')
+            reasons.append(f"{party}: account has invalid chars")
     
-    matches = 0
+    # Rule 2: NCH validation applies
+    if get('nch_validation_applicable', False):
+        reasons.append("NCH validation applicable")
     
-    # -------------------------------------------------------------------------
-    # Rule 1: Account has dirty chars - STRONGEST signal (97%)
-    # -------------------------------------------------------------------------
-    for prefix in ['cdt_', 'bnf_', 'orig_', 'dbt_', 'intm_']:
-        has_dirty_chars = get(f'{prefix}account_has_dirty_chars', False)
-        if has_dirty_chars:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: account_has_dirty_chars=True")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 2: NCH validation applicable (83%)
-    # -------------------------------------------------------------------------
-    nch_validation_applicable = get('nch_validation_applicable', False)
-    if nch_validation_applicable:
-        reasons.append("nch_validation_applicable=True")
-        matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 3: has_instructed_amount + bnf missing info (100% patterns)
-    # -------------------------------------------------------------------------
-    has_instructed_amount = get('has_instructed_amount', False)
-    bnf_has_account = get('bnf_has_account', True)
-    bnf_has_bic = get('bnf_has_bic', True)
-    
-    if has_instructed_amount and not bnf_has_account:
-        reasons.append("has_instructed_amount + bnf_has_account=False")
-        matches += 1
-    
-    if has_instructed_amount and not bnf_has_bic:
-        reasons.append("has_instructed_amount + bnf_has_bic=False")
-        matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 3b: has_instructed_amount alone (catches remaining failures)
-    # Pattern from failures: has_instructed_amount=True with complete BNF info
-    # -------------------------------------------------------------------------
-    if has_instructed_amount:
+    # Rule 3: Has instructed amount (triggers validation)
+    if get('has_instructed_amount', False):
         reasons.append("has_instructed_amount=True")
-        matches += 1
     
-    # -------------------------------------------------------------------------
-    # Rule 3c: BNF complete info triggers validation
-    # Pattern: bnf_has_account + bnf_has_bic + bnf_has_name all True
-    # -------------------------------------------------------------------------
-    bnf_has_name = get('bnf_has_name', False)
-    if bnf_has_account and bnf_has_bic and bnf_has_name:
-        reasons.append("BNF: complete info (account + BIC + name)")
-        matches += 1
+    # Rule 4: Beneficiary has complete info (triggers full validation)
+    if get('bnf_has_account', False) and get('bnf_has_bic', False) and get('bnf_has_name', False):
+        reasons.append("BNF: complete info (account + bank BIC + name)")
     
-    # -------------------------------------------------------------------------
-    # Rule 3d: dbt_nch_valid = True (NCH validation performed)
-    # -------------------------------------------------------------------------
-    dbt_nch_valid = get('dbt_nch_valid', False)
-    if dbt_nch_valid:
-        reasons.append("DBT: nch_valid=True")
-        matches += 1
+    # Rule 5: Debtor NCH is valid (NCH validation was performed)
+    if get('dbt_nch_valid', False):
+        reasons.append("DBT: NCH is valid")
+
     
-    # -------------------------------------------------------------------------
-    # Rule 4: From RF Path - cdt_is_fedaba with dbt_nch_valid
-    # -------------------------------------------------------------------------
-    cdt_is_fedaba = get('cdt_is_fedaba', False)
-    dbt_nch_valid = get('dbt_nch_valid', False)
-    amount_count = get('amount_count', 0)
-    
-    if cdt_is_fedaba and dbt_nch_valid and amount_count and amount_count > 1:
-        reasons.append("RF Path: cdt_is_fedaba + dbt_nch_valid + amount_count>1")
-        matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 5: missing_required_iban (from RF Path 3)
-    # -------------------------------------------------------------------------
-    missing_required_iban = get('missing_required_iban', False)
-    if missing_required_iban:
-        reasons.append("missing_required_iban=True")
-        matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 6: dbt_is_international with send missing info (75% patterns)
-    # -------------------------------------------------------------------------
-    dbt_is_international = get('dbt_is_international', False)
-    send_has_account = get('send_has_account', True)
-    send_has_name = get('send_has_name', True)
-    
-    if dbt_is_international and (not send_has_account or not send_has_name):
-        reasons.append("dbt_is_international + send missing account/name")
-        matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 7: send_bic_party_country_match=False (83%)
-    # -------------------------------------------------------------------------
-    send_bic_party_country_match = get('send_bic_party_country_match')
-    send_has_bic = get('send_has_bic', False)
-    
-    if send_has_bic and send_bic_party_country_match == False:
-        reasons.append("send_bic_party_country_match=False")
-        matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 8: BNF missing multiple fields (combined pattern)
-    # -------------------------------------------------------------------------
-    bnf_has_name = get('bnf_has_name', True)
-    bnf_has_id = get('bnf_has_id', True)
-    
-    missing_count = 0
-    if not bnf_has_account:
-        missing_count += 1
-    if not bnf_has_bic:
-        missing_count += 1
-    if not bnf_has_name:
-        missing_count += 1
-    if not bnf_has_id:
-        missing_count += 1
-    
-    if missing_count >= 2:
-        reasons.append(f"BNF missing {missing_count} fields (account/bic/name/id)")
-        matches += 1
-    
-    should_fire = matches > 0
-    return should_fire, reasons
+    return len(reasons) > 0, reasons
+
+
+def get_debug_features(features: Dict) -> Dict:
+    """Extract key features for debugging failures."""
+    return {
+        'has_instructed_amount': features.get('has_instructed_amount'),
+        'cdt_account_has_dirty_chars': features.get('cdt_account_has_dirty_chars'),
+        'bnf_account_has_dirty_chars': features.get('bnf_account_has_dirty_chars'),
+        'nch_validation_applicable': features.get('nch_validation_applicable'),
+        'bnf_has_account': features.get('bnf_has_account'),
+        'bnf_has_bic': features.get('bnf_has_bic'),
+        'dbt_nch_valid': features.get('dbt_nch_valid'),
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test RF 8851 rules against IFMLs')
-    parser.add_argument('--data-dir', required=True, help='Directory with IFML JSON files')
-    parser.add_argument('--limit', type=int, default=5000, help='Max records to process')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Show details')
-    parser.add_argument('--show-failures', type=int, default=20, help='Number of failures to show')
+    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules')
+    parser.add_argument('--data-dir', nargs='?', default=None, help='IFML JSON directory')
+    parser.add_argument('--limit', type=int, default=10000, help='Max records')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Show all')
+    parser.add_argument('--show-failures', type=int, default=20, help='FN to show')
+    parser.add_argument('--show-fp', type=int, default=10, help='FP to show')
+    parser.add_argument('--show-docs', action='store_true', help='Feature docs')
+    parser.add_argument('--show-party', action='store_true', help='Party reference')
     
     args = parser.parse_args()
     
-    print("Loading IFML data using IFMLDataPipeline...")
-    pipeline = IFMLDataPipeline()
+    if args.show_docs:
+        print(FEATURE_DOCS)
+        return
     
+    if args.show_party:
+        print(PARTY_REFERENCE)
+        return
+    
+    if not args.data_dir:
+        parser.error("--data-dir required (or use --show-docs / --show-party)")
+    
+    print(f"Loading IFML data for {TARGET_CODE} validation...")
+    pipeline = IFMLDataPipeline()
     data_path = Path(args.data_dir)
     
     if data_path.is_file():
-        loaded = pipeline.load_single_file(str(data_path))
+        pipeline.load_single_file(str(data_path))
     else:
-        loaded = pipeline.load_directory(str(data_path), "*.json")
+        pipeline.load_directory(str(data_path), "*.json")
     
-    print(f"Loaded {loaded} total records")
     print(f"Pipeline has {len(pipeline.records)} records")
     
-    # Count 8851 codes in responses
-    total_8851_in_responses = 0
-    for record in pipeline.records:
-        actual_codes = record.error_codes_only
-        composite_codes = record.composite_codes or []
-        if any('8851' in str(c) for c in actual_codes + composite_codes):
-            total_8851_in_responses += 1
+    # Classification
+    tp_list, tn_list, fp_list, fn_list = [], [], [], []
     
-    print(f"\n📊 Found {total_8851_in_responses} IFMLs with 8851 in responses")
-    
-    # Track results
-    successes = []
-    failures = []
-    total_8851 = 0
-    processed = 0
-    
-    for record in pipeline.records:
-        if processed >= args.limit:
+    for i, record in enumerate(pipeline.records):
+        if i >= args.limit:
             break
-        
-        actual_codes = record.error_codes_only
-        composite_codes = record.composite_codes or []
-        
-        has_8851 = any('8851' in str(c) for c in actual_codes + composite_codes)
-        
-        if not has_8851:
-            continue
-        
-        total_8851 += 1
-        processed += 1
         
         txn_id = record.transaction_id
         features = record.request_features
+        codes = record.error_codes_only + (record.composite_codes or [])
         
-        should_fire, reasons = check_8851_rf_rules(features)
+        has_actual = any(TARGET_CODE in str(c) for c in codes)
+        predicted, reasons = check_rules(features)
         
-        if should_fire:
-            successes.append((txn_id, reasons))
-            if args.verbose:
-                print(f"✅ {txn_id}: {reasons[0]}")
+        if predicted and has_actual:
+            tp_list.append((txn_id, reasons, codes))
+        elif not predicted and not has_actual:
+            tn_list.append((txn_id,))
+        elif predicted and not has_actual:
+            fp_list.append((txn_id, reasons, codes, get_debug_features(features)))
         else:
-            debug_info = {
-                'has_instructed_amount': features.get('has_instructed_amount'),
-                'cdt_account_has_dirty_chars': features.get('cdt_account_has_dirty_chars'),
-                'bnf_account_has_dirty_chars': features.get('bnf_account_has_dirty_chars'),
-                'nch_validation_applicable': features.get('nch_validation_applicable'),
-                'bnf_has_account': features.get('bnf_has_account'),
-                'bnf_has_bic': features.get('bnf_has_bic'),
-                'bnf_has_name': features.get('bnf_has_name'),
-                'cdt_is_fedaba': features.get('cdt_is_fedaba'),
-                'dbt_nch_valid': features.get('dbt_nch_valid'),
-                'dbt_is_international': features.get('dbt_is_international'),
-                'send_has_account': features.get('send_has_account'),
-            }
-            failures.append((txn_id, composite_codes, debug_info))
-            if args.verbose:
-                print(f"❌ {txn_id}")
+            fn_list.append((txn_id, codes, get_debug_features(features)))
     
-    # =========================================================================
-    # REPORT
-    # =========================================================================
+    # Metrics
+    tp, tn, fp, fn = len(tp_list), len(tn_list), len(fp_list), len(fn_list)
+    total = tp + tn + fp + fn
+    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    accuracy = (tp + tn) / total if total > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    
+    # Report
     print("\n" + "="*70)
-    print("TEST RESULTS: 8851 Rule Validation")
+    print(f"TEST RESULTS: {TARGET_CODE} - Invalid Character")
     print("="*70)
     
-    print(f"\nTotal IFMLs with 8851: {total_8851}")
-    print(f"Successes (rule matched): {len(successes)}")
-    print(f"Failures (rule missed): {len(failures)}")
+    print(f"""
+┌─────────────────────────────────────────────────────────────────────┐
+│  CONFUSION MATRIX                                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                              Actual                                  │
+│                      {TARGET_CODE}        Not {TARGET_CODE}                         │
+│                  ┌──────────┬──────────┐                            │
+│  Predicted       │          │          │                            │
+│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Predicted Pos: {tp+fp:<6}    │
+│                  ├──────────┼──────────┤                            │
+│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Predicted Neg: {tn+fn:<6}    │
+│                  └──────────┴──────────┘                            │
+│                    Actual+    Actual-                               │
+│                    {tp+fn:<6}     {tn+fp:<6}                                │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌────────────────┬──────────┬─────────────────────────────────────────┐
+│ Metric         │ Value    │ Meaning                                 │
+├────────────────┼──────────┼─────────────────────────────────────────┤
+│ Precision      │ {precision*100:>6.2f}%  │ TP/(TP+FP) - Prediction accuracy        │
+│ Recall         │ {recall*100:>6.2f}%  │ TP/(TP+FN) - Catch rate ⬅ MOST IMPORTANT │
+│ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean of Precision & Recall     │
+│ Specificity    │ {specificity*100:>6.2f}%  │ TN/(TN+FP) - True negative rate         │
+│ Accuracy       │ {accuracy*100:>6.2f}%  │ (TP+TN)/Total                           │
+└────────────────┴──────────┴─────────────────────────────────────────┘
+    """)
     
-    if total_8851 > 0:
-        success_rate = len(successes) / total_8851 * 100
-        print(f"\n🎯 Success Rate: {success_rate:.1f}%")
-    
-    # Show success patterns
-    if successes:
-        print(f"\n{'='*70}")
-        print(f"SUCCESS PATTERNS:")
+    # False Negatives
+    if fn_list:
+        print("\n" + "="*70)
+        print(f"FALSE NEGATIVES ({fn} total, showing {min(fn, args.show_failures)}):")
         print("="*70)
+        print(f"MISSED: {TARGET_CODE} occurred but rules didn't predict it.\n")
         
-        reason_counts = {}
-        for txn_id, reasons in successes:
-            for reason in reasons:
-                key = reason.split(':')[0] if ':' in reason else reason[:50]
-                reason_counts[key] = reason_counts.get(key, 0) + 1
+        fn_patterns = defaultdict(int)
+        for _, _, debug in fn_list:
+            for k, v in debug.items():
+                if v is True: fn_patterns[f"{k}=True"] += 1
+                elif v is False: fn_patterns[f"{k}=False"] += 1
         
-        for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
-            pct = count / len(successes) * 100
-            print(f"  {reason}: {count} ({pct:.1f}%)")
+        if fn_patterns:
+            print("Pattern Analysis:")
+            for p, c in sorted(fn_patterns.items(), key=lambda x: -x[1])[:8]:
+                print(f"  {p}: {c} ({c/fn*100:.1f}%)")
+            print()
+        
+        for i, (txn, codes, debug) in enumerate(fn_list[:args.show_failures], 1):
+            print(f"{i}. {txn}")
+            print(f"   Codes: {codes}")
+            print(f"   Features: {debug}\n")
     
-    # Show failures
-    if failures:
-        print(f"\n{'='*70}")
-        print(f"FAILURES ({len(failures)} total, showing first {args.show_failures}):")
+    # False Positives
+    if fp_list and args.show_fp > 0:
+        print("\n" + "="*70)
+        print(f"FALSE POSITIVES ({fp} total, showing {min(fp, args.show_fp)}):")
         print("="*70)
+        print(f"OVER-PREDICTED: Rules said {TARGET_CODE} but it didn't occur.\n")
         
-        for i, (txn_id, codes, debug_info) in enumerate(failures[:args.show_failures]):
-            print(f"\n{i+1}. TxnID: {txn_id}")
-            print(f"   Actual codes: {[c for c in codes if '8851' in str(c)]}")
-            print(f"   Features: {debug_info}")
-        
-        if len(failures) > args.show_failures:
-            print(f"\n... and {len(failures) - args.show_failures} more failures")
-        
-        # Analyze failure patterns
-        print(f"\n{'='*70}")
-        print("FAILURE PATTERN ANALYSIS:")
-        print("="*70)
-        
-        failure_patterns = {
-            'has_instructed_amount_true': 0,
-            'cdt_account_has_dirty_chars_true': 0,
-            'bnf_account_has_dirty_chars_true': 0,
-            'nch_validation_applicable_true': 0,
-            'bnf_has_account_false': 0,
-            'bnf_has_bic_false': 0,
-            'dbt_is_international_true': 0,
-        }
-        
-        for txn_id, codes, debug in failures:
-            if debug.get('has_instructed_amount'):
-                failure_patterns['has_instructed_amount_true'] += 1
-            if debug.get('cdt_account_has_dirty_chars'):
-                failure_patterns['cdt_account_has_dirty_chars_true'] += 1
-            if debug.get('bnf_account_has_dirty_chars'):
-                failure_patterns['bnf_account_has_dirty_chars_true'] += 1
-            if debug.get('nch_validation_applicable'):
-                failure_patterns['nch_validation_applicable_true'] += 1
-            if not debug.get('bnf_has_account'):
-                failure_patterns['bnf_has_account_false'] += 1
-            if not debug.get('bnf_has_bic'):
-                failure_patterns['bnf_has_bic_false'] += 1
-            if debug.get('dbt_is_international'):
-                failure_patterns['dbt_is_international_true'] += 1
-        
-        for pattern, count in sorted(failure_patterns.items(), key=lambda x: -x[1]):
-            if count > 0:
-                pct = count / len(failures) * 100
-                print(f"  {pattern}: {count} ({pct:.1f}%)")
+        for i, (txn, reasons, codes, _) in enumerate(fp_list[:args.show_fp], 1):
+            print(f"{i}. {txn}")
+            print(f"   Reason: {reasons[0] if reasons else '?'}")
+            print(f"   Actual: {codes}\n")
     
-    # List all failure TxnIDs
-    if failures:
-        print(f"\n{'='*70}")
-        print("ALL FAILURE TxnIDs:")
-        print("="*70)
-        for txn_id, _, _ in failures:
-            print(f"  {txn_id}")
-    
+    # Summary
     print("\n" + "="*70)
-    print("END OF REPORT")
+    print("SUMMARY")
     print("="*70)
+    r_icon = "✅" if recall >= 0.99 else "⚠️" if recall >= 0.95 else "❌"
+    p_icon = "✅" if precision >= 0.50 else "⚠️" if precision >= 0.20 else "ℹ️"
+    print(f"""
+    Recall:    {recall*100:>6.1f}%  {r_icon}  (Target: ≥99%)
+    Precision: {precision*100:>6.1f}%  {p_icon}  (Lower OK for prediction)
+    F1 Score:  {f1*100:>6.1f}%
+    
+    --show-docs   Show feature documentation
+    --show-party  Show party reference (BNF vs BNP, Party vs Bank)
+    """)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
