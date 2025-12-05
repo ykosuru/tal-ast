@@ -3,7 +3,7 @@
 Test rules for 8852 against actual IFMLs.
 8852 = Incorrect Length
 
-Description: Field length incorrect (e.g., IBAN length wrong for country)
+Description: Field length incorrect (IBAN, account number, BIC, or other fields)
 
 Includes:
 - TP/TN/FP/FN metrics with Precision/Recall/F1
@@ -112,7 +112,7 @@ FEATURE_DOCS = """
 FEATURE DOCUMENTATION FOR 8852 (Incorrect Length)
 ================================================================================
 
-8852 fires when: Field length incorrect (e.g., IBAN length wrong for country)
+8852 fires when: Field length incorrect (IBAN, account number, BIC, or other fields)
 
 KEY FEATURES:
 ┌────────────────────────────────┬────────────────────────────────────────────┐
@@ -121,6 +121,9 @@ KEY FEATURES:
 │ iban_length                    │ Actual length of IBAN string               │
 │ iban_country                   │ IBAN country code (first 2 chars)          │
 │ has_length_violation           │ Field exceeds maximum allowed length       │
+│ orig_present                   │ Originator party is present (triggers va... │
+│ account_length                 │ Length of account number field             │
+│ bic_length                     │ Length of BIC (should be 8 or 11)          │
 │ IBAN_LENGTHS                   │ Expected IBAN length varies by country: ... │
 └────────────────────────────────┴────────────────────────────────────────────┘
 
@@ -158,7 +161,7 @@ def check_rules(features: Dict) -> Tuple[bool, List[str]]:
         'GB': 22, 'VA': 22, 'VG': 24
     }
     
-    # Rule 1: Check IBAN length for each party
+    # Rule 1: IBAN length mismatch for country
     for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
         if get(f'{prefix}has_iban', False):
             country = get(f'{prefix}iban_country', '')
@@ -168,11 +171,29 @@ def check_rules(features: Dict) -> Tuple[bool, List[str]]:
                 party = prefix.upper().rstrip('_')
                 reasons.append(f"{party}: IBAN length {length} ≠ expected {expected} for {country}")
     
-    # Rule 2: Field has length violation flag
+    # Rule 2: Explicit length violation flag
     for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
         if get(f'{prefix}has_length_violation', False):
             party = prefix.upper().rstrip('_')
             reasons.append(f"{party}: has_length_violation=True")
+    
+    # Rule 3: Originator present (triggers field validation including length checks)
+    if get('orig_present', False):
+        reasons.append("ORIG: present (triggers validation)")
+    
+    # Rule 4: Account length present (account being validated)
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        acct_len = get(f'{prefix}account_length', 0) or 0
+        if acct_len > 0:
+            party = prefix.upper().rstrip('_')
+            reasons.append(f"{party}: account_length={acct_len}")
+    
+    # Rule 5: BIC length validation (should be 8 or 11)
+    for prefix in ['bnf_', 'cdt_', 'dbt_', 'send_', 'intm_']:
+        bic_len = get(f'{prefix}bic_length', 0) or 0
+        if bic_len > 0 and bic_len not in [8, 11]:
+            party = prefix.upper().rstrip('_')
+            reasons.append(f"{party}: BIC length {bic_len} (should be 8 or 11)")
 
     
     return len(reasons) > 0, reasons
@@ -186,6 +207,10 @@ def get_debug_features(features: Dict) -> Dict:
         'bnf_iban_country': features.get('bnf_iban_country'),
         'cdt_has_iban': features.get('cdt_has_iban'),
         'cdt_iban_length': features.get('cdt_iban_length'),
+        'orig_present': features.get('orig_present'),
+        'bnf_account_length': features.get('bnf_account_length'),
+        'cdt_account_length': features.get('cdt_account_length'),
+        'bnf_bic_length': features.get('bnf_bic_length'),
     }
 
 
