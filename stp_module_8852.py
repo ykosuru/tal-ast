@@ -89,7 +89,7 @@ def check_8852_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
     matches = 0
     
     # -------------------------------------------------------------------------
-    # Rule 1: IBAN length mismatch by country (NEW - direct check)
+    # Rule 1: IBAN length mismatch by country (direct check)
     # -------------------------------------------------------------------------
     for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
         has_iban = get(f'{prefix}has_iban', False)
@@ -103,13 +103,28 @@ def check_8852_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
                 reasons.append(f"{party}: IBAN length {account_length} != {expected_len} for {iban_country}")
                 matches += 1
             elif not expected_len and (account_length < 15 or account_length > 34):
-                # Unknown country but outside valid range
                 party = prefix.rstrip('_').upper()
                 reasons.append(f"{party}: IBAN length {account_length} outside range (15-34)")
                 matches += 1
     
     # -------------------------------------------------------------------------
-    # Rule 2: has_iban but iban_valid_format=False (may indicate length issue)
+    # Rule 2: Account length that looks like truncated/malformed IBAN
+    # Pattern from failures: cdt_account_length=15, cdt_has_iban=False
+    # Account length 15-20 without IBAN detection may be malformed IBAN
+    # -------------------------------------------------------------------------
+    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
+        has_iban = get(f'{prefix}has_iban', False)
+        account_length = get(f'{prefix}account_length', 0)
+        
+        # If account length is in IBAN range (15-34) but not detected as IBAN,
+        # it may be a malformed IBAN that ACE flags
+        if not has_iban and account_length and 15 <= account_length <= 34:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: account_length={account_length} in IBAN range but not valid IBAN")
+            matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 3: has_iban but iban_valid_format=False (may indicate length issue)
     # -------------------------------------------------------------------------
     for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
         has_iban = get(f'{prefix}has_iban', False)
@@ -117,24 +132,23 @@ def check_8852_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         
         if has_iban and not iban_valid_format:
             party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: has_iban but iban_valid_format=False (possible length issue)")
+            reasons.append(f"{party}: has_iban but iban_valid_format=False")
             matches += 1
     
     # -------------------------------------------------------------------------
-    # Rule 3: Account length > 34 (max IBAN length)
+    # Rule 4: Account length > 34 (max IBAN length)
     # -------------------------------------------------------------------------
     for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
         account_length = get(f'{prefix}account_length', 0)
         has_iban = get(f'{prefix}has_iban', False)
         
-        # Only flag if not already an IBAN (avoid double counting)
         if account_length and account_length > 34 and not has_iban:
             party = prefix.rstrip('_').upper()
             reasons.append(f"{party}: account_length={account_length} > 34")
             matches += 1
     
     # -------------------------------------------------------------------------
-    # Rule 4: BIC length issues (should be 8 or 11)
+    # Rule 5: BIC length issues (should be 8 or 11)
     # -------------------------------------------------------------------------
     for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_', 'send_']:
         bic_length = get(f'{prefix}bic_length', 0)
@@ -144,7 +158,7 @@ def check_8852_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
             matches += 1
     
     # -------------------------------------------------------------------------
-    # Rule 5: Account needs length fix (from parser)
+    # Rule 6: Account needs length fix (from parser)
     # -------------------------------------------------------------------------
     for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
         needs_fix = get(f'{prefix}account_needs_length_fix', False)
@@ -152,19 +166,6 @@ def check_8852_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
             party = prefix.rstrip('_').upper()
             reasons.append(f"{party}: account_needs_length_fix=True")
             matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 6: RF pattern - originator with name (100% ratio in RF)
-    # This is a correlation, not direct cause - lower priority
-    # -------------------------------------------------------------------------
-    orig_present = get('orig_present', False)
-    orig_has_name = get('orig_has_name', False)
-    bnf_is_international = get('bnf_is_international', False)
-    
-    # Only use this pattern if we didn't find direct length issues
-    if matches == 0 and orig_present and orig_has_name and bnf_is_international:
-        reasons.append("RF pattern: orig with name + international (correlation)")
-        matches += 1
     
     # -------------------------------------------------------------------------
     # Rule 7: Compound ID parts (may cause length issues when concatenated)
