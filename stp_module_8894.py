@@ -124,6 +124,7 @@ KEY FEATURES:
 │ needs_iban                     │ Party needs IBAN (in IBAN-mandatory coun... │
 │ dbt_is_international           │ Debtor is international (triggers strict... │
 │ has_bic                        │ Party bank has BIC (triggers BIC-IBAN co... │
+│ is_cross_border                │ Payment is cross-border (triggers valida... │
 └────────────────────────────────┴────────────────────────────────────────────┘
 
 REMEMBER:
@@ -165,20 +166,29 @@ def check_rules(features: Dict) -> Tuple[bool, List[str]]:
             reasons.append(f"{party}: needs IBAN")
     
     # Rule 4: Party has bank BIC (triggers IBAN validation)
+    # This is the KEY rule - BNF having BIC triggers 8894_BNPPTY
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
         if get(f'{prefix}has_bic', False):
             party = prefix.upper().rstrip('_')
             reasons.append(f"{party}: bank has BIC (triggers IBAN validation)")
     
-    # Rule 5: Debtor is international
+    # Rule 5: BNF has BIC but no IBAN (EXPLICIT - catches 8894_BNPPTY)
+    if get('bnf_has_bic', False) and not get('bnf_has_iban', False):
+        reasons.append("BNF: bank has BIC but no IBAN (8894_BNPPTY trigger)")
+    
+    # Rule 6: Debtor is international
     if get('dbt_is_international', False):
         reasons.append("DBT: is international")
     
-    # Rule 6: Has both bank BIC and account IBAN
+    # Rule 7: Has both bank BIC and account IBAN (pair validation)
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
         if get(f'{prefix}has_bic', False) and get(f'{prefix}has_iban', False):
             party = prefix.upper().rstrip('_')
             reasons.append(f"{party}: has bank BIC + account IBAN")
+    
+    # Rule 8: Cross-border payment (triggers stricter validation)
+    if get('is_cross_border', False):
+        reasons.append("is_cross_border=True")
 
     
     return len(reasons) > 0, reasons
@@ -195,6 +205,8 @@ def get_debug_features(features: Dict) -> Dict:
         'bnf_iban_valid_format': features.get('bnf_iban_valid_format'),
         'bnf_iban_checksum_valid': features.get('bnf_iban_checksum_valid'),
         'bnf_has_bic': features.get('bnf_has_bic'),
+        'is_cross_border': features.get('is_cross_border'),
+        'bnf_needs_iban': features.get('bnf_needs_iban'),
     }
 
 
