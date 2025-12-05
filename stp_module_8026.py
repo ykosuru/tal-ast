@@ -124,6 +124,19 @@ def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
             reasons.append(f"{party}: has both BIC and IBAN (ACE validates pair)")
             matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 8: Has IBAN but NO BIC - ACE derives BIC from IBAN
+    # Pattern from failures: bnf_has_iban=True, bnf_has_bic=False
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
+        has_bic = get(f'{prefix}has_bic', False)
+        has_iban = get(f'{prefix}has_iban', False)
+        
+        if has_iban and not has_bic:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has IBAN but no BIC (BIC derivation triggered)")
+            matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
