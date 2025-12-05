@@ -1,343 +1,316 @@
 #!/usr/bin/env python3
 """
-Test extracted RandomForest rules for 8026 against actual IFMLs.
-8026 = BIC/IBAN country mismatch or IBAN derivation issue
+Test rules for 8026 against actual IFMLs.
+8026 = BIC/IBAN Mismatch
+
+Description: BIC country does not match IBAN country, or derivation issue
+
+Includes:
+- TP/TN/FP/FN metrics
+- Precision/Recall/F1 calculation  
+- Feature documentation
 
 Usage:
-    python test_8026_rules.py --data-dir /path/to/ifml/data --limit 1000
+    python test_8026_rules_v2.py --data-dir /path/to/ifml/data --limit 10000
+    python test_8026_rules_v2.py --show-docs  # Show feature documentation
 """
 
 import argparse
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
+from collections import defaultdict
 
-# Add project path for imports
 sys.path.insert(0, '/mnt/project')
-
 from data_pipeline import IFMLDataPipeline
 
+TARGET_CODE = '8026'
 
-def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
+# =============================================================================
+# FEATURE DOCUMENTATION
+# =============================================================================
+FEATURE_DOCS = """
+================================================================================
+FEATURE DOCUMENTATION FOR 8026 (BIC/IBAN Mismatch)
+================================================================================
+
+8026 fires when: BIC country does not match IBAN country, or derivation issue
+
+FEATURE NAME                    | MEANING & HOW TO EXTRACT
+--------------------------------|----------------------------------------------
+bnf_has_bic                    | BNF party has a BIC/SWIFT code. Extract from <BIC> or <BICFI> tags.
+bnf_has_iban                   | BNF party has an IBAN. Extract from <IBAN> tag.
+bnf_bic_party_country_match    | BIC country matches BNF address country. Compare BIC[4:6] with party country.
+bnf_bic_iban_match             | BIC country matches IBAN country. Compare BIC[4:6] with IBAN[0:2].
+bnf_needs_iban                 | BNF is in IBAN country but no IBAN provided.
+cdt_is_international           | CDT is in different country than sender.
+
+--------------------------------------------------------------------------------
+GENERAL EXTRACTION METHODS:
+--------------------------------------------------------------------------------
+1. Parse IFML XML/JSON structure
+2. For each party (BNF, CDT, DBT, ORIG, INTM, SEND):
+   - Extract BIC from <BIC> or <BICFI> tags
+   - Extract IBAN from <IBAN> tag  
+   - Extract account from <Acct>/<Id> tags
+   - Extract country from <Ctry> or address fields
+
+3. BIC Structure (8 or 11 chars): BANKCCLL[XXX]
+   - BANK = Bank code (4 chars)
+   - CC = Country code (2 chars) <-- Used for matching
+   - LL = Location (2 chars)
+   - XXX = Branch (optional, 3 chars)
+
+4. IBAN Structure: CCkkBBBB...
+   - CC = Country code (2 chars) <-- Used for matching
+   - kk = Check digits (2 digits)
+   - BBBB... = BBAN (country-specific)
+
+5. IBAN Checksum Validation:
+   - Move first 4 chars to end
+   - Convert letters to numbers (A=10, B=11, ..., Z=35)
+   - Result mod 97 should equal 1
+
+================================================================================
+"""
+
+
+def check_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
-    Check if 8026 should fire based on RF-extracted rules.
-    8026 fires when there's an IBAN derivation/validation issue.
-    
-    RF Patterns:
-    - needs_iban_count = True (75%) - MAIN TRIGGER
-    - bnf_bic_party_country_match = False (75%)
-    
-    Returns (should_fire, reasons)
+    Check if 8026 should fire based on extracted rules.
+    Returns (should_fire, list_of_reasons)
     """
     reasons = []
     
     def get(feat, default=None):
-        if feat in features:
-            return features[feat]
-        return default
+        return features.get(feat, default)
     
-    matches = 0
-    
-    # -------------------------------------------------------------------------
-    # Rule 1: Party needs IBAN - MAIN TRIGGER from RF
-    # 8026 fires when IBAN derivation/validation is triggered
-    # -------------------------------------------------------------------------
+
+    # Rule 1: Party needs IBAN
     for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        needs_iban = get(f'{prefix}needs_iban', False)
-        if needs_iban:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: needs_iban=True (IBAN derivation triggered)")
-            matches += 1
+        if get(f'{prefix}needs_iban', False):
+            reasons.append(f"{prefix.upper().rstrip('_')}: needs_iban=True")
     
-    # -------------------------------------------------------------------------
-    # Rule 2: BIC/IBAN country mismatch
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        bic_party_country_match = get(f'{prefix}bic_party_country_match')
-        has_bic = get(f'{prefix}has_bic', False)
-        has_iban = get(f'{prefix}has_iban', False)
-        
-        if has_bic and has_iban and bic_party_country_match == False:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: bic_party_country_match=False")
-            matches += 1
+    # Rule 2: BIC/party country mismatch
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}has_bic', False) and get(f'{prefix}has_iban', False):
+            if get(f'{prefix}bic_party_country_match') == False:
+                reasons.append(f"{prefix.upper().rstrip('_')}: bic_party_country_match=False")
     
-    # -------------------------------------------------------------------------
-    # Rule 3: BIC/IBAN country mismatch using bic_iban_match
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        bic_iban_match = get(f'{prefix}bic_iban_match')
-        has_bic = get(f'{prefix}has_bic', False)
-        has_iban = get(f'{prefix}has_iban', False)
-        
-        if has_bic and has_iban and bic_iban_match == False:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: bic_iban_match=False")
-            matches += 1
+    # Rule 3: Has BIC but no IBAN
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}has_bic', False) and not get(f'{prefix}has_iban', False):
+            reasons.append(f"{prefix.upper().rstrip('_')}: has_bic but no IBAN")
     
-    # -------------------------------------------------------------------------
-    # Rule 4: Account has dirty chars (may cause IBAN derivation failure)
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        has_dirty_chars = get(f'{prefix}account_has_dirty_chars', False)
-        if has_dirty_chars:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: account_has_dirty_chars=True")
-            matches += 1
+    # Rule 4: Has IBAN but no BIC
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}has_iban', False) and not get(f'{prefix}has_bic', False):
+            reasons.append(f"{prefix.upper().rstrip('_')}: has IBAN but no BIC")
     
-    # -------------------------------------------------------------------------
-    # Rule 5: Has BIC but no IBAN - ACE may try to derive IBAN from BIC country
-    # Pattern from failures: bnf_has_bic=True, bnf_has_iban=False
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        has_bic = get(f'{prefix}has_bic', False)
-        has_iban = get(f'{prefix}has_iban', False)
-        
-        if has_bic and not has_iban:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: has_bic but no IBAN (derivation may be attempted)")
-            matches += 1
+    # Rule 5: Has both BIC and IBAN
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}has_bic', False) and get(f'{prefix}has_iban', False):
+            reasons.append(f"{prefix.upper().rstrip('_')}: has both BIC and IBAN")
     
-    # -------------------------------------------------------------------------
-    # Rule 6: IBAN checksum invalid - ACE validates IBAN checksum
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        has_iban = get(f'{prefix}has_iban', False)
-        iban_checksum_valid = get(f'{prefix}iban_checksum_valid', True)
-        iban_valid_format = get(f'{prefix}iban_valid_format', True)
-        
-        if has_iban and (not iban_checksum_valid or not iban_valid_format):
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: IBAN validation failed (checksum={iban_checksum_valid}, format={iban_valid_format})")
-            matches += 1
+    # Rule 6: CDT is international
+    if get('cdt_is_international', False):
+        reasons.append("CDT: is_international=True")
     
-    # -------------------------------------------------------------------------
-    # Rule 7: Has both BIC and IBAN - ACE validates the pair
-    # Sometimes ACE validates even when our checks pass
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        has_bic = get(f'{prefix}has_bic', False)
-        has_iban = get(f'{prefix}has_iban', False)
-        
-        if has_bic and has_iban:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: has both BIC and IBAN (ACE validates pair)")
-            matches += 1
+    # Rule 7: BNF missing both BIC and IBAN
+    if not get('bnf_has_bic', False) and not get('bnf_has_iban', False):
+        reasons.append("BNF: missing both BIC and IBAN")
+
     
-    # -------------------------------------------------------------------------
-    # Rule 8: Has IBAN but NO BIC - ACE derives BIC from IBAN
-    # Pattern from failures: bnf_has_iban=True, bnf_has_bic=False
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
-        has_bic = get(f'{prefix}has_bic', False)
-        has_iban = get(f'{prefix}has_iban', False)
-        
-        if has_iban and not has_bic:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: has IBAN but no BIC (BIC derivation triggered)")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 9: CDT is international - triggers cross-border validation
-    # Pattern: cdt_is_international=True triggers 8026 even without BNF identifiers
-    # -------------------------------------------------------------------------
-    cdt_is_international = get('cdt_is_international', False)
-    if cdt_is_international:
-        reasons.append("CDT: is_international=True (cross-border validation)")
-        matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 10: BNF missing both BIC and IBAN (ACE needs to derive routing)
-    # -------------------------------------------------------------------------
-    bnf_has_bic = get('bnf_has_bic', False)
-    bnf_has_iban = get('bnf_has_iban', False)
-    if not bnf_has_bic and not bnf_has_iban:
-        reasons.append("BNF: missing both BIC and IBAN (routing derivation needed)")
-        matches += 1
-    
-    should_fire = matches > 0
-    return should_fire, reasons
+    return len(reasons) > 0, reasons
+
+
+def get_debug_features(features: Dict) -> Dict:
+    """Extract key features for debugging failures."""
+    return {
+        'bnf_has_bic': features.get('bnf_has_bic'),
+        'bnf_has_iban': features.get('bnf_has_iban'),
+        'bnf_bic_party_country_match': features.get('bnf_bic_party_country_match'),
+        'bnf_bic_iban_match': features.get('bnf_bic_iban_match'),
+        'cdt_has_bic': features.get('cdt_has_bic'),
+        'cdt_has_iban': features.get('cdt_has_iban'),
+        'cdt_is_international': features.get('cdt_is_international'),
+        'bnf_needs_iban': features.get('bnf_needs_iban'),
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test RF 8026 rules against IFMLs')
-    parser.add_argument('--data-dir', required=True, help='Directory with IFML JSON files')
-    parser.add_argument('--limit', type=int, default=5000, help='Max records to process')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Show details')
-    parser.add_argument('--show-failures', type=int, default=20, help='Number of failures to show')
+    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules against IFMLs')
+    parser.add_argument('--data-dir', required=True, nargs='?', default=None, help='Directory with IFML JSON files')
+    parser.add_argument('--limit', type=int, default=10000, help='Max records to process')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Show all classifications')
+    parser.add_argument('--show-failures', type=int, default=20, help='Number of FN to show')
+    parser.add_argument('--show-fp', type=int, default=10, help='Number of FP to show')
+    parser.add_argument('--show-docs', action='store_true', help='Show feature documentation')
     
     args = parser.parse_args()
     
-    print("Loading IFML data using IFMLDataPipeline...")
-    pipeline = IFMLDataPipeline()
+    if args.show_docs:
+        print(FEATURE_DOCS)
+        return
     
+    if not args.data_dir:
+        parser.error("--data-dir is required unless using --show-docs")
+    
+    print(f"Loading IFML data for {TARGET_CODE} validation...")
+    pipeline = IFMLDataPipeline()
     data_path = Path(args.data_dir)
     
     if data_path.is_file():
-        loaded = pipeline.load_single_file(str(data_path))
+        pipeline.load_single_file(str(data_path))
     else:
-        loaded = pipeline.load_directory(str(data_path), "*.json")
+        pipeline.load_directory(str(data_path), "*.json")
     
-    print(f"Loaded {loaded} total records")
     print(f"Pipeline has {len(pipeline.records)} records")
     
-    # Count 8026 codes in responses
-    total_8026_in_responses = 0
-    for record in pipeline.records:
-        actual_codes = record.error_codes_only
-        composite_codes = record.composite_codes or []
-        if any('8026' in str(c) for c in actual_codes + composite_codes):
-            total_8026_in_responses += 1
+    # =========================================================================
+    # CLASSIFICATION: TP, TN, FP, FN
+    # =========================================================================
+    tp_list, tn_list, fp_list, fn_list = [], [], [], []
     
-    print(f"\n📊 Found {total_8026_in_responses} IFMLs with 8026 in responses")
-    
-    # Track results
-    successes = []
-    failures = []
-    total_8026 = 0
-    processed = 0
-    
-    for record in pipeline.records:
-        if processed >= args.limit:
+    for i, record in enumerate(pipeline.records):
+        if i >= args.limit:
             break
-        
-        actual_codes = record.error_codes_only
-        composite_codes = record.composite_codes or []
-        
-        has_8026 = any('8026' in str(c) for c in actual_codes + composite_codes)
-        
-        if not has_8026:
-            continue
-        
-        total_8026 += 1
-        processed += 1
         
         txn_id = record.transaction_id
         features = record.request_features
+        actual_codes = record.error_codes_only
+        composite_codes = record.composite_codes or []
         
-        should_fire, reasons = check_8026_rf_rules(features)
+        # Check if actually has target code
+        has_actual = any(TARGET_CODE in str(c) for c in actual_codes + composite_codes)
         
-        if should_fire:
-            successes.append((txn_id, reasons))
-            if args.verbose:
-                print(f"✅ {txn_id}: {reasons[0]}")
-        else:
-            debug_info = {
-                'bnf_has_bic': features.get('bnf_has_bic'),
-                'bnf_has_iban': features.get('bnf_has_iban'),
-                'bnf_iban_valid_format': features.get('bnf_iban_valid_format'),
-                'bnf_iban_checksum_valid': features.get('bnf_iban_checksum_valid'),
-                'bnf_bic_party_country_match': features.get('bnf_bic_party_country_match'),
-                'bnf_bic_iban_match': features.get('bnf_bic_iban_match'),
-                'cdt_has_bic': features.get('cdt_has_bic'),
-                'cdt_has_iban': features.get('cdt_has_iban'),
-                'cdt_iban_valid_format': features.get('cdt_iban_valid_format'),
-                'cdt_iban_checksum_valid': features.get('cdt_iban_checksum_valid'),
-                'cdt_is_international': features.get('cdt_is_international'),
-                'needs_iban_count': features.get('needs_iban_count'),
-                'bnf_needs_iban': features.get('bnf_needs_iban'),
-                'cdt_needs_iban': features.get('cdt_needs_iban'),
-            }
-            failures.append((txn_id, composite_codes, debug_info))
-            if args.verbose:
-                print(f"❌ {txn_id}")
+        # Check if our rules predict it
+        predicted, reasons = check_rules(features)
+        
+        if predicted and has_actual:
+            tp_list.append((txn_id, reasons, composite_codes))
+        elif not predicted and not has_actual:
+            tn_list.append((txn_id,))
+        elif predicted and not has_actual:
+            fp_list.append((txn_id, reasons, composite_codes, get_debug_features(features)))
+        else:  # not predicted and has_actual
+            fn_list.append((txn_id, composite_codes, get_debug_features(features)))
+        
+        if args.verbose:
+            status = "TP" if (predicted and has_actual) else "TN" if (not predicted and not has_actual) else "FP" if predicted else "FN"
+            icon = "✅" if status in ["TP", "TN"] else "❌"
+            print(f"{icon} {status} {txn_id}")
     
     # =========================================================================
-    # REPORT
+    # CALCULATE METRICS
+    # =========================================================================
+    tp, tn, fp, fn = len(tp_list), len(tn_list), len(fp_list), len(fn_list)
+    total = tp + tn + fp + fn
+    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    accuracy = (tp + tn) / total if total > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    
+    # =========================================================================
+    # PRINT REPORT
     # =========================================================================
     print("\n" + "="*70)
-    print("TEST RESULTS: 8026 Rule Validation")
+    print(f"TEST RESULTS: {TARGET_CODE} - BIC/IBAN Mismatch")
     print("="*70)
     
-    print(f"\nTotal IFMLs with 8026: {total_8026}")
-    print(f"Successes (rule matched): {len(successes)}")
-    print(f"Failures (rule missed): {len(failures)}")
+    print(f"""
+┌─────────────────────────────────────────────────────────────────────┐
+│  CONFUSION MATRIX                                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                              Actual                                  │
+│                      {TARGET_CODE}        Not {TARGET_CODE}                         │
+│                  ┌──────────┬──────────┐                            │
+│  Predicted       │          │          │                            │
+│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Predicted Pos: {tp+fp:<6}    │
+│                  ├──────────┼──────────┤                            │
+│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Predicted Neg: {tn+fn:<6}    │
+│                  └──────────┴──────────┘                            │
+│                    Actual+    Actual-                               │
+│                    {tp+fn:<6}     {tn+fp:<6}                                │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌────────────────┬──────────┬─────────────────────────────────────────┐
+│ Metric         │ Value    │ Meaning                                 │
+├────────────────┼──────────┼─────────────────────────────────────────┤
+│ Precision      │ {precision*100:>6.2f}%  │ TP/(TP+FP) - Prediction accuracy        │
+│ Recall         │ {recall*100:>6.2f}%  │ TP/(TP+FN) - Catch rate (MOST IMPORTANT)│
+│ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean of Precision & Recall     │
+│ Specificity    │ {specificity*100:>6.2f}%  │ TN/(TN+FP) - True negative rate         │
+│ Accuracy       │ {accuracy*100:>6.2f}%  │ (TP+TN)/Total - Overall correctness     │
+└────────────────┴──────────┴─────────────────────────────────────────┘
+    """)
     
-    if total_8026 > 0:
-        success_rate = len(successes) / total_8026 * 100
-        print(f"\n🎯 Success Rate: {success_rate:.1f}%")
-    
-    # Show success patterns
-    if successes:
-        print(f"\n{'='*70}")
-        print(f"SUCCESS PATTERNS:")
+    # =========================================================================
+    # FALSE NEGATIVES (Missed predictions - most important to fix)
+    # =========================================================================
+    if fn_list:
+        print("\n" + "="*70)
+        print(f"FALSE NEGATIVES ({fn} total, showing first {args.show_failures}):")
         print("="*70)
+        print(f"These are MISSED predictions - {TARGET_CODE} occurred but rules didn't catch it.\n")
         
-        reason_counts = {}
-        for txn_id, reasons in successes:
-            for reason in reasons:
-                key = reason.split(':')[0] if ':' in reason else reason[:50]
-                reason_counts[key] = reason_counts.get(key, 0) + 1
+        # Pattern analysis
+        fn_patterns = defaultdict(int)
+        for item in fn_list:
+            for k, v in item[2].items():
+                if v is True:
+                    fn_patterns[f"{k}=True"] += 1
+                elif v is False:
+                    fn_patterns[f"{k}=False"] += 1
         
-        for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
-            pct = count / len(successes) * 100
-            print(f"  {reason}: {count} ({pct:.1f}%)")
+        if fn_patterns:
+            print("PATTERN ANALYSIS (common features in FN):")
+            for pattern, count in sorted(fn_patterns.items(), key=lambda x: -x[1])[:10]:
+                print(f"  {pattern}: {count} ({count/fn*100:.1f}%)")
+            print()
+        
+        for i, (txn_id, codes, debug) in enumerate(fn_list[:args.show_failures], 1):
+            print(f"{i}. TxnID: {txn_id}")
+            print(f"   Actual codes: {codes}")
+            print(f"   Features: {debug}\n")
     
-    # Show failures
-    if failures:
-        print(f"\n{'='*70}")
-        print(f"FAILURES ({len(failures)} total, showing first {args.show_failures}):")
+    # =========================================================================
+    # FALSE POSITIVES (Over-predictions)
+    # =========================================================================
+    if fp_list and args.show_fp > 0:
+        print("\n" + "="*70)
+        print(f"FALSE POSITIVES ({fp} total, showing first {args.show_fp}):")
         print("="*70)
+        print(f"These are OVER-predictions - rules predicted {TARGET_CODE} but it didn't occur.\n")
         
-        for i, (txn_id, codes, debug_info) in enumerate(failures[:args.show_failures]):
-            print(f"\n{i+1}. TxnID: {txn_id}")
-            print(f"   Actual codes: {[c for c in codes if '8026' in str(c)]}")
-            print(f"   Features: {debug_info}")
-        
-        if len(failures) > args.show_failures:
-            print(f"\n... and {len(failures) - args.show_failures} more failures")
-        
-        # Analyze failure patterns
-        print(f"\n{'='*70}")
-        print("FAILURE PATTERN ANALYSIS:")
-        print("="*70)
-        
-        failure_patterns = {
-            'bnf_has_bic_true': 0,
-            'bnf_has_iban_true': 0,
-            'bnf_iban_valid_format_false': 0,
-            'bnf_iban_checksum_valid_false': 0,
-            'cdt_has_bic_true': 0,
-            'cdt_has_iban_true': 0,
-            'cdt_is_international_true': 0,
-            'needs_iban_count_gt_0': 0,
-        }
-        
-        for txn_id, codes, debug in failures:
-            if debug.get('bnf_has_bic'):
-                failure_patterns['bnf_has_bic_true'] += 1
-            if debug.get('bnf_has_iban'):
-                failure_patterns['bnf_has_iban_true'] += 1
-            if debug.get('bnf_has_iban') and not debug.get('bnf_iban_valid_format'):
-                failure_patterns['bnf_iban_valid_format_false'] += 1
-            if debug.get('bnf_has_iban') and not debug.get('bnf_iban_checksum_valid'):
-                failure_patterns['bnf_iban_checksum_valid_false'] += 1
-            if debug.get('cdt_has_bic'):
-                failure_patterns['cdt_has_bic_true'] += 1
-            if debug.get('cdt_has_iban'):
-                failure_patterns['cdt_has_iban_true'] += 1
-            if debug.get('cdt_is_international'):
-                failure_patterns['cdt_is_international_true'] += 1
-            if debug.get('needs_iban_count') and debug.get('needs_iban_count') > 0:
-                failure_patterns['needs_iban_count_gt_0'] += 1
-        
-        for pattern, count in sorted(failure_patterns.items(), key=lambda x: -x[1]):
-            if count > 0:
-                pct = count / len(failures) * 100
-                print(f"  {pattern}: {count} ({pct:.1f}%)")
+        for i, (txn_id, reasons, codes, debug) in enumerate(fp_list[:args.show_fp], 1):
+            print(f"{i}. TxnID: {txn_id}")
+            print(f"   Predicted because: {reasons[0] if reasons else 'unknown'}")
+            print(f"   Actual codes: {codes}\n")
     
-    # List all failure TxnIDs
-    if failures:
-        print(f"\n{'='*70}")
-        print("ALL FAILURE TxnIDs:")
-        print("="*70)
-        for txn_id, _, _ in failures:
-            print(f"  {txn_id}")
-    
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
     print("\n" + "="*70)
-    print("END OF REPORT")
+    print("SUMMARY")
     print("="*70)
+    
+    recall_icon = "✅" if recall >= 0.99 else ("⚠️" if recall >= 0.95 else "❌")
+    precision_icon = "✅" if precision >= 0.50 else ("⚠️" if precision >= 0.20 else "❌")
+    
+    print(f"""
+    Recall:    {recall*100:>6.1f}%  {recall_icon}  (Target: ≥99% - catch all errors)
+    Precision: {precision*100:>6.1f}%  {precision_icon}  (Lower OK for error prediction)
+    F1 Score:  {f1*100:>6.1f}%
+
+    For ERROR PREDICTION, RECALL is most important.
+    We want to catch ALL errors, even if it means some false positives.
+    
+    To see feature documentation: python {sys.argv[0]} --show-docs
+    """)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
