@@ -98,6 +98,32 @@ def check_8026_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
             reasons.append(f"{party}: has_bic but no IBAN (derivation may be attempted)")
             matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 6: IBAN checksum invalid - ACE validates IBAN checksum
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
+        has_iban = get(f'{prefix}has_iban', False)
+        iban_checksum_valid = get(f'{prefix}iban_checksum_valid', True)
+        iban_valid_format = get(f'{prefix}iban_valid_format', True)
+        
+        if has_iban and (not iban_checksum_valid or not iban_valid_format):
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: IBAN validation failed (checksum={iban_checksum_valid}, format={iban_valid_format})")
+            matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 7: Has both BIC and IBAN - ACE validates the pair
+    # Sometimes ACE validates even when our checks pass
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_', 'intm_']:
+        has_bic = get(f'{prefix}has_bic', False)
+        has_iban = get(f'{prefix}has_iban', False)
+        
+        if has_bic and has_iban:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has both BIC and IBAN (ACE validates pair)")
+            matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
@@ -168,10 +194,14 @@ def main():
             debug_info = {
                 'bnf_has_bic': features.get('bnf_has_bic'),
                 'bnf_has_iban': features.get('bnf_has_iban'),
+                'bnf_iban_valid_format': features.get('bnf_iban_valid_format'),
+                'bnf_iban_checksum_valid': features.get('bnf_iban_checksum_valid'),
                 'bnf_bic_party_country_match': features.get('bnf_bic_party_country_match'),
                 'bnf_bic_iban_match': features.get('bnf_bic_iban_match'),
                 'cdt_has_bic': features.get('cdt_has_bic'),
                 'cdt_has_iban': features.get('cdt_has_iban'),
+                'cdt_iban_valid_format': features.get('cdt_iban_valid_format'),
+                'cdt_iban_checksum_valid': features.get('cdt_iban_checksum_valid'),
                 'cdt_is_international': features.get('cdt_is_international'),
                 'needs_iban_count': features.get('needs_iban_count'),
                 'bnf_needs_iban': features.get('bnf_needs_iban'),
@@ -234,6 +264,8 @@ def main():
         failure_patterns = {
             'bnf_has_bic_true': 0,
             'bnf_has_iban_true': 0,
+            'bnf_iban_valid_format_false': 0,
+            'bnf_iban_checksum_valid_false': 0,
             'cdt_has_bic_true': 0,
             'cdt_has_iban_true': 0,
             'cdt_is_international_true': 0,
@@ -245,6 +277,10 @@ def main():
                 failure_patterns['bnf_has_bic_true'] += 1
             if debug.get('bnf_has_iban'):
                 failure_patterns['bnf_has_iban_true'] += 1
+            if debug.get('bnf_has_iban') and not debug.get('bnf_iban_valid_format'):
+                failure_patterns['bnf_iban_valid_format_false'] += 1
+            if debug.get('bnf_has_iban') and not debug.get('bnf_iban_checksum_valid'):
+                failure_patterns['bnf_iban_checksum_valid_false'] += 1
             if debug.get('cdt_has_bic'):
                 failure_patterns['cdt_has_bic_true'] += 1
             if debug.get('cdt_has_iban'):
