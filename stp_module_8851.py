@@ -75,6 +75,31 @@ def check_8851_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
         matches += 1
     
     # -------------------------------------------------------------------------
+    # Rule 3b: has_instructed_amount alone (catches remaining failures)
+    # Pattern from failures: has_instructed_amount=True with complete BNF info
+    # -------------------------------------------------------------------------
+    if has_instructed_amount:
+        reasons.append("has_instructed_amount=True")
+        matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 3c: BNF complete info triggers validation
+    # Pattern: bnf_has_account + bnf_has_bic + bnf_has_name all True
+    # -------------------------------------------------------------------------
+    bnf_has_name = get('bnf_has_name', False)
+    if bnf_has_account and bnf_has_bic and bnf_has_name:
+        reasons.append("BNF: complete info (account + BIC + name)")
+        matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 3d: dbt_nch_valid = True (NCH validation performed)
+    # -------------------------------------------------------------------------
+    dbt_nch_valid = get('dbt_nch_valid', False)
+    if dbt_nch_valid:
+        reasons.append("DBT: nch_valid=True")
+        matches += 1
+    
+    # -------------------------------------------------------------------------
     # Rule 4: From RF Path - cdt_is_fedaba with dbt_nch_valid
     # -------------------------------------------------------------------------
     cdt_is_fedaba = get('cdt_is_fedaba', False)
