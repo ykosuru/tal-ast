@@ -1,367 +1,344 @@
 #!/usr/bin/env python3
 """
-Test extracted RandomForest rules for 8852 against actual IFMLs.
-8852 = "Incorrect length of attribute"
+Test rules for 8852 against actual IFMLs.
+8852 = Incorrect Length
+
+Description: Field length incorrect (e.g., IBAN length wrong for country)
+
+Includes:
+- TP/TN/FP/FN metrics with Precision/Recall/F1
+- Feature documentation
+- Clear PARTY vs BANK distinction
 
 Usage:
-    python test_8852_rules.py --data-dir /path/to/ifml/data --limit 1000
+    python test_8852_rules_v2.py --data-dir /path/to/ifml/data --limit 10000
+    python test_8852_rules_v2.py --show-docs   # Feature documentation
+    python test_8852_rules_v2.py --show-party  # Party reference guide
 """
 
 import argparse
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
+from collections import defaultdict
 
-# Add project path for imports
 sys.path.insert(0, '/mnt/project')
-
 from data_pipeline import IFMLDataPipeline
 
-# IBAN lengths by country (from ifml_parser.py)
-IBAN_LENGTHS = {
-    'AL': 28, 'AD': 24, 'AT': 20, 'AZ': 28, 'BH': 22, 'BY': 28, 'BE': 16, 'BA': 20,
-    'BR': 29, 'BG': 22, 'CR': 22, 'HR': 21, 'CY': 28, 'CZ': 24, 'DK': 18, 'DO': 28,
-    'TL': 23, 'EE': 20, 'FO': 18, 'FI': 18, 'FR': 27, 'GE': 22, 'DE': 22, 'GI': 23,
-    'GR': 27, 'GL': 18, 'GT': 28, 'HU': 28, 'IS': 26, 'IQ': 23, 'IE': 22, 'IL': 23,
-    'IT': 27, 'JO': 30, 'KZ': 20, 'XK': 20, 'KW': 30, 'LV': 21, 'LB': 28, 'LI': 21,
-    'LT': 20, 'LU': 20, 'MK': 19, 'MT': 31, 'MR': 27, 'MU': 30, 'MC': 27, 'MD': 24,
-    'ME': 22, 'NL': 18, 'NO': 15, 'PK': 24, 'PS': 29, 'PL': 28, 'PT': 25, 'QA': 29,
-    'RO': 24, 'SM': 27, 'SA': 24, 'RS': 22, 'SC': 31, 'SK': 24, 'SI': 19, 'ES': 24,
-    'SE': 24, 'CH': 21, 'TN': 24, 'TR': 26, 'AE': 23, 'GB': 22, 'VA': 22, 'VG': 24,
-    'UA': 29,
-}
+TARGET_CODE = '8852'
 
-# Field length limits
-FIELD_LIMITS = {
-    'name': 140,           # Party name max
-    'address_line': 35,    # Per address line
-    'account': 34,         # Account/IBAN max
-    'bic': 11,             # BIC max (8 or 11)
-    'reference': 35,       # Reference field
-}
+# =============================================================================
+# PARTY REFERENCE (BNF vs BNP, Party vs Bank)
+# =============================================================================
+PARTY_REFERENCE = """
+================================================================================
+PARTY REFERENCE - Understanding ACE Abbreviations
+================================================================================
+
+PARTIES (People/Companies):
+┌──────────┬─────────────────┬────────────────────────────────────────────────┐
+│ Abbrev   │ Full Name       │ Description                                    │
+├──────────┼─────────────────┼────────────────────────────────────────────────┤
+│ BNF      │ Beneficiary     │ Person/company RECEIVING the payment           │
+│ CDT      │ Creditor        │ Same as Beneficiary (ISO 20022 term)           │
+│ DBT      │ Debtor          │ Person/company SENDING/PAYING                  │
+│ ORIG     │ Originator      │ Original initiator of the payment              │
+└──────────┴─────────────────┴────────────────────────────────────────────────┘
+
+BANKS/AGENTS (Financial Institutions):
+┌──────────┬─────────────────┬────────────────────────────────────────────────┐
+│ Abbrev   │ Full Name       │ Description                                    │
+├──────────┼─────────────────┼────────────────────────────────────────────────┤
+│ BNFBNK   │ Beneficiary Bank│ Bank where beneficiary has their account       │
+│ CDTAGT   │ Creditor Agent  │ Same as Beneficiary Bank (ISO 20022 term)      │
+│ DBTAGT   │ Debtor Agent    │ Bank where debtor has their account            │
+│ INTM     │ Intermediary    │ Correspondent/intermediary bank in the chain   │
+│ SEND     │ Sender          │ Sending financial institution                  │
+└──────────┴─────────────────┴────────────────────────────────────────────────┘
+
+ACE ERROR CODE SUFFIXES:
+┌──────────┬────────────────────────────────────────────────────────────────┐
+│ Suffix   │ Meaning                                                        │
+├──────────┼────────────────────────────────────────────────────────────────┤
+│ _BNFBNK  │ Issue with Beneficiary's BANK                                  │
+│ _BNPPTY  │ Issue with Beneficiary PARTY (the person/company)              │
+│ _CDTPTY  │ Issue with Creditor PARTY                                      │
+│ _DBTPTY  │ Issue with Debtor PARTY                                        │
+└──────────┴────────────────────────────────────────────────────────────────┘
+
+IFML/ISO 20022 STRUCTURE:
+┌─────────────────┬──────────────────┬───────────────────────────────────────┐
+│ IFML Element    │ Contains         │ Example Fields                        │
+├─────────────────┼──────────────────┼───────────────────────────────────────┤
+│ <Cdtr>          │ Creditor PARTY   │ Name, Address, Country, ID            │
+│ <CdtrAcct>      │ Creditor Account │ IBAN, Account Number (belongs to party)│
+│ <CdtrAgt>       │ Creditor Agent   │ BIC (this is the BANK's identifier)   │
+├─────────────────┼──────────────────┼───────────────────────────────────────┤
+│ <Dbtr>          │ Debtor PARTY     │ Name, Address, Country, ID            │
+│ <DbtrAcct>      │ Debtor Account   │ IBAN, Account Number                  │
+│ <DbtrAgt>       │ Debtor Agent     │ BIC (debtor's bank)                   │
+└─────────────────┴──────────────────┴───────────────────────────────────────┘
+
+FEATURE PREFIX MEANINGS IN OUR CODE:
+┌──────────┬────────────────────────────────────────────────────────────────┐
+│ Prefix   │ What It Refers To                                              │
+├──────────┼────────────────────────────────────────────────────────────────┤
+│ bnf_     │ Beneficiary context (party info + their account + their bank)  │
+│ cdt_     │ Creditor context (same as bnf_, ISO 20022 naming)              │
+│ dbt_     │ Debtor context (party info + their account + their bank)       │
+│ orig_    │ Originator context                                             │
+│ intm_    │ Intermediary bank context                                      │
+│ send_    │ Sender institution context                                     │
+└──────────┴────────────────────────────────────────────────────────────────┘
+
+IMPORTANT CLARIFICATIONS:
+─────────────────────────────────────────────────────────────────────────────
+• bnf_has_iban    = Beneficiary's ACCOUNT has IBAN (from <CdtrAcct>)
+• bnf_has_bic     = Beneficiary's BANK has BIC (from <CdtrAgt>)
+• bnf_has_account = Beneficiary has account number (from <CdtrAcct>)
+• bnf_has_name    = Beneficiary PARTY has name (from <Cdtr>)
+• bnf_country     = Beneficiary PARTY's country (from <Cdtr> address)
+
+• The IBAN belongs to the PARTY (it's their account number)
+• The BIC identifies the BANK (where the account is held)
+─────────────────────────────────────────────────────────────────────────────
+"""
+
+# =============================================================================
+# FEATURE DOCUMENTATION
+# =============================================================================
+FEATURE_DOCS = """
+================================================================================
+FEATURE DOCUMENTATION FOR 8852 (Incorrect Length)
+================================================================================
+
+8852 fires when: Field length incorrect (e.g., IBAN length wrong for country)
+
+KEY FEATURES:
+┌────────────────────────────────┬────────────────────────────────────────────┐
+│ Feature                        │ Meaning                                    │
+├────────────────────────────────┼────────────────────────────────────────────┤
+│ iban_length                    │ Actual length of IBAN string               │
+│ iban_country                   │ IBAN country code (first 2 chars)          │
+│ has_length_violation           │ Field exceeds maximum allowed length       │
+│ IBAN_LENGTHS                   │ Expected IBAN length varies by country: ... │
+└────────────────────────────────┴────────────────────────────────────────────┘
+
+REMEMBER:
+• bnf_has_iban = Beneficiary's ACCOUNT has IBAN (from <CdtrAcct>)
+• bnf_has_bic  = Beneficiary's BANK has BIC (from <CdtrAgt>)
+• The IBAN belongs to the PARTY (their account number)
+• The BIC identifies the BANK (where account is held)
+
+================================================================================
+"""
 
 
-def check_iban_length(iban_value: str, party: str) -> Tuple[bool, str]:
+def check_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
-    Check if IBAN length matches expected length for its country.
-    Returns (is_wrong_length, reason)
-    """
-    if not iban_value:
-        return False, ""
-    
-    # Clean IBAN
-    iban = iban_value.upper().replace(' ', '').replace('-', '')
-    
-    if len(iban) < 2:
-        return False, ""
-    
-    country = iban[:2]
-    expected_len = IBAN_LENGTHS.get(country)
-    actual_len = len(iban)
-    
-    if expected_len:
-        if actual_len != expected_len:
-            return True, f"{party}: IBAN length {actual_len} != expected {expected_len} for {country}"
-    else:
-        # Unknown country - check general IBAN limits (15-34)
-        if actual_len < 15 or actual_len > 34:
-            return True, f"{party}: IBAN length {actual_len} outside valid range (15-34)"
-    
-    return False, ""
-
-
-def check_8852_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
-    """
-    Check if 8852 should fire based on RF-extracted rules.
-    8852 = "Incorrect length of attribute"
-    
-    Now includes IBAN length validation by country.
-    
-    Returns (should_fire, reasons)
+    Check if 8852 should fire based on extracted rules.
+    Returns (should_fire, list_of_reasons)
     """
     reasons = []
     
     def get(feat, default=None):
-        if feat in features:
-            return features[feat]
-        return default
+        return features.get(feat, default)
+
+    # IBAN length check by country
+    IBAN_LENGTHS = {
+        'AL': 28, 'AD': 24, 'AT': 20, 'AZ': 28, 'BH': 22, 'BY': 28, 'BE': 16,
+        'BA': 20, 'BR': 29, 'BG': 22, 'HR': 21, 'CY': 28, 'CZ': 24, 'DK': 18,
+        'EE': 20, 'FO': 18, 'FI': 18, 'FR': 27, 'GE': 22, 'DE': 22, 'GI': 23,
+        'GR': 27, 'GL': 18, 'HU': 28, 'IS': 26, 'IE': 22, 'IL': 23, 'IT': 27,
+        'JO': 30, 'KZ': 20, 'XK': 20, 'KW': 30, 'LV': 21, 'LB': 28, 'LI': 21,
+        'LT': 20, 'LU': 20, 'MT': 31, 'MR': 27, 'MU': 30, 'MC': 27, 'MD': 24,
+        'ME': 22, 'NL': 18, 'NO': 15, 'PK': 24, 'PS': 29, 'PL': 28, 'PT': 25,
+        'QA': 29, 'RO': 24, 'SM': 27, 'SA': 24, 'RS': 22, 'SK': 24, 'SI': 19,
+        'ES': 24, 'SE': 24, 'CH': 21, 'TN': 24, 'TR': 26, 'UA': 29, 'AE': 23,
+        'GB': 22, 'VA': 22, 'VG': 24
+    }
     
-    matches = 0
+    # Rule 1: Check IBAN length for each party
+    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
+        if get(f'{prefix}has_iban', False):
+            country = get(f'{prefix}iban_country', '')
+            length = get(f'{prefix}iban_length', 0) or 0
+            expected = IBAN_LENGTHS.get(country)
+            if expected and length != expected:
+                party = prefix.upper().rstrip('_')
+                reasons.append(f"{party}: IBAN length {length} ≠ expected {expected} for {country}")
     
-    # -------------------------------------------------------------------------
-    # Rule 1: IBAN length mismatch by country (direct check)
-    # -------------------------------------------------------------------------
-    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
-        has_iban = get(f'{prefix}has_iban', False)
-        iban_country = get(f'{prefix}iban_country')
-        account_length = get(f'{prefix}account_length', 0)
-        
-        if has_iban and iban_country and account_length:
-            expected_len = IBAN_LENGTHS.get(iban_country)
-            if expected_len and account_length != expected_len:
-                party = prefix.rstrip('_').upper()
-                reasons.append(f"{party}: IBAN length {account_length} != {expected_len} for {iban_country}")
-                matches += 1
-            elif not expected_len and (account_length < 15 or account_length > 34):
-                party = prefix.rstrip('_').upper()
-                reasons.append(f"{party}: IBAN length {account_length} outside range (15-34)")
-                matches += 1
+    # Rule 2: Field has length violation flag
+    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
+        if get(f'{prefix}has_length_violation', False):
+            party = prefix.upper().rstrip('_')
+            reasons.append(f"{party}: has_length_violation=True")
+
     
-    # -------------------------------------------------------------------------
-    # Rule 2: Account length that looks like truncated/malformed IBAN
-    # Pattern from failures: cdt_account_length=15, cdt_has_iban=False
-    # Account length 15-20 without IBAN detection may be malformed IBAN
-    # -------------------------------------------------------------------------
-    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
-        has_iban = get(f'{prefix}has_iban', False)
-        account_length = get(f'{prefix}account_length', 0)
-        
-        # If account length is in IBAN range (15-34) but not detected as IBAN,
-        # it may be a malformed IBAN that ACE flags
-        if not has_iban and account_length and 15 <= account_length <= 34:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: account_length={account_length} in IBAN range but not valid IBAN")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 3: has_iban but iban_valid_format=False (may indicate length issue)
-    # -------------------------------------------------------------------------
-    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
-        has_iban = get(f'{prefix}has_iban', False)
-        iban_valid_format = get(f'{prefix}iban_valid_format', True)
-        
-        if has_iban and not iban_valid_format:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: has_iban but iban_valid_format=False")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 4: Account length > 34 (max IBAN length)
-    # -------------------------------------------------------------------------
-    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
-        account_length = get(f'{prefix}account_length', 0)
-        has_iban = get(f'{prefix}has_iban', False)
-        
-        if account_length and account_length > 34 and not has_iban:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: account_length={account_length} > 34")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 5: BIC length issues (should be 8 or 11)
-    # -------------------------------------------------------------------------
-    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_', 'send_']:
-        bic_length = get(f'{prefix}bic_length', 0)
-        if bic_length and bic_length not in [0, 8, 11]:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: bic_length={bic_length} (not 8 or 11)")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 6: Account needs length fix (from parser)
-    # -------------------------------------------------------------------------
-    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
-        needs_fix = get(f'{prefix}account_needs_length_fix', False)
-        if needs_fix:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: account_needs_length_fix=True")
-            matches += 1
-    
-    # -------------------------------------------------------------------------
-    # Rule 7: Compound ID parts (may cause length issues when concatenated)
-    # -------------------------------------------------------------------------
-    for prefix in ['orig_', 'cdt_', 'dbt_', 'bnf_', 'intm_']:
-        compound = get(f'{prefix}id_compound_parts', False)
-        if compound:
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: id_compound_parts=True")
-            matches += 1
-    
-    should_fire = matches > 0
-    return should_fire, reasons
+    return len(reasons) > 0, reasons
+
+
+def get_debug_features(features: Dict) -> Dict:
+    """Extract key features for debugging failures."""
+    return {
+        'bnf_has_iban': features.get('bnf_has_iban'),
+        'bnf_iban_length': features.get('bnf_iban_length'),
+        'bnf_iban_country': features.get('bnf_iban_country'),
+        'cdt_has_iban': features.get('cdt_has_iban'),
+        'cdt_iban_length': features.get('cdt_iban_length'),
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test RF 8852 rules against IFMLs')
-    parser.add_argument('--data-dir', required=True, help='Directory with IFML JSON files')
-    parser.add_argument('--limit', type=int, default=5000, help='Max records to process')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Show details')
-    parser.add_argument('--show-failures', type=int, default=20, help='Number of failures to show')
+    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules')
+    parser.add_argument('--data-dir', nargs='?', default=None, help='IFML JSON directory')
+    parser.add_argument('--limit', type=int, default=10000, help='Max records')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Show all')
+    parser.add_argument('--show-failures', type=int, default=20, help='FN to show')
+    parser.add_argument('--show-fp', type=int, default=10, help='FP to show')
+    parser.add_argument('--show-docs', action='store_true', help='Feature docs')
+    parser.add_argument('--show-party', action='store_true', help='Party reference')
     
     args = parser.parse_args()
     
-    print("Loading IFML data using IFMLDataPipeline...")
-    pipeline = IFMLDataPipeline()
+    if args.show_docs:
+        print(FEATURE_DOCS)
+        return
     
+    if args.show_party:
+        print(PARTY_REFERENCE)
+        return
+    
+    if not args.data_dir:
+        parser.error("--data-dir required (or use --show-docs / --show-party)")
+    
+    print(f"Loading IFML data for {TARGET_CODE} validation...")
+    pipeline = IFMLDataPipeline()
     data_path = Path(args.data_dir)
     
     if data_path.is_file():
-        loaded = pipeline.load_single_file(str(data_path))
+        pipeline.load_single_file(str(data_path))
     else:
-        loaded = pipeline.load_directory(str(data_path), "*.json")
+        pipeline.load_directory(str(data_path), "*.json")
     
-    print(f"Loaded {loaded} total records")
     print(f"Pipeline has {len(pipeline.records)} records")
     
-    # Count 8852 codes in responses
-    total_8852_in_responses = 0
-    for record in pipeline.records:
-        actual_codes = record.error_codes_only
-        composite_codes = record.composite_codes or []
-        if any('8852' in str(c) for c in actual_codes + composite_codes):
-            total_8852_in_responses += 1
+    # Classification
+    tp_list, tn_list, fp_list, fn_list = [], [], [], []
     
-    print(f"\n📊 Found {total_8852_in_responses} IFMLs with 8852 in responses")
-    
-    # Track results
-    successes = []
-    failures = []
-    total_8852 = 0
-    processed = 0
-    
-    for record in pipeline.records:
-        if processed >= args.limit:
+    for i, record in enumerate(pipeline.records):
+        if i >= args.limit:
             break
-        
-        actual_codes = record.error_codes_only
-        composite_codes = record.composite_codes or []
-        
-        has_8852 = any('8852' in str(c) for c in actual_codes + composite_codes)
-        
-        if not has_8852:
-            continue
-        
-        total_8852 += 1
-        processed += 1
         
         txn_id = record.transaction_id
         features = record.request_features
+        codes = record.error_codes_only + (record.composite_codes or [])
         
-        should_fire, reasons = check_8852_rf_rules(features)
+        has_actual = any(TARGET_CODE in str(c) for c in codes)
+        predicted, reasons = check_rules(features)
         
-        if should_fire:
-            successes.append((txn_id, reasons))
-            if args.verbose:
-                print(f"✅ {txn_id}: {reasons[0]}")
+        if predicted and has_actual:
+            tp_list.append((txn_id, reasons, codes))
+        elif not predicted and not has_actual:
+            tn_list.append((txn_id,))
+        elif predicted and not has_actual:
+            fp_list.append((txn_id, reasons, codes, get_debug_features(features)))
         else:
-            debug_info = {
-                # IBAN length info
-                'bnf_iban_country': features.get('bnf_iban_country'),
-                'bnf_account_length': features.get('bnf_account_length'),
-                'bnf_has_iban': features.get('bnf_has_iban'),
-                'bnf_iban_valid_format': features.get('bnf_iban_valid_format'),
-                'cdt_iban_country': features.get('cdt_iban_country'),
-                'cdt_account_length': features.get('cdt_account_length'),
-                'cdt_has_iban': features.get('cdt_has_iban'),
-                'cdt_iban_valid_format': features.get('cdt_iban_valid_format'),
-                # BIC length
-                'bnf_bic_length': features.get('bnf_bic_length'),
-                'send_bic_length': features.get('send_bic_length'),
-                # RF patterns
-                'orig_present': features.get('orig_present'),
-                'orig_has_name': features.get('orig_has_name'),
-                'bnf_is_international': features.get('bnf_is_international'),
-            }
-            failures.append((txn_id, composite_codes, debug_info))
-            if args.verbose:
-                print(f"❌ {txn_id}")
+            fn_list.append((txn_id, codes, get_debug_features(features)))
     
-    # =========================================================================
-    # REPORT
-    # =========================================================================
+    # Metrics
+    tp, tn, fp, fn = len(tp_list), len(tn_list), len(fp_list), len(fn_list)
+    total = tp + tn + fp + fn
+    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    accuracy = (tp + tn) / total if total > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    
+    # Report
     print("\n" + "="*70)
-    print("TEST RESULTS: 8852 Rule Validation")
+    print(f"TEST RESULTS: {TARGET_CODE} - Incorrect Length")
     print("="*70)
     
-    print(f"\nTotal IFMLs with 8852: {total_8852}")
-    print(f"Successes (rule matched): {len(successes)}")
-    print(f"Failures (rule missed): {len(failures)}")
+    print(f"""
+┌─────────────────────────────────────────────────────────────────────┐
+│  CONFUSION MATRIX                                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                              Actual                                  │
+│                      {TARGET_CODE}        Not {TARGET_CODE}                         │
+│                  ┌──────────┬──────────┐                            │
+│  Predicted       │          │          │                            │
+│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Predicted Pos: {tp+fp:<6}    │
+│                  ├──────────┼──────────┤                            │
+│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Predicted Neg: {tn+fn:<6}    │
+│                  └──────────┴──────────┘                            │
+│                    Actual+    Actual-                               │
+│                    {tp+fn:<6}     {tn+fp:<6}                                │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌────────────────┬──────────┬─────────────────────────────────────────┐
+│ Metric         │ Value    │ Meaning                                 │
+├────────────────┼──────────┼─────────────────────────────────────────┤
+│ Precision      │ {precision*100:>6.2f}%  │ TP/(TP+FP) - Prediction accuracy        │
+│ Recall         │ {recall*100:>6.2f}%  │ TP/(TP+FN) - Catch rate ⬅ MOST IMPORTANT │
+│ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean of Precision & Recall     │
+│ Specificity    │ {specificity*100:>6.2f}%  │ TN/(TN+FP) - True negative rate         │
+│ Accuracy       │ {accuracy*100:>6.2f}%  │ (TP+TN)/Total                           │
+└────────────────┴──────────┴─────────────────────────────────────────┘
+    """)
     
-    if total_8852 > 0:
-        success_rate = len(successes) / total_8852 * 100
-        print(f"\n🎯 Success Rate: {success_rate:.1f}%")
-    
-    # Show success patterns
-    if successes:
-        print(f"\n{'='*70}")
-        print(f"SUCCESS PATTERNS:")
+    # False Negatives
+    if fn_list:
+        print("\n" + "="*70)
+        print(f"FALSE NEGATIVES ({fn} total, showing {min(fn, args.show_failures)}):")
         print("="*70)
+        print(f"MISSED: {TARGET_CODE} occurred but rules didn't predict it.\n")
         
-        reason_counts = {}
-        for txn_id, reasons in successes:
-            for reason in reasons:
-                key = reason.split(':')[0] if ':' in reason else reason[:50]
-                reason_counts[key] = reason_counts.get(key, 0) + 1
+        fn_patterns = defaultdict(int)
+        for _, _, debug in fn_list:
+            for k, v in debug.items():
+                if v is True: fn_patterns[f"{k}=True"] += 1
+                elif v is False: fn_patterns[f"{k}=False"] += 1
         
-        for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
-            pct = count / len(successes) * 100
-            print(f"  {reason}: {count} ({pct:.1f}%)")
+        if fn_patterns:
+            print("Pattern Analysis:")
+            for p, c in sorted(fn_patterns.items(), key=lambda x: -x[1])[:8]:
+                print(f"  {p}: {c} ({c/fn*100:.1f}%)")
+            print()
+        
+        for i, (txn, codes, debug) in enumerate(fn_list[:args.show_failures], 1):
+            print(f"{i}. {txn}")
+            print(f"   Codes: {codes}")
+            print(f"   Features: {debug}\n")
     
-    # Show failures
-    if failures:
-        print(f"\n{'='*70}")
-        print(f"FAILURES ({len(failures)} total, showing first {args.show_failures}):")
+    # False Positives
+    if fp_list and args.show_fp > 0:
+        print("\n" + "="*70)
+        print(f"FALSE POSITIVES ({fp} total, showing {min(fp, args.show_fp)}):")
         print("="*70)
+        print(f"OVER-PREDICTED: Rules said {TARGET_CODE} but it didn't occur.\n")
         
-        for i, (txn_id, codes, debug_info) in enumerate(failures[:args.show_failures]):
-            print(f"\n{i+1}. TxnID: {txn_id}")
-            print(f"   Actual codes: {[c for c in codes if '8852' in str(c)]}")
-            print(f"   Features: {debug_info}")
-        
-        if len(failures) > args.show_failures:
-            print(f"\n... and {len(failures) - args.show_failures} more failures")
-        
-        # Analyze failure patterns
-        print(f"\n{'='*70}")
-        print("FAILURE PATTERN ANALYSIS:")
-        print("="*70)
-        
-        failure_patterns = {
-            'bnf_has_iban_true': 0,
-            'bnf_iban_valid_format_false': 0,
-            'cdt_has_iban_true': 0,
-            'cdt_iban_valid_format_false': 0,
-            'orig_present_true': 0,
-            'orig_has_name_true': 0,
-            'bnf_is_international_true': 0,
-            'has_account_length': 0,
-        }
-        
-        for txn_id, codes, debug in failures:
-            if debug.get('bnf_has_iban'):
-                failure_patterns['bnf_has_iban_true'] += 1
-            if debug.get('bnf_has_iban') and not debug.get('bnf_iban_valid_format'):
-                failure_patterns['bnf_iban_valid_format_false'] += 1
-            if debug.get('cdt_has_iban'):
-                failure_patterns['cdt_has_iban_true'] += 1
-            if debug.get('cdt_has_iban') and not debug.get('cdt_iban_valid_format'):
-                failure_patterns['cdt_iban_valid_format_false'] += 1
-            if debug.get('orig_present'):
-                failure_patterns['orig_present_true'] += 1
-            if debug.get('orig_has_name'):
-                failure_patterns['orig_has_name_true'] += 1
-            if debug.get('bnf_is_international'):
-                failure_patterns['bnf_is_international_true'] += 1
-            if debug.get('bnf_account_length') or debug.get('cdt_account_length'):
-                failure_patterns['has_account_length'] += 1
-        
-        for pattern, count in sorted(failure_patterns.items(), key=lambda x: -x[1]):
-            if count > 0:
-                pct = count / len(failures) * 100
-                print(f"  {pattern}: {count} ({pct:.1f}%)")
+        for i, (txn, reasons, codes, _) in enumerate(fp_list[:args.show_fp], 1):
+            print(f"{i}. {txn}")
+            print(f"   Reason: {reasons[0] if reasons else '?'}")
+            print(f"   Actual: {codes}\n")
     
-    # List all failure TxnIDs
-    if failures:
-        print(f"\n{'='*70}")
-        print("ALL FAILURE TxnIDs:")
-        print("="*70)
-        for txn_id, _, _ in failures:
-            print(f"  {txn_id}")
-    
+    # Summary
     print("\n" + "="*70)
-    print("END OF REPORT")
+    print("SUMMARY")
     print("="*70)
+    r_icon = "✅" if recall >= 0.99 else "⚠️" if recall >= 0.95 else "❌"
+    p_icon = "✅" if precision >= 0.50 else "⚠️" if precision >= 0.20 else "ℹ️"
+    print(f"""
+    Recall:    {recall*100:>6.1f}%  {r_icon}  (Target: ≥99%)
+    Precision: {precision*100:>6.1f}%  {p_icon}  (Lower OK for prediction)
+    F1 Score:  {f1*100:>6.1f}%
+    
+    --show-docs   Show feature documentation
+    --show-party  Show party reference (BNF vs BNP, Party vs Bank)
+    """)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
