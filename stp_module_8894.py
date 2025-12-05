@@ -160,6 +160,25 @@ def check_8894_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
                 reasons.append(f"{party}: needs_iban, has_iban but validation failed")
                 matches += 1
     
+    # -------------------------------------------------------------------------
+    # Rule 12: needs_iban triggers IBAN processing - ACE may find issues
+    # Pattern from failures: bnf_needs_iban=True even when our validation passes
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
+        needs_iban = get(f'{prefix}needs_iban', False)
+        if needs_iban:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: needs_iban=True (IBAN processing triggered)")
+            matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 13: dbt_is_international - triggers additional validation
+    # -------------------------------------------------------------------------
+    dbt_is_international = get('dbt_is_international', False)
+    if dbt_is_international:
+        reasons.append("DBT: is_international=True")
+        matches += 1
+    
     should_fire = matches > 0
     return should_fire, reasons
 
