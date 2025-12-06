@@ -1251,12 +1251,9 @@ class IFMLParser:
         # International payments to IBAN countries should have IBAN
         party.has_iban = (party.account_type == 'IBAN')
         
-        # IBAN is typically needed for international payments to Europe, etc.
-        iban_countries = {
-            'DE', 'FR', 'GB', 'ES', 'IT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI',
-            'PL', 'PT', 'IE', 'GR', 'CZ', 'HU', 'RO', 'SK', 'LU', 'HR', 'SI', 'BG', 'LT',
-            'LV', 'EE', 'CY', 'MT', 'AE', 'SA', 'QA', 'KW', 'BH', 'IL', 'TR', 'EG', 'MA'
-        }
+        # IBAN is typically needed for international payments to IBAN countries
+        # Use the complete IBAN_LENGTHS dict defined at top of file
+        iban_countries = set(IBAN_LENGTHS.keys())
         
         # Determine if this party needs IBAN based on country
         party_country = (
