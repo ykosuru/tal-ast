@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Test 8004 Rules - V15 (Stricter strong signals + suppress domestic US + 6021-like cases)
+Test 8004 Rules - V17 (Focus: 'IBAN cannot be derived' per ACE docs)
 Logic:
-- Universal: Require missing_required_iban=True (core signal for "cannot derive")
-- IBAN/US: Predict only on missing_required_iban (drop broad has_account + no IBAN to avoid 6021 overlap)
-- Weak non-IBAN: + cross-border + has_account + no IBAN (but still require missing_required_iban)
-- Suppress: Domestic US entirely (strong ABA validation → 6021)
-- This boosts precision by gating on missing_required_iban; catches leaks without overpredicting
+- Core: Predict if cdt_has_iban=False (direct match to "cannot be derived")
+- Enhancers: + missing_required_iban (if present) or cross-border (for non-IBAN)
+- IBAN/US: Allow on core (!has_iban) to catch derivation failures
+- Non-IBAN: Core + cross-border to avoid domestic local-format success
+- Suppress: Domestic US with has_iban=True (ABA succeeds)
 """
 import sys
 from pathlib import Path
@@ -20,8 +20,7 @@ TARGET_CODE = '8004'
 IBAN_COUNTRIES = set(IBAN_LENGTHS.keys())
 # US has strong bank directory validation (ABA/routing)
 EXCLUDE_BENEFICIARY_COUNTRIES = IBAN_COUNTRIES | {'US'}
-# Weak non-IBAN: From prior FP analysis; focus on true no-directory (expand/tune as data evolves)
-WEAK_NON_IBAN_COUNTRIES = {'TH', 'PH', 'AU', 'JP', 'NZ', 'ZA', 'PG', 'ST', 'NC', 'ID', 'CO'}  # Low 6021 overlap
+# All non-IBAN are potential (no strict weak set; core signal gates)
 US_STATE_CODES = {
     'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
     'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
@@ -48,11 +47,11 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
     Check if 8004 should be predicted.
    
-    V15:
-    - Require missing_required_iban=True everywhere (suppresses 6021 overlaps)
-    - IBAN/US: Predict only on missing_required_iban (strict to catch rare leaks)
-    - Weak non-IBAN: + cross-border + has_account + no IBAN
-    - Suppress domestic US (never predict; routes to 6021)
+    V17 (per ACE docs: 'IBAN cannot be derived'):
+    - Core signal: cdt_has_iban=False
+    - IBAN/US: Core alone (derivation failed despite directory)
+    - Non-IBAN: Core + cross-border (local formats may succeed domestically)
+    - Enhancer: + missing_required_iban (if True, strengthens)
     """
     reasons = []
    
@@ -71,30 +70,26 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     if not cdt_country:
         return False, ["Missing cdt_country"]
    
-    # Core requirement: missing_required_iban (gates all predictions; avoids 6021 cases)
-    missing_required_iban = get('missing_required_iban', False)
-    if not missing_required_iban:
-        return False, ["Missing core signal: missing_required_iban=False"]
-   
-    reasons.append("Core signal: missing_required_iban=True")
-   
-    # Suppress domestic US (strong validation → 6021, not 8004)
-    if dbt_country == 'US' and cdt_country == 'US':
-        return False, ["Suppressed: Domestic US (6021 territory)"]
-   
+    # Core signal: IBAN cannot be derived
     cdt_has_iban = get('cdt_has_iban', False)
+    if cdt_has_iban:
+        return False, ["Has IBAN: Derivation succeeded"]
+   
+    reasons.append("Core: cdt_has_iban=False ('IBAN cannot be derived')")
+   
+    missing_required_iban = get('missing_required_iban', False)
+    if missing_required_iban:
+        reasons.append("  - + missing_required_iban=True")
+   
     cdt_has_account = get('cdt_has_account', False)
+    if not cdt_has_account:
+        return False, ["No account details: No derivation attempted"]
    
-    # IBAN/US: Strict - only missing_required_iban triggers (no need for account/IBAN check)
-    if cdt_country in EXCLUDE_BENEFICIARY_COUNTRIES:
-        reasons.append(f"Leak in {cdt_country}: missing_required_iban despite directory")
-        return True, reasons
+    # Domestic US suppress (ABA/routing derives alt, not IBAN)
+    if dbt_country == 'US' and cdt_country == 'US':
+        return False, ["Suppressed: Domestic US (uses ABA, not IBAN)"]
    
-    # Non-IBAN: Filter to weak + cross-border + account signals
-    if cdt_country not in WEAK_NON_IBAN_COUNTRIES:
-        return False, [f"Filtered: Non-weak non-IBAN ({cdt_country})"]
-   
-    # Cross-border check
+    # Cross-border check (for non-IBAN: required for prediction)
     if dbt_country and cdt_country:
         is_cross_border = (dbt_country != cdt_country)
     elif cdt_country and cdt_country != 'US':
@@ -102,41 +97,38 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     else:
         is_cross_border = False
    
-    if not is_cross_border:
-        return False, ["Suppressed: Not cross-border in weak non-IBAN"]
-   
-    if cdt_has_account and not cdt_has_iban:
-        if dbt_country:
-            reasons.append(f"Cross-border: {dbt_country}→{cdt_country} (weak non-IBAN) + has_account + no IBAN")
-        else:
-            reasons.append(f"International: →{cdt_country} (weak non-IBAN) + has_account + no IBAN")
+    if cdt_country in EXCLUDE_BENEFICIARY_COUNTRIES:
+        # IBAN/US: Core suffices (failed derivation)
+        reasons.append(f"  - In {cdt_country}: Derivation failed despite directory")
         return True, reasons
     else:
-        miss_reasons = []
-        if not cdt_has_account:
-            miss_reasons.append("No has_account")
-        if cdt_has_iban:
-            miss_reasons.append("Has IBAN")
-        return False, [f"Missed weak non-IBAN cross-border: {', '.join(miss_reasons)}"]
+        # Non-IBAN: Require cross-border (IBAN often needed for intl routing)
+        if is_cross_border:
+            if dbt_country:
+                reasons.append(f"  - Cross-border: {dbt_country}→{cdt_country} (non-IBAN)")
+            else:
+                reasons.append(f"  - International: →{cdt_country} (non-IBAN)")
+            return True, reasons
+        else:
+            return False, ["Domestic non-IBAN: Local format may suffice (no IBAN req)"]
    
     return False, reasons  # Fallback
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Test 8004 rules (V15 - Strict signals + suppress domestic US)')
+    parser = argparse.ArgumentParser(description='Test 8004 rules (V17 - "IBAN cannot be derived" per ACE docs)')
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--sample-size', type=int, default=10)
    
     args = parser.parse_args()
    
-    print("V15: Strict missing_required_iban + suppress domestic US/6021 overlaps")
+    print("V17: Aligned to ACE docs - '8004': 'IBAN cannot be derived'")
     print(f" IBAN countries from IBAN_LENGTHS: {len(IBAN_COUNTRIES)}")
-    print(f" Exclude: IBAN + US = {len(EXCLUDE_BENEFICIARY_COUNTRIES)}")
-    print(f" Weak non-IBAN targets: {len(WEAK_NON_IBAN_COUNTRIES)} ({sorted(WEAK_NON_IBAN_COUNTRIES)})")
+    print(f" Exclude base: IBAN + US = {len(EXCLUDE_BENEFICIARY_COUNTRIES)}")
     print(f"\n Logic:")
-    print(f" - Require missing_required_iban=True everywhere (suppresses 6021/9999/etc.)")
-    print(f" - IBAN/US: Predict only on missing_required_iban (catches leaks)")
-    print(f" - Weak non-IBAN: + cross-border + has_account + no IBAN")
-    print(f" - Suppress domestic US (no 8004; goes to 6021)")
+    print(f" - Core: cdt_has_iban=False + has_account=True")
+    print(f" - IBAN/US: Core alone (derivation fail)")
+    print(f" - Non-IBAN: Core + cross-border")
+    print(f" - Suppress: Domestic US or has_iban=True")
    
     print("\nLoading IFML data...")
     pipeline = IFMLDataPipeline()
@@ -156,12 +148,15 @@ def main():
     fp_list = []
     fn_list = []
     fn_reasons = defaultdict(int)
+    # Correlation tracking
+    actual_8004_count = 0
+    no_iban_in_actual = 0
+    missing_req_in_actual = 0
+    has_account_in_actual = 0
    
     filtered_out_iban = 0
     filtered_out_us = 0
-    filtered_out_non_weak = 0
     suppressed_domestic_us = 0
-    missing_required_iban = 0  # Track core signal hits
    
     total_records = len(pipeline.records)
    
@@ -170,34 +165,41 @@ def main():
         codes = record.error_codes_only + (record.composite_codes or [])
        
         actual_8004 = any(TARGET_CODE in str(c) for c in codes)
+        if actual_8004:
+            actual_8004_count += 1
+            no_iban = not features.get('cdt_has_iban', False)
+            has_acc = features.get('cdt_has_account', False)
+            miss_req = features.get('missing_required_iban', False)
+            if no_iban:
+                no_iban_in_actual += 1
+            if has_acc:
+                has_account_in_actual += 1
+            if miss_req:
+                missing_req_in_actual += 1
+       
         predicted, reasons = check_8004_rules(features)
        
-        # Track filtering/suppression
+        # Track
         cdt_country = get_country(features, 'cdt')
         dbt_country = normalize_originator_country(get_country(features, 'dbt') or get_country(features, 'orig'))
-        if 'missing_required_iban=False' in str(reasons):
-            missing_required_iban += 1  # Actually, this is non-hits; invert for hits
-        if predicted:
-            missing_required_iban += 1  # Predictions require it
         if cdt_country == 'US' and dbt_country == 'US' and 'Suppressed: Domestic US' in str(reasons):
             suppressed_domestic_us += 1
         elif cdt_country == 'US':
             filtered_out_us += 1
-        elif cdt_country in IBAN_COUNTRIES:
-            filtered_out_iban += 1
-        elif cdt_country not in WEAK_NON_IBAN_COUNTRIES:
-            filtered_out_non_weak += 1
+        elif cdt_country in IBAN_COUNTRIES and not predicted:
+            filtered_out_iban += 1  # Only if filtered (rare now)
        
-        # FN subtype logging
         if not predicted and actual_8004:
             if 'Missing cdt_country' in str(reasons):
                 fn_reasons['Missing cdt_country'] += 1
-            elif 'Filtered: Non-weak non-IBAN' in str(reasons):
-                fn_reasons['Filtered: Non-weak non-IBAN'] += 1
+            elif 'Has IBAN' in str(reasons):
+                fn_reasons['Has IBAN (unexpected)'] += 1
+            elif 'No account details' in str(reasons):
+                fn_reasons['No has_account'] += 1
             elif 'Suppressed: Domestic US' in str(reasons):
                 fn_reasons['Suppressed: Domestic US'] += 1
-            elif 'Missing core signal' in str(reasons):
-                fn_reasons['Missing missing_required_iban'] += 1
+            elif 'Domestic non-IBAN' in str(reasons):
+                fn_reasons['Domestic non-IBAN'] += 1
             else:
                 fn_reasons['Other miss'] += 1
             fn_list.append((record.transaction_id, reasons, codes, features))
@@ -219,7 +221,7 @@ def main():
     accuracy = (tp + tn) / total_records if total_records > 0 else 0
    
     print("\n" + "=" * 70)
-    print(f"TEST RESULTS: 8004 - IBAN Cannot Be Derived (V15 - Strict + Suppress)")
+    print(f"TEST RESULTS: 8004 - 'IBAN cannot be derived' (V17 - ACE docs aligned)")
     print("=" * 70)
    
     print(f"\nCONFUSION MATRIX:")
@@ -235,15 +237,17 @@ def main():
     print(f" F1 Score: {f1*100:.2f}%")
     print(f" Accuracy: {accuracy*100:.2f}% ((TP + TN) / Total)")
    
-    print(f"\nFILTERING/SUPPRESSION STATS:")
-    print(f" Filtered (IBAN countries): {filtered_out_iban}")
-    print(f" Filtered (US non-domestic): {filtered_out_us}")
-    print(f" Suppressed (Domestic US): {suppressed_domestic_us}")
-    print(f" Filtered (Non-weak non-IBAN): {filtered_out_non_weak}")
-    print(f" Core signal hits (missing_required_iban=True): {missing_required_iban}")
-    print(f" Total filtered/suppressed: {filtered_out_iban + filtered_out_us + suppressed_domestic_us + filtered_out_non_weak}")
+    print(f"\nCORE SIGNAL CORRELATION IN ACTUAL 8004 ({actual_8004_count} cases):")
+    print(f" cdt_has_iban=False: {no_iban_in_actual} ({no_iban_in_actual / actual_8004_count * 100:.1f}%)")
+    print(f" cdt_has_account=True: {has_account_in_actual} ({has_account_in_actual / actual_8004_count * 100:.1f}%)")
+    print(f" missing_required_iban=True: {missing_req_in_actual} ({missing_req_in_actual / actual_8004_count * 100:.1f}%)")
    
-    # FP analysis (focus on remaining 6021/etc.)
+    print(f"\nFILTERING/SUPPRESSION STATS:")
+    print(f" Filtered (IBAN w/o core): {filtered_out_iban}")
+    print(f" Filtered (US non-domestic w/o core): {filtered_out_us}")
+    print(f" Suppressed (Domestic US): {suppressed_domestic_us}")
+   
+    # FP analysis
     print("\n" + "=" * 70)
     print(f"FALSE POSITIVES ({len(fp_list)} total):")
     print("=" * 70)
@@ -251,23 +255,18 @@ def main():
     fp_actual_codes = defaultdict(int)
     for _, _, codes, _ in fp_list:
         for c in codes:
-            if '6021' in str(c):  # Highlight suppressed targets
-                code_base = '6021_SUPPRESSED'
-            else:
-                code_base = str(c).split('_')[0]
+            code_base = str(c).split('_')[0]
             fp_actual_codes[code_base] += 1
    
-    print(f"\nWhat codes fired instead of 8004 (suppressed 6021 highlighted):")
+    print(f"\nWhat codes fired instead of 8004:")
     for code, count in sorted(fp_actual_codes.items(), key=lambda x: -x[1])[:10]:
-        marker = " (suppressed)" if code == '6021_SUPPRESSED' else ""
-        print(f" {code}: {count}{marker}")
+        print(f" {code}: {count}")
    
     fp_countries = defaultdict(int)
     for _, _, _, features in fp_list[:200]:
         cdt = get_country(features, 'cdt')
         in_iban = "IBAN" if cdt in IBAN_COUNTRIES else "non-IBAN"
-        weak_flag = "weak" if cdt in WEAK_NON_IBAN_COUNTRIES else "non-weak"
-        fp_countries[f"{cdt} ({in_iban}-{weak_flag})"] += 1
+        fp_countries[f"{cdt} ({in_iban})"] += 1
    
     print(f"\nFP by beneficiary country:")
     for country, count in sorted(fp_countries.items(), key=lambda x: -x[1])[:10]:
@@ -278,9 +277,8 @@ def main():
         dbt = normalize_originator_country(get_country(features, 'dbt') or get_country(features, 'orig'))
         cdt = get_country(features, 'cdt')
         in_iban = "IBAN" if cdt in IBAN_COUNTRIES else "non-IBAN"
-        weak_flag = "weak" if cdt in WEAK_NON_IBAN_COUNTRIES else "non-weak"
         print(f" {i+1}. {txn_id}")
-        print(f" Route: {dbt}→{cdt} ({in_iban}-{weak_flag})")
+        print(f" Route: {dbt}→{cdt} ({in_iban})")
         print(f" Predicted reasons: {reasons}")
         print(f" Actual codes: {codes[:3]}")
    
@@ -297,8 +295,7 @@ def main():
     for _, _, codes, features in fn_list[:100]:
         cdt = get_country(features, 'cdt')
         in_iban = "IBAN" if cdt in IBAN_COUNTRIES else "non-IBAN"
-        weak_flag = "weak" if cdt in WEAK_NON_IBAN_COUNTRIES else "non-weak"
-        fn_countries[f"{cdt} ({in_iban}-{weak_flag})"] += 1
+        fn_countries[f"{cdt} ({in_iban})"] += 1
    
     print(f"\nFN by beneficiary country:")
     for country, count in sorted(fn_countries.items(), key=lambda x: -x[1])[:10]:
@@ -309,9 +306,8 @@ def main():
         dbt = normalize_originator_country(get_country(features, 'dbt') or get_country(features, 'orig'))
         cdt = get_country(features, 'cdt')
         in_iban = "IBAN" if cdt in IBAN_COUNTRIES else "non-IBAN"
-        weak_flag = "weak" if cdt in WEAK_NON_IBAN_COUNTRIES else "non-weak"
         print(f" {i+1}. {txn_id}")
-        print(f" Route: {dbt}→{cdt} ({in_iban}-{weak_flag})")
+        print(f" Route: {dbt}→{cdt} ({in_iban})")
         print(f" Missed reasons: {reasons}")
         print(f" Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
    
@@ -328,12 +324,11 @@ def main():
     print(f" F1 Score: {f1*100:.1f}%")
     print(f" Accuracy: {accuracy*100:.1f}%")
    
-    print(f"\nV15 Logic:")
-    print(f" - Strict: missing_required_iban required (suppresses non-8004 like 6021)")
-    print(f" - IBAN/US: Only on core signal (rare leaks)")
-    print(f" - Weak non-IBAN: + cross-border + account signals")
-    print(f" - Suppress domestic US (avoids 6021 FPs)")
-    print(f" Expected: Recall ~99%, Precision >50% (tune weak set if needed)")
+    print(f"\nV17 Updates (ACE-aligned):")
+    print(f" - Core on !cdt_has_iban (covers ~{no_iban_in_actual / actual_8004_count * 100:.0f}% of actual 8004)")
+    print(f" - Allows IBAN/US on core (catches derivation fails)")
+    print(f" - Non-IBAN requires cross-border (intl IBAN need)")
+    print(f" - If low recall: Check data for cdt_has_iban in actual 8004")
 
 if __name__ == "__main__":
     main()
