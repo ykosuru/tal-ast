@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-Test rules for 8894 - IBAN Validation Failed (V7 - Missing/Unextractable IBAN)
+Test rules for 8894 - IBAN Validation Failed (V8 - BIC Exclusion + Focused Rules)
 
-V7 INSIGHT:
-Looking at false negatives, most 8894 cases have:
-- NO extractable IBAN (parser can't find it)
-- OR IBAN in unexpected format/location
+V8 FIXES:
+- EXCLUDE BICs from "malformed IBAN" detection (caused 1M+ FP!)
+- Focus on specific pattern: IBAN country but plain account number provided
+- Target Costa Rica (CR) and similar patterns seen in FN analysis
 
-New hypothesis: 8894 fires when IBAN is EXPECTED but not properly provided.
-
-V7 RULES:
-1. Has BeneficiaryParty but NO extractable IBAN → risky
-2. International payment to IBAN country but no IBAN found
-3. Has IBAN-like field but it fails basic pattern matching
-4. Account field exists but doesn't look like valid IBAN
+Key insight from V7:
+- BICs (8 or 11 chars, 4 letters + 2 letter country) were being flagged as malformed IBANs
+- "IBAN country but no IBAN" was too broad
+- Real pattern: CR (Costa Rica) expects IBAN but gets plain account like "256074974"
 
 Usage:
-    python test_8894_rules_v7.py --data-dir ./prd_emts
+    python test_8894_rules_v8.py --data-dir ./prd_emts
 """
 
 import argparse
@@ -39,135 +36,214 @@ IBAN_COUNTRIES = {
     'SA', 'SC', 'SE', 'SI', 'SK', 'SM', 'TL', 'TN', 'TR', 'UA', 'VA', 'VG', 'XK'
 }
 
-# Countries that do NOT use IBAN (should not expect IBAN)
-NON_IBAN_COUNTRIES = {
-    'US', 'CA', 'AU', 'NZ', 'JP', 'CN', 'IN', 'SG', 'HK', 'TW', 'KR', 'TH',
-    'MY', 'ID', 'PH', 'VN', 'MX', 'AR', 'CL', 'CO', 'PE', 'ZA', 'NG', 'KE',
-    'EG', 'MA'  # Note: Some of these may have adopted IBAN
+# IBAN lengths by country
+IBAN_LENGTHS = {
+    'CR': 22, 'DE': 22, 'FR': 27, 'ES': 24, 'IT': 27, 'GB': 22, 'NL': 18,
+    'BE': 16, 'AT': 20, 'CH': 21, 'PL': 28, 'PT': 25, 'SE': 24, 'NO': 15,
+    'DK': 18, 'FI': 18, 'IE': 22, 'LU': 20, 'GR': 27, 'CZ': 24, 'HU': 28,
+    'RO': 24, 'BG': 22, 'HR': 21, 'SI': 19, 'SK': 24, 'LT': 20, 'LV': 21,
+    'EE': 20, 'CY': 28, 'MT': 31, 'TR': 26, 'SA': 24, 'AE': 23, 'IL': 23,
+    'JO': 30, 'KW': 30, 'BH': 22, 'QA': 29, 'DO': 28, 'GT': 28, 'BR': 29,
+    'MU': 30, 'PK': 24, 'PS': 29, 'VG': 24, 'TN': 24, 'MD': 24, 'MK': 19,
+    'AL': 28, 'AZ': 28, 'BA': 20, 'BY': 28, 'GE': 22, 'GI': 23, 'GL': 18,
+    'FO': 18, 'IS': 26, 'IQ': 23, 'LB': 28, 'LI': 21, 'MC': 27, 'ME': 22,
+    'MR': 27, 'RS': 22, 'SC': 31, 'SM': 27, 'TL': 23, 'UA': 29, 'VA': 22, 'XK': 20,
 }
 
 
-def looks_like_iban(s: str) -> bool:
-    """Check if string looks like a valid IBAN pattern."""
+def looks_like_bic(s: str) -> bool:
+    """
+    Check if string looks like a BIC/SWIFT code.
+    BIC format: 4 letters (bank) + 2 letters (country) + 2 alphanum (location) + optional 3 alphanum (branch)
+    Length: 8 or 11 characters
+    """
     if not s or not isinstance(s, str):
         return False
+    
+    cleaned = s.upper().strip()
+    
+    # Must be 8 or 11 characters
+    if len(cleaned) not in (8, 11):
+        return False
+    
+    # First 6 must be letters (bank code + country)
+    if not cleaned[:6].isalpha():
+        return False
+    
+    # Rest must be alphanumeric
+    if not cleaned[6:].isalnum():
+        return False
+    
+    return True
+
+
+def looks_like_iban(s: str) -> bool:
+    """Check if string looks like a valid IBAN."""
+    if not s or not isinstance(s, str):
+        return False
+    
     cleaned = s.upper().replace(' ', '').replace('-', '')
+    
     if len(cleaned) < 15 or len(cleaned) > 34:
         return False
+    
     # Must start with 2 letters (country) + 2 digits (check)
     if not re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned):
         return False
+    
     # Country must be valid IBAN country
     country = cleaned[:2]
     if country not in IBAN_COUNTRIES:
         return False
+    
+    # Check expected length for country
+    expected_len = IBAN_LENGTHS.get(country)
+    if expected_len and len(cleaned) != expected_len:
+        return False
+    
     return True
 
 
-def looks_like_malformed_iban(s: str) -> bool:
-    """Check if string looks like an IBAN attempt but is malformed."""
+def is_plain_account_number(s: str) -> bool:
+    """Check if string looks like a plain account number (not IBAN)."""
     if not s or not isinstance(s, str):
         return False
     
-    cleaned = s.upper().replace(' ', '').replace('-', '')
+    cleaned = s.strip()
     
-    # Too short or too long
-    if len(cleaned) < 10 or len(cleaned) > 40:
-        return False
+    # Pure digits, reasonable length for account
+    if cleaned.isdigit() and 5 <= len(cleaned) <= 20:
+        return True
     
-    # Starts with 2 letters but something is wrong
-    if re.match(r'^[A-Z]{2}', cleaned):
-        # Has letters at start but:
-        # - Wrong length
-        # - Invalid check digits (not 2 digits after country)
-        # - Contains invalid characters
-        # - Country not in IBAN list
-        
-        country = cleaned[:2]
-        
-        # Country code that doesn't use IBAN
-        if country in NON_IBAN_COUNTRIES:
-            return True  # Trying to use IBAN format for non-IBAN country
-        
-        # Position 3-4 should be digits
-        if len(cleaned) >= 4 and not cleaned[2:4].isdigit():
-            return True  # Malformed check digits
-        
-        # Contains lowercase (original had lowercase)
-        if s != s.upper() and re.match(r'^[a-zA-Z]{2}', s):
-            return True  # Lowercase IBAN attempt
-        
-        # Has special characters in middle
-        if re.search(r'[^A-Z0-9]', cleaned):
+    # Alphanumeric but doesn't start with 2 letters + 2 digits (not IBAN pattern)
+    if cleaned.isalnum() and len(cleaned) >= 5:
+        if not re.match(r'^[A-Z]{2}[0-9]{2}', cleaned.upper()):
             return True
     
     return False
 
 
-def extract_all_potential_ibans(obj, path="") -> List[dict]:
+def extract_beneficiary_info(obj, path="") -> dict:
     """
-    Extract all potential IBAN-like values from JSON, tracking where they came from.
-    Returns list of {value, path, is_valid_iban, is_malformed}
+    Extract beneficiary-specific information.
+    Returns dict with country, account_value, account_type, has_iban
     """
-    results = []
+    result = {
+        'country': None,
+        'account_value': None,
+        'account_type': None,
+        'has_valid_iban': False,
+        'has_plain_account': False,
+    }
     
-    if isinstance(obj, dict):
-        # Check ID fields
-        for id_key in ['ID', 'Id']:
-            if id_key in obj:
-                id_field = obj[id_key]
-                if isinstance(id_field, dict):
-                    id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
-                    id_text = str(id_field.get('text') or id_field.get('#text') or '')
-                    
-                    if id_text:
-                        results.append({
-                            'value': id_text,
-                            'path': f"{path}.{id_key}",
-                            'declared_type': id_type,
-                            'is_valid_iban': looks_like_iban(id_text),
-                            'is_malformed': looks_like_malformed_iban(id_text),
-                        })
-                elif isinstance(id_field, str) and id_field:
-                    results.append({
-                        'value': id_field,
-                        'path': f"{path}.{id_key}",
-                        'declared_type': '',
-                        'is_valid_iban': looks_like_iban(id_field),
-                        'is_malformed': looks_like_malformed_iban(id_field),
-                    })
-        
-        # Check AcctIDInfo / AcctIDInf
-        for acct_key in ['AcctIDInfo', 'AcctIDInf']:
-            if acct_key in obj:
-                acct = obj[acct_key]
-                if isinstance(acct, dict):
-                    acct_id = acct.get('ID', {})
-                    if isinstance(acct_id, dict):
-                        acct_type = (acct_id.get('Type') or acct_id.get('@Type') or '').upper()
-                        acct_text = str(acct_id.get('text') or acct_id.get('#text') or '')
-                        if acct_text:
-                            results.append({
-                                'value': acct_text,
-                                'path': f"{path}.{acct_key}.ID",
-                                'declared_type': acct_type,
-                                'is_valid_iban': looks_like_iban(acct_text),
-                                'is_malformed': looks_like_malformed_iban(acct_text),
-                            })
-        
-        # Recurse
-        for key, value in obj.items():
-            results.extend(extract_all_potential_ibans(value, f"{path}.{key}"))
+    if not isinstance(obj, dict):
+        return result
     
-    elif isinstance(obj, list):
-        for i, item in enumerate(obj):
-            results.extend(extract_all_potential_ibans(item, f"{path}[{i}]"))
+    # Look for beneficiary party sections
+    for key in obj.keys():
+        key_upper = key.upper()
+        if 'BENEFICIARY' in key_upper or 'BNPPTY' in key_upper or 'CREDIT' in key_upper:
+            party_data = obj[key]
+            if isinstance(party_data, list):
+                party_data = party_data[0] if party_data else {}
+            if isinstance(party_data, dict):
+                # Extract recursively from this party
+                info = extract_party_details(party_data)
+                if info['country']:
+                    result['country'] = info['country']
+                if info['account_value']:
+                    result['account_value'] = info['account_value']
+                    result['account_type'] = info['account_type']
+                    result['has_valid_iban'] = looks_like_iban(info['account_value'])
+                    result['has_plain_account'] = is_plain_account_number(info['account_value'])
     
-    return results
+    # Recurse into nested structures
+    for value in obj.values():
+        if isinstance(value, dict):
+            nested = extract_beneficiary_info(value)
+            if nested['country'] and not result['country']:
+                result['country'] = nested['country']
+            if nested['account_value'] and not result['account_value']:
+                result['account_value'] = nested['account_value']
+                result['account_type'] = nested['account_type']
+                result['has_valid_iban'] = nested['has_valid_iban']
+                result['has_plain_account'] = nested['has_plain_account']
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    nested = extract_beneficiary_info(item)
+                    if nested['country'] and not result['country']:
+                        result['country'] = nested['country']
+                    if nested['account_value'] and not result['account_value']:
+                        result['account_value'] = nested['account_value']
+                        result['account_type'] = nested['account_type']
+                        result['has_valid_iban'] = nested['has_valid_iban']
+                        result['has_plain_account'] = nested['has_plain_account']
+    
+    return result
 
 
-def extract_countries(obj) -> Set[str]:
-    """Extract all country codes from the message."""
+def extract_party_details(party: dict) -> dict:
+    """Extract country and account from a party dict."""
+    result = {'country': None, 'account_value': None, 'account_type': None}
+    
+    if not isinstance(party, dict):
+        return result
+    
+    # Get country
+    for key in ['Country', 'MailingCountry', 'ResidenceCountry']:
+        if key in party:
+            val = party[key]
+            if isinstance(val, str) and len(val) == 2:
+                result['country'] = val.upper()
+                break
+    
+    # Get account/ID
+    for id_key in ['ID', 'Id']:
+        if id_key in party:
+            id_field = party[id_key]
+            if isinstance(id_field, dict):
+                id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
+                id_text = str(id_field.get('text') or id_field.get('#text') or '')
+                
+                # Skip BICs
+                if id_type in ('BIC', 'S', 'SWIFT') or looks_like_bic(id_text):
+                    continue
+                
+                if id_text:
+                    result['account_value'] = id_text
+                    result['account_type'] = id_type
+            elif isinstance(id_field, str) and not looks_like_bic(id_field):
+                result['account_value'] = id_field
+    
+    # Check AcctIDInfo
+    for acct_key in ['AcctIDInfo', 'AcctIDInf']:
+        if acct_key in party:
+            acct = party[acct_key]
+            if isinstance(acct, dict):
+                acct_id = acct.get('ID', {})
+                if isinstance(acct_id, dict):
+                    acct_type = (acct_id.get('Type') or acct_id.get('@Type') or '').upper()
+                    acct_text = str(acct_id.get('text') or acct_id.get('#text') or '')
+                    if acct_text and not looks_like_bic(acct_text):
+                        result['account_value'] = acct_text
+                        result['account_type'] = acct_type
+    
+    # Recurse into nested party info
+    for nested_key in ['BasicPartyInfo', 'BasicPartyInf', 'BasicPartyBankInfo', 'BasicPartyBankInf']:
+        if nested_key in party:
+            nested = extract_party_details(party[nested_key])
+            if nested['country'] and not result['country']:
+                result['country'] = nested['country']
+            if nested['account_value'] and not result['account_value']:
+                result['account_value'] = nested['account_value']
+                result['account_type'] = nested['account_type']
+    
+    return result
+
+
+def extract_all_countries(obj) -> Set[str]:
+    """Extract all country codes from message."""
     countries = set()
     
     if isinstance(obj, dict):
@@ -177,40 +253,23 @@ def extract_countries(obj) -> Set[str]:
                 if isinstance(val, str) and len(val) == 2:
                     countries.add(val.upper())
         
-        # Check BIC for country (positions 5-6)
+        # Extract from BIC (positions 5-6)
         for id_key in ['ID', 'Id']:
             if id_key in obj:
                 id_field = obj[id_key]
                 if isinstance(id_field, dict):
-                    id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
                     id_text = str(id_field.get('text') or id_field.get('#text') or '')
-                    if id_type in ('BIC', 'S', 'SWIFT') and len(id_text) >= 6:
+                    if looks_like_bic(id_text) and len(id_text) >= 6:
                         countries.add(id_text[4:6].upper())
         
         for value in obj.values():
-            countries.update(extract_countries(value))
+            countries.update(extract_all_countries(value))
     
     elif isinstance(obj, list):
         for item in obj:
-            countries.update(extract_countries(item))
+            countries.update(extract_all_countries(item))
     
     return countries
-
-
-def has_beneficiary_party(obj) -> bool:
-    """Check if message has BeneficiaryParty or similar."""
-    if isinstance(obj, dict):
-        for key in obj.keys():
-            if 'Beneficiary' in key or 'BNPPTY' in key or 'Credit' in key:
-                return True
-        for value in obj.values():
-            if has_beneficiary_party(value):
-                return True
-    elif isinstance(obj, list):
-        for item in obj:
-            if has_beneficiary_party(item):
-                return True
-    return False
 
 
 def extract_error_codes(obj) -> List[str]:
@@ -238,7 +297,6 @@ def extract_error_codes(obj) -> List[str]:
         
         for value in obj.values():
             codes.extend(extract_error_codes(value))
-    
     elif isinstance(obj, list):
         for item in obj:
             codes.extend(extract_error_codes(item))
@@ -246,65 +304,47 @@ def extract_error_codes(obj) -> List[str]:
     return codes
 
 
-def check_rules_v7(request_data: dict) -> Tuple[bool, List[str]]:
+def check_rules_v8(request_data: dict) -> Tuple[bool, List[str]]:
     """
-    V7 Rules: Predict 8894 when IBAN is expected but not properly extractable.
+    V8 Rules - Focused on IBAN country + plain account pattern.
     
-    Rules:
-    1. Beneficiary in IBAN country but no valid IBAN found
-    2. ID field declared as IBAN but doesn't match pattern
-    3. Malformed IBAN-like string detected
-    4. Has account field but it's not a valid IBAN for IBAN-required country
+    Primary rule:
+    - Beneficiary is in IBAN country (like CR, DE, GB)
+    - But account provided is a plain number, not a valid IBAN
     """
     reasons = []
     
-    # Extract all potential IBANs
-    potential_ibans = extract_all_potential_ibans(request_data)
+    # Extract beneficiary info
+    bnf_info = extract_beneficiary_info(request_data)
     
-    # Extract countries mentioned
-    countries = extract_countries(request_data)
+    # Extract all countries for context
+    all_countries = extract_all_countries(request_data)
     
-    # Check if beneficiary exists
-    has_beneficiary = has_beneficiary_party(request_data)
+    # Rule 1: Beneficiary in IBAN country but account is NOT valid IBAN
+    if bnf_info['country'] and bnf_info['country'] in IBAN_COUNTRIES:
+        if bnf_info['account_value']:
+            if not bnf_info['has_valid_iban']:
+                # Has account but it's not a valid IBAN
+                if bnf_info['has_plain_account']:
+                    reasons.append(f"IBAN country {bnf_info['country']} but plain account: {bnf_info['account_value'][:15]}...")
+                elif bnf_info['account_type'] == 'IBAN':
+                    # Declared as IBAN but doesn't validate
+                    reasons.append(f"Declared IBAN invalid for {bnf_info['country']}: {bnf_info['account_value'][:15]}...")
     
-    # Count valid vs invalid
-    valid_ibans = [p for p in potential_ibans if p['is_valid_iban']]
-    declared_ibans = [p for p in potential_ibans if p['declared_type'] == 'IBAN']
-    malformed = [p for p in potential_ibans if p['is_malformed']]
-    
-    # Rule 1: Field declared as IBAN but value is not valid IBAN
-    for p in declared_ibans:
-        if not p['is_valid_iban']:
-            reasons.append(f"Declared IBAN invalid: {p['value'][:15]}...")
-    
-    # Rule 2: Malformed IBAN-like strings
-    for p in malformed:
-        # Skip if we already caught it as declared IBAN
-        if p not in declared_ibans:
-            reasons.append(f"Malformed IBAN-like: {p['value'][:15]}...")
-    
-    # Rule 3: Beneficiary in IBAN country but no valid IBAN
-    iban_countries_in_msg = countries & IBAN_COUNTRIES
-    if iban_countries_in_msg and has_beneficiary and not valid_ibans:
-        reasons.append(f"IBAN country {iban_countries_in_msg} but no valid IBAN")
-    
-    # Rule 4: Has potential account values that fail IBAN validation
-    for p in potential_ibans:
-        # If it looks like it could be an IBAN attempt but fails
-        val = p['value'].upper().replace(' ', '').replace('-', '')
-        if len(val) >= 15 and len(val) <= 34:
-            if val[:2].isalpha() and not p['is_valid_iban']:
-                # Starts with 2 letters, right length, but not valid IBAN
-                if p not in declared_ibans and p not in malformed:
-                    country = val[:2]
-                    if country in IBAN_COUNTRIES:
-                        reasons.append(f"Invalid IBAN format: {val[:15]}...")
+    # Rule 2: Check for Costa Rica specifically (high signal from FN analysis)
+    if 'CR' in all_countries:
+        if bnf_info['account_value']:
+            if not looks_like_iban(bnf_info['account_value']):
+                if not looks_like_bic(bnf_info['account_value']):
+                    # CR in message, has account, but not IBAN format
+                    if f"IBAN country CR" not in str(reasons):
+                        reasons.append(f"CR (Costa Rica) detected but no valid IBAN")
     
     return len(reasons) > 0, reasons
 
 
 def process_json_file(filepath: Path) -> List[Tuple[str, dict, dict, List[str]]]:
-    """Process JSON file, return (txn_id, request, response, error_codes)."""
+    """Process JSON file."""
     results = []
     
     try:
@@ -325,25 +365,22 @@ def process_json_file(filepath: Path) -> List[Tuple[str, dict, dict, List[str]]]
 
 
 def main():
-    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules V7')
+    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules V8')
     parser.add_argument('--data-dir', required=True, help='IFML JSON directory')
     parser.add_argument('--limit', type=int, default=0, help='Max transactions')
     parser.add_argument('--show-fn', type=int, default=15, help='FN to show')
     parser.add_argument('--show-fp', type=int, default=10, help='FP to show')
-    parser.add_argument('--show-tp', type=int, default=5, help='TP to show')
+    parser.add_argument('--show-tp', type=int, default=10, help='TP to show')
     
     args = parser.parse_args()
     
-    print(f"Scanning {args.data_dir} for JSON files...")
+    print(f"Scanning {args.data_dir}...")
     data_path = Path(args.data_dir)
     json_files = list(data_path.glob("*.json"))
     print(f"Found {len(json_files)} files")
     
-    # Classification
     tp_list, tn_list, fp_list, fn_list = [], [], [], []
     processed = 0
-    
-    # Track triggers
     trigger_counts = defaultdict(int)
     
     for json_file in json_files:
@@ -356,10 +393,10 @@ def main():
             processed += 1
             
             has_actual = any(TARGET_CODE in str(c) for c in error_codes)
-            predicted, reasons = check_rules_v7(request)
+            predicted, reasons = check_rules_v8(request)
             
             for r in reasons:
-                trigger_type = r.split(':')[0]
+                trigger_type = r.split(':')[0] if ':' in r else r.split(' but')[0]
                 trigger_counts[trigger_type] += 1
             
             if predicted and has_actual:
@@ -382,88 +419,71 @@ def main():
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
     
-    # Report
     print(f"\n{'='*70}")
-    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Validation Failed (V7)")
+    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Validation Failed (V8)")
     print("="*70)
     
     print(f"""
 ┌─────────────────────────────────────────────────────────────────────┐
 │  CONFUSION MATRIX                                                   │
 ├─────────────────────────────────────────────────────────────────────┤
-│                              Actual                                 │
 │                      {TARGET_CODE}        Not {TARGET_CODE}                        │
 │                  ┌──────────┬──────────┐                            │
-│  Predicted       │          │          │                            │
-│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Pred Pos: {tp+fp:<7}   │
+│  Predicted {TARGET_CODE}  │ TP={tp:<5} │ FP={fp:<5} │  Pred Pos: {tp+fp:<7}   │
 │                  ├──────────┼──────────┤                            │
-│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Pred Neg: {tn+fn:<7}   │
+│  Not Predicted   │ FN={fn:<5} │ TN={tn:<5} │  Pred Neg: {tn+fn:<7}   │
 │                  └──────────┴──────────┘                            │
 │                   Actual+     Actual-                               │
 │                   {tp+fn:<7}    {tn+fp:<7}                              │
 └─────────────────────────────────────────────────────────────────────┘
 
-┌────────────────┬──────────┬─────────────────────────────────────────┐
-│ Metric         │ Value    │ Meaning                                 │
-├────────────────┼──────────┼─────────────────────────────────────────┤
 │ Precision      │ {precision*100:>6.2f}%  │ When we predict, how often right?       │
 │ Recall         │ {recall*100:>6.2f}%  │ What % of actual 8894 do we catch?      │
-│ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean                           │
+│ F1 Score       │ {f1*100:>6.2f}%  │                                         │
 │ Specificity    │ {specificity*100:>6.2f}%  │ True negative rate                      │
-└────────────────┴──────────┴─────────────────────────────────────────┘
     """)
     
-    # Triggers
-    print("PREDICTION TRIGGERS:")
-    for trigger, count in sorted(trigger_counts.items(), key=lambda x: -x[1]):
+    print("\nPREDICTION TRIGGERS:")
+    for trigger, count in sorted(trigger_counts.items(), key=lambda x: -x[1])[:20]:
         print(f"  {trigger}: {count:,}")
     
-    # True Positives (what worked)
+    # True Positives
     if tp_list and args.show_tp > 0:
         print(f"\n{'='*70}")
         print(f"TRUE POSITIVES ({tp} total, showing {min(args.show_tp, tp)}):")
         print("="*70)
-        print("SUCCESS: We correctly predicted 8894\n")
         
-        for i, (txn, reasons, codes, _) in enumerate(tp_list[:args.show_tp], 1):
+        for i, (txn, reasons, codes, req) in enumerate(tp_list[:args.show_tp], 1):
+            bnf = extract_beneficiary_info(req)
             print(f"{i}. {txn}")
             print(f"   Trigger: {reasons}")
-            print(f"   Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
+            print(f"   Beneficiary country: {bnf['country']}")
+            print(f"   Account: {bnf['account_value'][:20] if bnf['account_value'] else 'None'}...")
             print()
     
     # False Negatives
-    if fn_list:
+    if fn_list and args.show_fn > 0:
         print(f"\n{'='*70}")
         print(f"FALSE NEGATIVES ({fn} total, showing {min(args.show_fn, fn)}):")
         print("="*70)
-        print("MISSED: 8894 occurred but rules didn't predict\n")
         
         for i, (txn, request, codes) in enumerate(fn_list[:args.show_fn], 1):
+            bnf = extract_beneficiary_info(request)
+            countries = extract_all_countries(request)
+            
             print(f"{i}. {txn}")
-            
-            # Extract what we found
-            potential = extract_all_potential_ibans(request)
-            countries = extract_countries(request)
-            has_bnf = has_beneficiary_party(request)
-            
-            print(f"   Has beneficiary: {has_bnf}")
             print(f"   Countries: {countries}")
-            print(f"   Potential IBANs found: {len(potential)}")
-            
-            for p in potential[:3]:
-                valid = "✓" if p['is_valid_iban'] else "✗"
-                print(f"     {valid} {p['declared_type'] or 'unknown'}: {p['value'][:25]}...")
-            
-            relevant = [c for c in codes if TARGET_CODE in str(c)]
-            print(f"   Actual codes: {relevant}")
+            print(f"   Beneficiary country: {bnf['country']}")
+            print(f"   Account: {bnf['account_value'][:25] if bnf['account_value'] else 'None'}...")
+            print(f"   Is valid IBAN: {bnf['has_valid_iban']}")
+            print(f"   Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
             print()
     
     # False Positives
-    if fp_list:
+    if fp_list and args.show_fp > 0:
         print(f"\n{'='*70}")
         print(f"FALSE POSITIVES ({fp} total, showing {min(args.show_fp, fp)}):")
         print("="*70)
-        print("OVER-PREDICTED: Rules said 8894 but didn't occur\n")
         
         for i, (txn, reasons, codes) in enumerate(fp_list[:args.show_fp], 1):
             print(f"{i}. {txn}")
@@ -480,14 +500,13 @@ def main():
     precision_icon = "✅" if precision >= 0.5 else "⚠️" if precision >= 0.1 else "ℹ️"
     
     print(f"""
-    Recall:    {recall*100:>6.1f}%  {recall_icon}  (Target: ≥95%)
-    Precision: {precision*100:>6.1f}%  {precision_icon}  (Acceptable: ≥10%)
-    F1 Score:  {f1*100:>6.1f}%
+    Recall:    {recall*100:>6.1f}%  {recall_icon}
+    Precision: {precision*100:>6.1f}%  {precision_icon}
     
-    V7 Strategy: Predict 8894 when IBAN is expected but not properly provided
-    - Declared IBAN but invalid format
-    - Malformed IBAN-like strings
-    - IBAN country in message but no valid IBAN found
+    V8 Strategy:
+    - Exclude BICs from malformed IBAN detection
+    - Focus: IBAN country (like CR) but plain account number provided
+    - Target specific high-signal patterns
     """)
 
 
