@@ -16,8 +16,8 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Set
 
-sys.path.insert(0, '/mnt/project')
 from data_pipeline import IFMLDataPipeline
+#YK
 
 TARGET_CODE = '8004'
 
