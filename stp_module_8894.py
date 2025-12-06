@@ -3,7 +3,7 @@
 Test rules for 8894 against actual IFMLs.
 8894 = IBAN Validation Failed
 
-Description: IBAN checksum invalid, format wrong, or derivation failed
+Description: IBAN checksum invalid, format wrong, or contains invalid characters
 
 Includes:
 - TP/TN/FP/FN metrics with Precision/Recall/F1
@@ -112,19 +112,18 @@ FEATURE_DOCS = """
 FEATURE DOCUMENTATION FOR 8894 (IBAN Validation Failed)
 ================================================================================
 
-8894 fires when: IBAN checksum invalid, format wrong, or derivation failed
+8894 fires when: IBAN checksum invalid, format wrong, or contains invalid characters
 
 KEY FEATURES:
 ┌────────────────────────────────┬────────────────────────────────────────────┐
 │ Feature                        │ Meaning                                    │
 ├────────────────────────────────┼────────────────────────────────────────────┤
-│ account_has_dirty_chars        │ Account has invalid characters that brea... │
-│ iban_checksum_valid            │ IBAN MOD-97 checksum. Move first 4 chars... │
-│ iban_valid_format              │ IBAN matches expected format for its cou... │
+│ account_has_dirty_chars        │ Account has invalid characters (spaces, ... │
+│ iban_checksum_valid            │ IBAN MOD-97 checksum passes (should be T... │
+│ iban_valid_format              │ IBAN matches expected format for country   │
 │ needs_iban                     │ Party needs IBAN (in IBAN-mandatory coun... │
-│ dbt_is_international           │ Debtor is international (triggers strict... │
-│ has_bic                        │ Party bank has BIC (triggers BIC-IBAN co... │
-│ is_cross_border                │ Payment is cross-border (triggers valida... │
+│ has_invalid_iban               │ Message contains an invalid IBAN           │
+│ iban_validation_failed         │ IBAN validation explicitly failed          │
 └────────────────────────────────┴────────────────────────────────────────────┘
 
 REMEMBER:
@@ -147,48 +146,42 @@ def check_rules(features: Dict) -> Tuple[bool, List[str]]:
     def get(feat, default=None):
         return features.get(feat, default)
 
-    # Rule 1: Account contains invalid characters
+    # TIGHTENED RULES: Only fire on strong signals of IBAN validation failure.
+    # Avoid broad triggers like has_bic/is_international which cause FP.
+    
+    # Rule 1: Account contains invalid characters (STRONG signal)
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
         if get(f'{prefix}account_has_dirty_chars', False):
             party = prefix.upper().rstrip('_')
-            reasons.append(f"{party}: account has invalid chars")
+            reasons.append(f"{party}: account has dirty chars")
     
-    # Rule 2: IBAN checksum is invalid
+    # Rule 2: IBAN checksum is invalid (STRONG signal)
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
         if get(f'{prefix}has_iban', False) and get(f'{prefix}iban_checksum_valid') == False:
             party = prefix.upper().rstrip('_')
             reasons.append(f"{party}: IBAN checksum invalid")
     
-    # Rule 3: Party needs IBAN (IBAN processing triggered)
+    # Rule 3: IBAN format is invalid (STRONG signal)
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
-        if get(f'{prefix}needs_iban', False):
+        if get(f'{prefix}has_iban', False) and get(f'{prefix}iban_valid_format') == False:
             party = prefix.upper().rstrip('_')
-            reasons.append(f"{party}: needs IBAN")
+            reasons.append(f"{party}: IBAN format invalid")
     
-    # Rule 4: Party has bank BIC (triggers IBAN validation)
-    # This is the KEY rule - BNF having BIC triggers 8894_BNPPTY
+    # Rule 4: Party needs IBAN but doesn't have one (specific trigger)
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
-        if get(f'{prefix}has_bic', False):
+        if get(f'{prefix}needs_iban', False) and not get(f'{prefix}has_iban', False):
             party = prefix.upper().rstrip('_')
-            reasons.append(f"{party}: bank has BIC (triggers IBAN validation)")
+            reasons.append(f"{party}: needs IBAN but missing")
     
-    # Rule 5: BNF has BIC but no IBAN (EXPLICIT - catches 8894_BNPPTY)
-    if get('bnf_has_bic', False) and not get('bnf_has_iban', False):
-        reasons.append("BNF: bank has BIC but no IBAN (8894_BNPPTY trigger)")
+    # Rule 5: Has invalid IBAN flag
+    if get('has_invalid_iban', False):
+        reasons.append("has_invalid_iban=True")
     
-    # Rule 6: Debtor is international
-    if get('dbt_is_international', False):
-        reasons.append("DBT: is international")
-    
-    # Rule 7: Has both bank BIC and account IBAN (pair validation)
+    # Rule 6: IBAN validation specifically failed
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
-        if get(f'{prefix}has_bic', False) and get(f'{prefix}has_iban', False):
+        if get(f'{prefix}iban_validation_failed', False):
             party = prefix.upper().rstrip('_')
-            reasons.append(f"{party}: has bank BIC + account IBAN")
-    
-    # Rule 8: Cross-border payment (triggers stricter validation)
-    if get('is_cross_border', False):
-        reasons.append("is_cross_border=True")
+            reasons.append(f"{party}: IBAN validation failed")
 
     
     return len(reasons) > 0, reasons
@@ -197,16 +190,15 @@ def check_rules(features: Dict) -> Tuple[bool, List[str]]:
 def get_debug_features(features: Dict) -> Dict:
     """Extract key features for debugging failures."""
     return {
-        'dbt_account_has_dirty_chars': features.get('dbt_account_has_dirty_chars'),
-        'cdt_account_has_dirty_chars': features.get('cdt_account_has_dirty_chars'),
         'bnf_account_has_dirty_chars': features.get('bnf_account_has_dirty_chars'),
-        'dbt_is_international': features.get('dbt_is_international'),
+        'cdt_account_has_dirty_chars': features.get('cdt_account_has_dirty_chars'),
+        'dbt_account_has_dirty_chars': features.get('dbt_account_has_dirty_chars'),
         'bnf_has_iban': features.get('bnf_has_iban'),
         'bnf_iban_valid_format': features.get('bnf_iban_valid_format'),
         'bnf_iban_checksum_valid': features.get('bnf_iban_checksum_valid'),
-        'bnf_has_bic': features.get('bnf_has_bic'),
-        'is_cross_border': features.get('is_cross_border'),
         'bnf_needs_iban': features.get('bnf_needs_iban'),
+        'cdt_needs_iban': features.get('cdt_needs_iban'),
+        'has_invalid_iban': features.get('has_invalid_iban'),
     }
 
 
