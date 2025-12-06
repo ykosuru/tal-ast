@@ -106,7 +106,79 @@ KEY DISTINCTION:
 # RULE IMPLEMENTATION (from validate_8xxx_all.py - WINNING VERSION)
 # =============================================================================
 
-def check_8894_rules(features: Dict) -> Tuple[bool, List[str]]:
+def check_8894_rules(features: Dict) -> Tuple[bool, List[str], Optional[str]]:
+    """
+    8894 = IBAN Validation Failed
+   
+    Rules from validate_8xxx_all.py (99.6% recall, 43.3% precision)
+   
+    These rules predict when ACE will VALIDATE an IBAN, which may fail due to:
+    - Invalid checksum
+    - Wrong format for country
+    - BIC-IBAN mismatch
+    - Bank not in directory
+    """
+    reasons = []
+    triggering_parties = set()
+   
+    def get(feat, default=None):
+        return features.get(feat, default)
+   
+    # Rule 1: Account has dirty/invalid characters
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}account_has_dirty_chars', False):
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: account_has_dirty_chars=True (invalid characters)")
+            triggering_parties.add(party)
+   
+    # Rule 2: IBAN checksum invalid
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        has_iban = get(f'{prefix}has_iban', False)
+        checksum_valid = get(f'{prefix}iban_checksum_valid')
+        if has_iban and not checksum_valid:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has_iban AND checksum_valid=False (checksum failure)")
+            triggering_parties.add(party)
+   
+    # Rule 3: Party needs IBAN
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}needs_iban', False):
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: needs_iban=True (IBAN processing triggered)")
+            triggering_parties.add(party)
+   
+    # Rule 4: International debtor (gated for precision)
+    if get('dbt_is_international', False) and (get('bnf_needs_iban', False) or get('cdt_needs_iban', False)):
+        reasons.append("DBT: is_international=True (cross-border validation, with BNF/CDT IBAN need)")
+        triggering_parties.add('BNF' if get('bnf_needs_iban', False) else 'CDT')  # Infer primary party
+   
+    # Rule 5: Has both BIC and IBAN
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        has_bic = get(f'{prefix}has_bic', False)
+        has_iban = get(f'{prefix}has_iban', False)
+        if has_bic and has_iban:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has both BIC and IBAN (BIC-IBAN consistency check)")
+            triggering_parties.add(party)
+   
+    predicted = len(reasons) > 0
+    
+    # Infer suffix for emission
+    predicted_code = None
+    if predicted:
+        if 'BNF' in triggering_parties:
+            suffix = '_BNPPTY'
+        elif 'CDT' in triggering_parties:
+            suffix = '_CDTPTY'
+        elif 'DBT' in triggering_parties:
+            suffix = '_DBTPTY'
+        else:
+            suffix = '_BNFBNK'
+        predicted_code = f"{TARGET_CODE}{suffix}"
+    
+    return predicted, reasons, predicted_code
+    
+def check_8894_rules_old(features: Dict) -> Tuple[bool, List[str]]:
     """
     8894 = IBAN Validation Failed
     
