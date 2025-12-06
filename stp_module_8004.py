@@ -118,11 +118,15 @@ KEY FEATURES:
 ┌────────────────────────────────┬────────────────────────────────────────────┐
 │ Feature                        │ Meaning                                    │
 ├────────────────────────────────┼────────────────────────────────────────────┤
-│ bnf_needs_iban                 │ Beneficiary is in IBAN-country but their... │
-│ bnf_has_iban                   │ Beneficiary account (CdtrAcct) contains ... │
+│ bnf_present                    │ Beneficiary party exists in message        │
+│ bnf_needs_iban                 │ Beneficiary is in IBAN-country             │
+│ bnf_has_iban                   │ Beneficiary account has IBAN               │
 │ bnf_has_account                │ Beneficiary has a bank account number      │
-│ cdt_needs_iban                 │ Creditor (=Beneficiary) needs IBAN but m... │
-│ missing_required_iban          │ System flag: required IBAN is missing      │
+│ cdt_present                    │ Creditor party exists in message           │
+│ cdt_needs_iban                 │ Creditor (=Beneficiary) needs IBAN         │
+│ cdt_has_iban                   │ Creditor account has IBAN                  │
+│ send_has_bic                   │ Sender has BIC                             │
+│ send_bic_valid_format          │ Sender's BIC format is valid               │
 └────────────────────────────────┴────────────────────────────────────────────┘
 
 REMEMBER:
@@ -135,45 +139,86 @@ REMEMBER:
 """
 
 
-def check_rules(features: Dict) -> Tuple[bool, List[str]]:
+def check_8004_rf_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
-    Check if 8004 should fire based on extracted rules.
-    Returns (should_fire, list_of_reasons)
+    Check if 8004 should fire based on RF-extracted rules.
+    Returns (should_fire, reasons)
+    
+    ORIGINAL LOGIC - RESTORED
     """
     reasons = []
     
+    # Helper to get feature with fallback
     def get(feat, default=None):
-        return features.get(feat, default)
-
-    # Rule 1: Party needs IBAN but account doesn't have it
+        if feat in features:
+            return features[feat]
+        return default
+    
+    matches = 0
+    
+    # -------------------------------------------------------------------------
+    # Rule 1: Original 8004 logic - needs_iban but doesn't have it
+    # -------------------------------------------------------------------------
+    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_', 'intm_']:
+        party_present = get(f'{prefix}present', False)
+        needs_iban = get(f'{prefix}needs_iban', False)
+        has_iban = get(f'{prefix}has_iban', False)
+        
+        if party_present and needs_iban and not has_iban:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: needs_iban=True, has_iban=False")
+            matches += 1
+    
+    # -------------------------------------------------------------------------
+    # Rule 2: NEW - has_account but no IBAN (ACE tries to derive and fails)
+    # -------------------------------------------------------------------------
     for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
-        if get(f'{prefix}needs_iban', False) and not get(f'{prefix}has_iban', False):
-            party = prefix.upper().rstrip('_')
-            reasons.append(f"{party}: needs_iban but account has no IBAN")
+        party_present = get(f'{prefix}present', False)
+        has_account = get(f'{prefix}has_account', False)
+        has_iban = get(f'{prefix}has_iban', False)
+        
+        # If party has account but no IBAN, ACE may try to derive IBAN
+        if party_present and has_account and not has_iban:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has_account=True, has_iban=False (IBAN derivation may fail)")
+            matches += 1
     
-    # Rule 2: Has account number but no IBAN (may need IBAN derivation)
-    for prefix in ['bnf_', 'cdt_', 'dbt_']:
-        if get(f'{prefix}has_account', False) and not get(f'{prefix}has_iban', False):
-            party = prefix.upper().rstrip('_')
-            reasons.append(f"{party}: has account but no IBAN")
+    # -------------------------------------------------------------------------
+    # Rule 3: RF pattern - BIC validation failures correlate with 8004
+    # -------------------------------------------------------------------------
+    for prefix in ['send_', 'bnf_', 'cdt_', 'intm_']:
+        has_bic = get(f'{prefix}has_bic', False)
+        bic_valid_format = get(f'{prefix}bic_valid_format', True)
+        bic_valid_country = get(f'{prefix}bic_valid_country', True)
+        
+        if has_bic and not bic_valid_format:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has_bic but bic_valid_format=False")
+            matches += 1
+        
+        if has_bic and not bic_valid_country:
+            party = prefix.rstrip('_').upper()
+            reasons.append(f"{party}: has_bic but bic_valid_country=False")
+            matches += 1
     
-    # Rule 3: System flag for missing required IBAN
-    if get('missing_required_iban', False):
-        reasons.append("missing_required_iban=True")
-
+    # Fire if we found any matching pattern
+    should_fire = matches > 0
     
-    return len(reasons) > 0, reasons
+    return should_fire, reasons
 
 
 def get_debug_features(features: Dict) -> Dict:
     """Extract key features for debugging failures."""
     return {
+        'bnf_present': features.get('bnf_present'),
         'bnf_needs_iban': features.get('bnf_needs_iban'),
         'bnf_has_iban': features.get('bnf_has_iban'),
         'bnf_has_account': features.get('bnf_has_account'),
+        'cdt_present': features.get('cdt_present'),
         'cdt_needs_iban': features.get('cdt_needs_iban'),
         'cdt_has_iban': features.get('cdt_has_iban'),
-        'missing_required_iban': features.get('missing_required_iban'),
+        'send_has_bic': features.get('send_has_bic'),
+        'send_bic_valid_format': features.get('send_bic_valid_format'),
     }
 
 
@@ -223,7 +268,7 @@ def main():
         codes = record.error_codes_only + (record.composite_codes or [])
         
         has_actual = any(TARGET_CODE in str(c) for c in codes)
-        predicted, reasons = check_rules(features)
+        predicted, reasons = check_8004_rf_rules(features)
         
         if predicted and has_actual:
             tp_list.append((txn_id, reasons, codes))
@@ -291,7 +336,7 @@ def main():
         
         if fn_patterns:
             print("Pattern Analysis:")
-            for p, c in sorted(fn_patterns.items(), key=lambda x: -x[1])[:8]:
+            for p, c in sorted(fn_patterns.items(), key=lambda x: -x[1])[:10]:
                 print(f"  {p}: {c} ({c/fn*100:.1f}%)")
             print()
         
@@ -307,9 +352,21 @@ def main():
         print("="*70)
         print(f"OVER-PREDICTED: Rules said {TARGET_CODE} but it didn't occur.\n")
         
+        fp_patterns = defaultdict(int)
+        for _, reasons, _, _ in fp_list:
+            for r in reasons:
+                trigger = r.split(':')[0] if ':' in r else r
+                fp_patterns[trigger] += 1
+        
+        if fp_patterns:
+            print("FP Trigger Analysis:")
+            for p, c in sorted(fp_patterns.items(), key=lambda x: -x[1])[:10]:
+                print(f"  {p}: {c} ({c/fp*100:.1f}%)")
+            print()
+        
         for i, (txn, reasons, codes, _) in enumerate(fp_list[:args.show_fp], 1):
             print(f"{i}. {txn}")
-            print(f"   Reason: {reasons[0] if reasons else '?'}")
+            print(f"   Trigger: {reasons[0] if reasons else '?'}")
             print(f"   Actual: {codes}\n")
     
     # Summary
@@ -322,6 +379,12 @@ def main():
     Recall:    {recall*100:>6.1f}%  {r_icon}  (Target: ≥99%)
     Precision: {precision*100:>6.1f}%  {p_icon}  (Lower OK for prediction)
     F1 Score:  {f1*100:>6.1f}%
+    
+    Rules (ORIGINAL LOGIC RESTORED):
+    1. party_present AND needs_iban AND NOT has_iban
+    2. party_present AND has_account AND NOT has_iban (IBAN derivation may fail)
+    3. has_bic AND NOT bic_valid_format
+    4. has_bic AND NOT bic_valid_country
     
     --show-docs   Show feature documentation
     --show-party  Show party reference (BNF vs BNP, Party vs Bank)
