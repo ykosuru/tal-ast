@@ -3,7 +3,7 @@
 Test rules for 8895 against actual IFMLs.
 8895 = NCH Validation Failed
 
-Description: National Clearing House code validation failed (domestic routing)
+Description: National Clearing House code validation failed (ABA, Sort Code, BLZ, BSB)
 
 Includes:
 - TP/TN/FP/FN metrics with Precision/Recall/F1
@@ -112,18 +112,19 @@ FEATURE_DOCS = """
 FEATURE DOCUMENTATION FOR 8895 (NCH Validation Failed)
 ================================================================================
 
-8895 fires when: National Clearing House code validation failed (domestic routing)
+8895 fires when: National Clearing House code validation failed (ABA, Sort Code, BLZ, BSB)
 
 KEY FEATURES:
 ┌────────────────────────────────┬────────────────────────────────────────────┐
 │ Feature                        │ Meaning                                    │
 ├────────────────────────────────┼────────────────────────────────────────────┤
 │ has_invalid_iban               │ Message contains an invalid IBAN           │
-│ nch_validation_applicable      │ NCH validation applies (party in domesti... │
-│ bic_iban_mismatch_count        │ Count of parties where bank BIC country ... │
+│ bic_iban_mismatch_count        │ Count of parties where BIC country ≠ IBA... │
+│ nch_valid                      │ NCH routing code is valid (False = valid... │
+│ has_nch                        │ Party has NCH routing code                 │
 │ total_nch_sources              │ Total NCH codes found in message           │
-│ dbt_is_domestic                │ Debtor is domestic - triggers NCH valida... │
-│ cdt_is_domestic                │ Creditor is domestic                       │
+│ has_nch_issue                  │ NCH validation issue detected              │
+│ invalid_nch_format             │ NCH code has invalid format                │
 └────────────────────────────────┴────────────────────────────────────────────┘
 
 REMEMBER:
@@ -146,30 +147,48 @@ def check_rules(features: Dict) -> Tuple[bool, List[str]]:
     def get(feat, default=None):
         return features.get(feat, default)
 
-    # Rule 1: Message has invalid IBAN
+    # 8895 = NCH (National Clearing House) validation failed
+    # NCH codes: ABA (US), Sort Code (UK), BLZ (DE), BSB (AU), etc.
+    
+    # Rule 1: Has invalid IBAN (strong signal)
     if get('has_invalid_iban', False):
         reasons.append("has_invalid_iban=True")
     
-    # Rule 2: NCH validation applies
-    for prefix in ['bnf_', 'cdt_', 'orig_', 'dbt_']:
-        if get(f'{prefix}nch_validation_applicable', False):
-            party = prefix.upper().rstrip('_')
-            reasons.append(f"{party}: NCH validation applicable")
-    
-    # Rule 3: Bank BIC / Account IBAN country mismatch
+    # Rule 2: BIC/IBAN country mismatch (triggers NCH fallback)
     if (get('bic_iban_mismatch_count', 0) or 0) > 0:
-        reasons.append(f"bic_iban_mismatch_count={get('bic_iban_mismatch_count')}")
+        reasons.append(f"bic_iban_mismatch={get('bic_iban_mismatch_count')}")
     
-    # Rule 4: NCH codes found (domestic routing)
-    if (get('total_nch_sources', 0) or 0) > 0:
-        reasons.append(f"total_nch_sources={get('total_nch_sources')}")
+    # Rule 3: NCH validation failed explicitly
+    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
+        if get(f'{prefix}nch_valid') == False:
+            party = prefix.upper().rstrip('_')
+            reasons.append(f"{party}: NCH validation failed")
     
-    # Rule 5: Domestic payment (triggers NCH validation)
-    if get('dbt_is_domestic', False):
-        reasons.append("DBT: is domestic (triggers NCH validation)")
+    # Rule 4: Has NCH code but invalid format
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        if get(f'{prefix}has_nch', False) and get(f'{prefix}nch_valid') == False:
+            party = prefix.upper().rstrip('_')
+            reasons.append(f"{party}: has NCH but invalid")
     
-    if get('cdt_is_domestic', False):
-        reasons.append("CDT: is domestic")
+    # Rule 5: Multiple NCH sources (ambiguous routing)
+    if (get('total_nch_sources', 0) or 0) > 1:
+        reasons.append(f"multiple NCH sources={get('total_nch_sources')}")
+    
+    # Rule 6: Domestic with NCH issues
+    if get('dbt_is_domestic', False) and get('has_nch_issue', False):
+        reasons.append("DBT: domestic with NCH issue")
+    
+    # Rule 7: NCH code present but party also has IBAN mismatch
+    for prefix in ['bnf_', 'cdt_', 'dbt_']:
+        has_nch = (get(f'{prefix}nch_sources', 0) or 0) > 0
+        has_mismatch = get(f'{prefix}bic_iban_match') == False
+        if has_nch and has_mismatch:
+            party = prefix.upper().rstrip('_')
+            reasons.append(f"{party}: NCH + BIC/IBAN mismatch")
+    
+    # Rule 8: Invalid NCH format detected
+    if get('invalid_nch_format', False):
+        reasons.append("invalid_nch_format=True")
 
     
     return len(reasons) > 0, reasons
@@ -179,11 +198,15 @@ def get_debug_features(features: Dict) -> Dict:
     """Extract key features for debugging failures."""
     return {
         'has_invalid_iban': features.get('has_invalid_iban'),
-        'nch_validation_applicable': features.get('nch_validation_applicable'),
         'bic_iban_mismatch_count': features.get('bic_iban_mismatch_count'),
         'total_nch_sources': features.get('total_nch_sources'),
+        'bnf_nch_valid': features.get('bnf_nch_valid'),
+        'cdt_nch_valid': features.get('cdt_nch_valid'),
+        'dbt_nch_valid': features.get('dbt_nch_valid'),
         'dbt_is_domestic': features.get('dbt_is_domestic'),
         'cdt_is_domestic': features.get('cdt_is_domestic'),
+        'bnf_nch_sources': features.get('bnf_nch_sources'),
+        'bnf_bic_iban_match': features.get('bnf_bic_iban_match'),
     }
 
 
@@ -340,4 +363,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
