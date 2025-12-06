@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Test 8004 Rules - V6 (CDT Party - Beneficiary)
+Test 8004 Rules - V8 (CDT in IBAN Country)
 
 8004 = IBAN Cannot Be Derived
 
-Key insight from debug:
-- Error is 8004_BNPPTY = Beneficiary PARTY = CreditPartyInfo (CDT), not BeneficiaryBankInfo (BNF)!
-- Mapping: BNPPTY -> CDT (credit party = beneficiary party)
-- 8004 fires when CDT is international, has account but no IBAN
+Logic:
+- 8004 fires when ACE tries to derive IBAN but fails
+- IBAN derivation only happens for countries that USE IBAN
+- So check if CDT country is in IBAN_LENGTHS (73 countries)
 
 Rules:
-1. cdt_is_international=True AND cdt_has_iban=False AND cdt_has_account=True
+1. CDT country IN IBAN_COUNTRIES AND cdt_has_account=True AND cdt_has_iban=False
 2. missing_required_iban=True
+
+NO HARDCODING - uses IBAN_LENGTHS from ifml_parser.py
 """
 
 import sys
@@ -21,28 +23,49 @@ from typing import Dict, List, Tuple
 
 sys.path.insert(0, '/mnt/project')
 from data_pipeline import IFMLDataPipeline
+from ifml_parser import IBAN_LENGTHS
 
 TARGET_CODE = '8004'
+
+# IBAN countries from the parser (73 countries)
+IBAN_COUNTRIES = set(IBAN_LENGTHS.keys())
+
+
+def get_cdt_country(features: Dict) -> str:
+    """Get CDT country from various sources."""
+    return (
+        features.get('cdt_residence_country') or
+        features.get('cdt_address_country') or
+        features.get('cdt_country') or
+        features.get('cdt_bic_country') or
+        features.get('cdt_iban_country') or
+        ''
+    )
 
 
 def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
     Check if 8004 should be predicted.
     
-    V6: Check CDT (CreditPartyInfo = Beneficiary Party) since 8004_BNPPTY refers to CDT not BNF.
+    V8: Check if CDT country is in IBAN_COUNTRIES (no hardcoding)
     """
     reasons = []
     
     def get(feat, default=None):
         return features.get(feat, default)
     
-    # Rule 1: CDT (Beneficiary Party) is international, has account, but no IBAN
-    cdt_is_intl = get('cdt_is_international', False)
+    # Get CDT country from various sources
+    cdt_country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
+    
+    # Rule 1: CDT is in IBAN country, has account, but no IBAN
     cdt_has_iban = get('cdt_has_iban', False)
     cdt_has_account = get('cdt_has_account', False)
     
-    if cdt_is_intl and not cdt_has_iban and cdt_has_account:
-        reasons.append("CDT: international + has_account + no IBAN")
+    # Check if country uses IBAN
+    is_iban_country = cdt_country in IBAN_COUNTRIES
+    
+    if is_iban_country and cdt_has_account and not cdt_has_iban:
+        reasons.append(f"CDT: country={cdt_country} (IBAN country) + has_account + no IBAN")
     
     # Rule 2: System flag for missing required IBAN
     if get('missing_required_iban', False):
@@ -53,11 +76,13 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Test 8004 rules (V6 - CDT Party)')
+    parser = argparse.ArgumentParser(description='Test 8004 rules (V8 - IBAN Country)')
     parser.add_argument('--data-dir', required=True, help='Directory with IFML JSON files')
     parser.add_argument('--sample-size', type=int, default=10, help='Number of samples to show')
     
     args = parser.parse_args()
+    
+    print(f"Using {len(IBAN_COUNTRIES)} IBAN countries from IBAN_LENGTHS")
     
     # Load data
     print("Loading IFML data...")
@@ -95,7 +120,11 @@ def main():
         
         # Track what triggered predictions
         for r in reasons:
-            prediction_triggers[r] += 1
+            # Simplify trigger for counting
+            if "IBAN country" in r:
+                prediction_triggers["CDT: IBAN country + has_account + no IBAN"] += 1
+            else:
+                prediction_triggers[r] += 1
         
         # Confusion matrix
         if predicted and actual_8004:
@@ -117,7 +146,7 @@ def main():
     
     # Print results
     print("\n" + "=" * 70)
-    print(f"TEST RESULTS: 8004 - IBAN Cannot Be Derived (V6 - CDT Party)")
+    print(f"TEST RESULTS: 8004 - IBAN Cannot Be Derived (V8 - IBAN Country)")
     print("=" * 70)
     
     print(f"\nCONFUSION MATRIX:")
@@ -132,11 +161,11 @@ def main():
     print(f"  Recall:     {recall*100:.2f}%  (TP / (TP + FN))")
     print(f"  F1 Score:   {f1*100:.2f}%")
     
-    print(f"\nRULES (V6 - CDT = BENEFICIARY PARTY):")
-    print(f"  1. cdt_is_international=True AND cdt_has_iban=False AND cdt_has_account=True")
+    print(f"\nRULES (V8 - IBAN COUNTRY CHECK):")
+    print(f"  1. cdt_country IN IBAN_COUNTRIES AND cdt_has_account=True AND cdt_has_iban=False")
     print(f"  2. missing_required_iban=True")
-    print(f"\n  KEY INSIGHT: 8004_BNPPTY refers to CDT (CreditPartyInfo), not BNF!")
-    print(f"               BNPPTY = Beneficiary Party = Credit Party")
+    print(f"\n  Uses IBAN_LENGTHS from ifml_parser.py ({len(IBAN_COUNTRIES)} countries)")
+    print(f"  NO HARDCODING - only predicts for actual IBAN countries")
     
     print(f"\nPREDICTION TRIGGERS:")
     for trigger, count in sorted(prediction_triggers.items(), key=lambda x: -x[1]):
@@ -160,21 +189,22 @@ def main():
     
     # Analyze FP countries
     fp_countries = defaultdict(int)
-    for _, _, _, features in fp_list[:100]:
-        country = features.get('cdt_residence_country') or features.get('cdt_address_country') or features.get('cdt_country')
+    for _, _, _, features in fp_list[:200]:
+        country = get_cdt_country(features)
         if country:
-            fp_countries[country] += 1
+            fp_countries[country.upper()] += 1
     
     print(f"\nFP by CDT country:")
     for country, count in sorted(fp_countries.items(), key=lambda x: -x[1])[:10]:
-        print(f"  {country}: {count}")
+        in_iban = "✓ IBAN" if country in IBAN_COUNTRIES else "✗ not IBAN"
+        print(f"  {country}: {count} ({in_iban})")
     
     print(f"\nSample FPs:")
     for i, (txn_id, reasons, codes, features) in enumerate(fp_list[:args.sample_size]):
-        cdt_country = features.get('cdt_residence_country') or features.get('cdt_address_country')
+        cdt_country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
+        in_iban = "IBAN" if cdt_country in IBAN_COUNTRIES else "not IBAN"
         print(f"  {i+1}. {txn_id}")
-        print(f"     Trigger: {reasons[0] if reasons else 'none'}")
-        print(f"     CDT country: {cdt_country}")
+        print(f"     CDT country: {cdt_country} ({in_iban})")
         print(f"     Actual codes: {codes[:5]}")
     
     # Show FN analysis
@@ -184,38 +214,43 @@ def main():
     
     # Analyze patterns in FN
     fn_patterns = defaultdict(int)
+    fn_countries = defaultdict(int)
     for _, _, codes, features in fn_list[:100]:
-        if features.get('cdt_is_international') == False:
-            fn_patterns['cdt_is_international=False'] += 1
-        if features.get('cdt_is_international') == True:
-            fn_patterns['cdt_is_international=True'] += 1
+        cdt_country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
+        
+        if cdt_country:
+            fn_countries[cdt_country] += 1
+            in_iban = cdt_country in IBAN_COUNTRIES
+            fn_patterns[f'in_IBAN_COUNTRIES={in_iban}'] += 1
+        else:
+            fn_patterns['cdt_country=None'] += 1
+            
         if features.get('cdt_has_iban') == False:
             fn_patterns['cdt_has_iban=False'] += 1
         if features.get('cdt_has_account') == True:
             fn_patterns['cdt_has_account=True'] += 1
         if features.get('cdt_has_account') == False:
             fn_patterns['cdt_has_account=False'] += 1
-        if features.get('cdt_present') == False:
-            fn_patterns['cdt_present=False'] += 1
-        
-        country = features.get('cdt_residence_country') or features.get('cdt_address_country')
-        if country:
-            fn_patterns[f'cdt_country={country}'] += 1
     
     print(f"\nPattern Analysis (CDT features in FN cases):")
-    for pattern, count in sorted(fn_patterns.items(), key=lambda x: -x[1])[:20]:
+    for pattern, count in sorted(fn_patterns.items(), key=lambda x: -x[1])[:10]:
         pct = count / min(100, len(fn_list)) * 100
         print(f"  {pattern}: {count} ({pct:.1f}%)")
     
+    print(f"\nFN by CDT country:")
+    for country, count in sorted(fn_countries.items(), key=lambda x: -x[1])[:10]:
+        in_iban = "✓ IBAN" if country in IBAN_COUNTRIES else "✗ not IBAN"
+        print(f"  {country}: {count} ({in_iban})")
+    
     print(f"\nSample FNs:")
     for i, (txn_id, reasons, codes, features) in enumerate(fn_list[:args.sample_size]):
-        cdt_country = features.get('cdt_residence_country') or features.get('cdt_address_country')
+        cdt_country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
+        in_iban = "IBAN" if cdt_country in IBAN_COUNTRIES else "not IBAN"
         print(f"  {i+1}. {txn_id}")
         print(f"     Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
-        print(f"     cdt_is_international={features.get('cdt_is_international')}")
+        print(f"     cdt_country={cdt_country} ({in_iban})")
         print(f"     cdt_has_account={features.get('cdt_has_account')}")
         print(f"     cdt_has_iban={features.get('cdt_has_iban')}")
-        print(f"     cdt_country={cdt_country}")
     
     # Summary
     print("\n" + "=" * 70)
@@ -229,9 +264,10 @@ def main():
     print(f"  Precision:  {precision*100:.1f}% {precision_status}")
     print(f"  F1 Score:   {f1*100:.1f}%")
     
-    print(f"\nV6 Changes:")
-    print(f"  - Fixed party mapping: BNPPTY = CDT (CreditPartyInfo), not BNF")
-    print(f"  - Rule: cdt_is_international + cdt_has_account + no cdt_has_iban")
+    print(f"\nV8 Changes:")
+    print(f"  - No hardcoding - uses IBAN_LENGTHS from ifml_parser.py")
+    print(f"  - Only predicts 8004 for countries that actually use IBAN")
+    print(f"  - Rule: cdt_country IN IBAN_COUNTRIES + has_account + no IBAN")
 
 
 if __name__ == "__main__":
