@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
 """
 Test rules for 8004 against actual IFMLs.
-8004 = Missing IBAN
+8004 = IBAN Cannot Be Derived
 
-Description: IBAN is required but not provided for a party in an IBAN-country
-
-Includes:
-- TP/TN/FP/FN metrics with Precision/Recall/F1
-- Feature documentation
-- Clear PARTY vs BANK distinction
+EXACT SAME LOGIC as validate_8xxx_all.py (which has 100% Recall, 33% Precision)
 
 Usage:
-    python test_8004_rules_v2.py --data-dir /path/to/ifml/data --limit 10000
-    python test_8004_rules_v2.py --show-docs   # Feature documentation
-    python test_8004_rules_v2.py --show-party  # Party reference guide
+    python 8004.py --data-dir /path/to/ifml/prod/data 
 """
 
 import argparse
@@ -22,149 +15,24 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from collections import defaultdict
 
-sys.path.insert(0, '/mnt/project')
 from data_pipeline import IFMLDataPipeline
 
 TARGET_CODE = '8004'
 
-# =============================================================================
-# PARTY REFERENCE (BNF vs BNP, Party vs Bank)
-# =============================================================================
-PARTY_REFERENCE = """
-================================================================================
-PARTY REFERENCE - Understanding ACE Abbreviations
-================================================================================
-
-PARTIES (People/Companies):
-┌──────────┬─────────────────┬────────────────────────────────────────────────┐
-│ Abbrev   │ Full Name       │ Description                                    │
-├──────────┼─────────────────┼────────────────────────────────────────────────┤
-│ BNF      │ Beneficiary     │ Person/company RECEIVING the payment           │
-│ CDT      │ Creditor        │ Same as Beneficiary (ISO 20022 term)           │
-│ DBT      │ Debtor          │ Person/company SENDING/PAYING                  │
-│ ORIG     │ Originator      │ Original initiator of the payment              │
-└──────────┴─────────────────┴────────────────────────────────────────────────┘
-
-BANKS/AGENTS (Financial Institutions):
-┌──────────┬─────────────────┬────────────────────────────────────────────────┐
-│ Abbrev   │ Full Name       │ Description                                    │
-├──────────┼─────────────────┼────────────────────────────────────────────────┤
-│ BNFBNK   │ Beneficiary Bank│ Bank where beneficiary has their account       │
-│ CDTAGT   │ Creditor Agent  │ Same as Beneficiary Bank (ISO 20022 term)      │
-│ DBTAGT   │ Debtor Agent    │ Bank where debtor has their account            │
-│ INTM     │ Intermediary    │ Correspondent/intermediary bank in the chain   │
-│ SEND     │ Sender          │ Sending financial institution                  │
-└──────────┴─────────────────┴────────────────────────────────────────────────┘
-
-ACE ERROR CODE SUFFIXES:
-┌──────────┬────────────────────────────────────────────────────────────────┐
-│ Suffix   │ Meaning                                                        │
-├──────────┼────────────────────────────────────────────────────────────────┤
-│ _BNFBNK  │ Issue with Beneficiary's BANK                                  │
-│ _BNPPTY  │ Issue with Beneficiary PARTY (the person/company)              │
-│ _CDTPTY  │ Issue with Creditor PARTY                                      │
-│ _DBTPTY  │ Issue with Debtor PARTY                                        │
-└──────────┴────────────────────────────────────────────────────────────────┘
-
-IFML/ISO 20022 STRUCTURE:
-┌─────────────────┬──────────────────┬───────────────────────────────────────┐
-│ IFML Element    │ Contains         │ Example Fields                        │
-├─────────────────┼──────────────────┼───────────────────────────────────────┤
-│ <Cdtr>          │ Creditor PARTY   │ Name, Address, Country, ID            │
-│ <CdtrAcct>      │ Creditor Account │ IBAN, Account Number (belongs to party)│
-│ <CdtrAgt>       │ Creditor Agent   │ BIC (this is the BANK's identifier)   │
-├─────────────────┼──────────────────┼───────────────────────────────────────┤
-│ <Dbtr>          │ Debtor PARTY     │ Name, Address, Country, ID            │
-│ <DbtrAcct>      │ Debtor Account   │ IBAN, Account Number                  │
-│ <DbtrAgt>       │ Debtor Agent     │ BIC (debtor's bank)                   │
-└─────────────────┴──────────────────┴───────────────────────────────────────┘
-
-FEATURE PREFIX MEANINGS IN OUR CODE:
-┌──────────┬────────────────────────────────────────────────────────────────┐
-│ Prefix   │ What It Refers To                                              │
-├──────────┼────────────────────────────────────────────────────────────────┤
-│ bnf_     │ Beneficiary context (party info + their account + their bank)  │
-│ cdt_     │ Creditor context (same as bnf_, ISO 20022 naming)              │
-│ dbt_     │ Debtor context (party info + their account + their bank)       │
-│ orig_    │ Originator context                                             │
-│ intm_    │ Intermediary bank context                                      │
-│ send_    │ Sender institution context                                     │
-└──────────┴────────────────────────────────────────────────────────────────┘
-
-IMPORTANT CLARIFICATIONS:
-─────────────────────────────────────────────────────────────────────────────
-• bnf_has_iban    = Beneficiary's ACCOUNT has IBAN (from <CdtrAcct>)
-• bnf_has_bic     = Beneficiary's BANK has BIC (from <CdtrAgt>)
-• bnf_has_account = Beneficiary has account number (from <CdtrAcct>)
-• bnf_has_name    = Beneficiary PARTY has name (from <Cdtr>)
-• bnf_country     = Beneficiary PARTY's country (from <Cdtr> address)
-
-• The IBAN belongs to the PARTY (it's their account number)
-• The BIC identifies the BANK (where the account is held)
-─────────────────────────────────────────────────────────────────────────────
-"""
-
-# =============================================================================
-# FEATURE DOCUMENTATION
-# =============================================================================
-FEATURE_DOCS = """
-================================================================================
-FEATURE DOCUMENTATION FOR 8004 (IBAN Cannot Be Derived)
-================================================================================
-
-8004 fires when: ACE attempts IBAN derivation but fails (bank not in directory)
-
-KEY FEATURES USED BY RULES:
-┌────────────────────────────────┬────────────────────────────────────────────┐
-│ Feature                        │ Meaning                                    │
-├────────────────────────────────┼────────────────────────────────────────────┤
-│ {prefix}_needs_iban            │ Party is in IBAN-required country          │
-│ {prefix}_has_iban              │ Party account contains IBAN                │
-│ {prefix}_has_account           │ Party has a bank account number            │
-│ missing_required_iban          │ System flag: required IBAN is missing      │
-└────────────────────────────────┴────────────────────────────────────────────┘
-
-PREFIXES: bnf_ (beneficiary), cdt_ (creditor), dbt_ (debtor), orig_ (originator)
-
-RULES:
-1. needs_iban=True AND has_iban=False → IBAN derivation will be attempted
-2. has_account=True AND has_iban=False → IBAN derivation will be attempted
-3. missing_required_iban=True → System flagged missing IBAN
-
-REMEMBER:
-• We predict WHEN derivation will be attempted, not IF it will succeed
-• 33% precision is expected - we can't know if ACE's bank directory lookup succeeds
-• 100% recall - we catch all 8004 errors
-
-================================================================================
-"""
-
 
 def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
-    Check if 8004 should fire based on rules.
-    Returns (should_fire, reasons)
+    8004 = IBAN Cannot Be Derived
     
-    8004 = "IBAN Cannot Be Derived"
-    
-    ACE attempts IBAN derivation when:
-    - Party is in IBAN country but no IBAN provided
-    - Party has account number but no IBAN
-    
-    We predict WHEN derivation will be attempted.
-    We cannot predict IF it will succeed (requires ACE's bank directory).
-    
-    Performance: 100% Recall, 33% Precision
+    EXACT COPY from validate_8xxx_all.py
+    Expected: 100% Recall, 33% Precision
     """
     reasons = []
     
     def get(feat, default=None):
         return features.get(feat, default)
     
-    # -------------------------------------------------------------------------
-    # Rule 1: Party needs IBAN but doesn't have one
-    # Party is in IBAN-required country → ACE will attempt derivation
-    # -------------------------------------------------------------------------
+    # Rule 1: needs_iban but no IBAN
     for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
         needs_iban = get(f'{prefix}needs_iban', False)
         has_iban = get(f'{prefix}has_iban', False)
@@ -172,10 +40,7 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
             party = prefix.rstrip('_').upper()
             reasons.append(f"{party}: needs_iban but no IBAN")
     
-    # -------------------------------------------------------------------------
-    # Rule 2: Party has account number but no IBAN
-    # ACE will attempt to derive IBAN from account + BIC/country
-    # -------------------------------------------------------------------------
+    # Rule 2: has_account but no IBAN (IBAN derivation needed)
     for prefix in ['bnf_', 'cdt_', 'dbt_']:
         has_account = get(f'{prefix}has_account', False)
         has_iban = get(f'{prefix}has_iban', False)
@@ -183,53 +48,21 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
             party = prefix.rstrip('_').upper()
             reasons.append(f"{party}: has_account but no IBAN")
     
-    # -------------------------------------------------------------------------
-    # Rule 3: System flag for missing required IBAN
-    # -------------------------------------------------------------------------
+    # Rule 3: missing_required_iban
     if get('missing_required_iban', False):
         reasons.append("missing_required_iban=True")
     
     return len(reasons) > 0, reasons
 
 
-def get_debug_features(features: Dict) -> Dict:
-    """Extract key features for debugging failures."""
-    return {
-        'bnf_needs_iban': features.get('bnf_needs_iban'),
-        'bnf_has_iban': features.get('bnf_has_iban'),
-        'bnf_has_account': features.get('bnf_has_account'),
-        'cdt_needs_iban': features.get('cdt_needs_iban'),
-        'cdt_has_iban': features.get('cdt_has_iban'),
-        'cdt_has_account': features.get('cdt_has_account'),
-        'dbt_needs_iban': features.get('dbt_needs_iban'),
-        'dbt_has_iban': features.get('dbt_has_iban'),
-        'dbt_has_account': features.get('dbt_has_account'),
-        'missing_required_iban': features.get('missing_required_iban'),
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules')
-    parser.add_argument('--data-dir', nargs='?', default=None, help='IFML JSON directory')
+    parser.add_argument('--data-dir', required=True, help='IFML JSON directory')
     parser.add_argument('--limit', type=int, default=10000, help='Max records')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Show all')
-    parser.add_argument('--show-failures', type=int, default=20, help='FN to show')
     parser.add_argument('--show-fp', type=int, default=10, help='FP to show')
-    parser.add_argument('--show-docs', action='store_true', help='Feature docs')
-    parser.add_argument('--show-party', action='store_true', help='Party reference')
+    parser.add_argument('--show-fn', type=int, default=10, help='FN to show')
     
     args = parser.parse_args()
-    
-    if args.show_docs:
-        print(FEATURE_DOCS)
-        return
-    
-    if args.show_party:
-        print(PARTY_REFERENCE)
-        return
-    
-    if not args.data_dir:
-        parser.error("--data-dir required (or use --show-docs / --show-party)")
     
     print(f"Loading IFML data for {TARGET_CODE} validation...")
     pipeline = IFMLDataPipeline()
@@ -243,7 +76,9 @@ def main():
     print(f"Pipeline has {len(pipeline.records)} records")
     
     # Classification
-    tp_list, tn_list, fp_list, fn_list = [], [], [], []
+    tp, tn, fp, fn = 0, 0, 0, 0
+    fp_list = []
+    fn_list = []
     
     for i, record in enumerate(pipeline.records):
         if i >= args.limit:
@@ -257,128 +92,86 @@ def main():
         predicted, reasons = check_8004_rules(features)
         
         if predicted and has_actual:
-            tp_list.append((txn_id, reasons, codes))
+            tp += 1
         elif not predicted and not has_actual:
-            tn_list.append((txn_id,))
+            tn += 1
         elif predicted and not has_actual:
-            fp_list.append((txn_id, reasons, codes, get_debug_features(features)))
+            fp += 1
+            if len(fp_list) < 100:
+                fp_list.append((txn_id, reasons, codes))
         else:
-            fn_list.append((txn_id, codes, get_debug_features(features)))
+            fn += 1
+            if len(fn_list) < 100:
+                fn_list.append((txn_id, codes, features))
     
     # Metrics
-    tp, tn, fp, fn = len(tp_list), len(tn_list), len(fp_list), len(fn_list)
     total = tp + tn + fp + fn
-    
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-    accuracy = (tp + tn) / total if total > 0 else 0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
     
     # Report
     print("\n" + "="*70)
-    print(f"TEST RESULTS: {TARGET_CODE} - Missing IBAN")
+    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Cannot Be Derived")
     print("="*70)
     
     print(f"""
-┌─────────────────────────────────────────────────────────────────────┐
-│  CONFUSION MATRIX                                                    │
-├─────────────────────────────────────────────────────────────────────┤
-│                              Actual                                  │
-│                      {TARGET_CODE}        Not {TARGET_CODE}                         │
-│                  ┌──────────┬──────────┐                            │
-│  Predicted       │          │          │                            │
-│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Predicted Pos: {tp+fp:<6}    │
-│                  ├──────────┼──────────┤                            │
-│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Predicted Neg: {tn+fn:<6}    │
-│                  └──────────┴──────────┘                            │
-│                    Actual+    Actual-                               │
-│                    {tp+fn:<6}     {tn+fp:<6}                                │
-└─────────────────────────────────────────────────────────────────────┘
+CONFUSION MATRIX:
+                    Actual
+                 {TARGET_CODE}      Not {TARGET_CODE}
+              ┌──────────┬──────────┐
+Predicted     │          │          │
+   {TARGET_CODE}       │ TP={tp:<5} │ FP={fp:<5} │
+              ├──────────┼──────────┤
+Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │
+              └──────────┴──────────┘
 
-┌────────────────┬──────────┬─────────────────────────────────────────┐
-│ Metric         │ Value    │ Meaning                                 │
-├────────────────┼──────────┼─────────────────────────────────────────┤
-│ Precision      │ {precision*100:>6.2f}%  │ TP/(TP+FP) - Prediction accuracy        │
-│ Recall         │ {recall*100:>6.2f}%  │ TP/(TP+FN) - Catch rate ⬅ MOST IMPORTANT │
-│ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean of Precision & Recall     │
-│ Specificity    │ {specificity*100:>6.2f}%  │ TN/(TN+FP) - True negative rate         │
-│ Accuracy       │ {accuracy*100:>6.2f}%  │ (TP+TN)/Total                           │
-└────────────────┴──────────┴─────────────────────────────────────────┘
+METRICS:
+  Precision: {precision*100:>6.2f}%  (TP / (TP + FP))
+  Recall:    {recall*100:>6.2f}%  (TP / (TP + FN))
+  F1 Score:  {f1*100:>6.2f}%
+
+RULES (same as validate_8xxx_all.py):
+  1. needs_iban=True AND has_iban=False
+  2. has_account=True AND has_iban=False
+  3. missing_required_iban=True
     """)
     
-    # False Negatives
-    if fn_list:
-        print("\n" + "="*70)
-        print(f"FALSE NEGATIVES ({fn} total, showing {min(fn, args.show_failures)}):")
-        print("="*70)
-        print(f"MISSED: {TARGET_CODE} occurred but rules didn't predict it.\n")
-        
-        fn_patterns = defaultdict(int)
-        for _, _, debug in fn_list:
-            for k, v in debug.items():
-                if v is True: fn_patterns[f"{k}=True"] += 1
-                elif v is False: fn_patterns[f"{k}=False"] += 1
-        
-        if fn_patterns:
-            print("Pattern Analysis:")
-            for p, c in sorted(fn_patterns.items(), key=lambda x: -x[1])[:10]:
-                print(f"  {p}: {c} ({c/fn*100:.1f}%)")
-            print()
-        
-        for i, (txn, codes, debug) in enumerate(fn_list[:args.show_failures], 1):
-            print(f"{i}. {txn}")
-            print(f"   Codes: {codes}")
-            print(f"   Features: {debug}\n")
-    
-    # False Positives
+    # False Positives Analysis
     if fp_list and args.show_fp > 0:
         print("\n" + "="*70)
         print(f"FALSE POSITIVES ({fp} total, showing {min(fp, args.show_fp)}):")
         print("="*70)
-        print(f"OVER-PREDICTED: Rules said {TARGET_CODE} but it didn't occur.\n")
         
-        fp_patterns = defaultdict(int)
-        for _, reasons, _, _ in fp_list:
+        # Analyze which rules trigger FPs
+        fp_triggers = defaultdict(int)
+        for _, reasons, _ in fp_list:
             for r in reasons:
                 trigger = r.split(':')[0] if ':' in r else r
-                fp_patterns[trigger] += 1
+                fp_triggers[trigger] += 1
         
-        if fp_patterns:
-            print("FP Trigger Analysis:")
-            for p, c in sorted(fp_patterns.items(), key=lambda x: -x[1])[:10]:
-                print(f"  {p}: {c} ({c/fp*100:.1f}%)")
-            print()
+        print("\nFP Trigger Analysis:")
+        for trigger, count in sorted(fp_triggers.items(), key=lambda x: -x[1]):
+            print(f"  {trigger}: {count} ({count/fp*100:.1f}%)")
         
-        for i, (txn, reasons, codes, _) in enumerate(fp_list[:args.show_fp], 1):
-            print(f"{i}. {txn}")
-            print(f"   Trigger: {reasons[0] if reasons else '?'}")
-            print(f"   Actual: {codes}\n")
+        print("\nSample FPs:")
+        for i, (txn, reasons, codes) in enumerate(fp_list[:args.show_fp], 1):
+            print(f"  {i}. {txn}")
+            print(f"     Trigger: {reasons[0] if reasons else '?'}")
+            print(f"     Actual codes: {codes}")
     
-    # Summary
-    print("\n" + "="*70)
-    print("SUMMARY")
-    print("="*70)
-    r_icon = "✅" if recall >= 0.99 else "⚠️" if recall >= 0.95 else "❌"
-    p_icon = "✅" if precision >= 0.50 else "⚠️" if precision >= 0.20 else "ℹ️"
-    print(f"""
-    Recall:    {recall*100:>6.1f}%  {r_icon}  (Target: ≥99%)
-    Precision: {precision*100:>6.1f}%  {p_icon}  (Expected ~33% - cannot predict ACE directory lookup)
-    F1 Score:  {f1*100:>6.1f}%
-    
-    Rules (FINAL - Optimized for Recall):
-    1. needs_iban=True AND has_iban=False (party in IBAN country, no IBAN)
-    2. has_account=True AND has_iban=False (has account, ACE will try derivation)
-    3. missing_required_iban=True (system flag)
-    
-    NOTE: 33% precision is expected. We predict WHEN ACE will attempt IBAN
-    derivation, but cannot predict IF it will succeed (requires ACE's bank
-    directory). 2 out of 3 predictions are false alarms because ACE's
-    derivation succeeded.
-    
-    --show-docs   Show feature documentation
-    --show-party  Show party reference (BNF vs BNP, Party vs Bank)
-    """)
+    # False Negatives Analysis  
+    if fn_list and args.show_fn > 0:
+        print("\n" + "="*70)
+        print(f"FALSE NEGATIVES ({fn} total, showing {min(fn, args.show_fn)}):")
+        print("="*70)
+        
+        print("\nSample FNs:")
+        for i, (txn, codes, features) in enumerate(fn_list[:args.show_fn], 1):
+            print(f"  {i}. {txn}")
+            print(f"     Codes: {codes}")
+            print(f"     bnf_needs_iban={features.get('bnf_needs_iban')}, bnf_has_iban={features.get('bnf_has_iban')}")
+            print(f"     bnf_has_account={features.get('bnf_has_account')}, missing_required_iban={features.get('missing_required_iban')}")
 
 
 if __name__ == "__main__":
