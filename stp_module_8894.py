@@ -1,281 +1,474 @@
 #!/usr/bin/env python3
 """
-Test rules for 8894 against actual IFMLs.
-8894 = IBAN Validation Failed
+Test rules for 8894 - IBAN Validation Failed (V6 with Bank Directory Lookup)
 
-V4 CHANGES:
-- Added BBAN validation (country-specific structure and check digits)
-- New features: bban_structure_valid, bban_check_valid, iban_fully_valid
-- Removed "needs IBAN but missing" (caused 859 FPs)
+V6 CHANGES:
+- Integrates bank directory lookup (built from production data)
+- Unknown bank codes trigger 8894 prediction
+- Combined with existing BBAN validation rules
 
 Usage:
-    python test_8894_rules_v4.py --data-dir /path/to/ifml/data
-    python test_8894_rules_v4.py --show-docs
+    # First, build the bank directory (one-time)
+    python build_bank_directory.py --data-dir ./prd_emts --output bank_directory.json
+    
+    # Then test with the directory
+    python test_8894_rules_v6.py --data-dir ./prd_emts --directory bank_directory.json
 """
 
 import argparse
+import json
+import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
 from collections import defaultdict
+from typing import Dict, List, Tuple, Optional, Set
 
-sys.path.insert(0, '/mnt/project')
-from data_pipeline import IFMLDataPipeline
+# Bank code positions by country (same as build_bank_directory.py)
+BANK_CODE_POSITIONS = {
+    'DE': (0, 8), 'FR': (0, 5), 'ES': (0, 4), 'IT': (1, 6), 'NL': (0, 4),
+    'BE': (0, 3), 'AT': (0, 5), 'CH': (0, 5), 'LU': (0, 3), 'GB': (0, 4),
+    'IE': (0, 4), 'FI': (0, 3), 'SE': (0, 3), 'NO': (0, 4), 'DK': (0, 4),
+    'PL': (0, 8), 'CZ': (0, 4), 'SK': (0, 4), 'HU': (0, 3), 'RO': (0, 4),
+    'BG': (0, 4), 'HR': (0, 7), 'SI': (0, 5), 'EE': (0, 2), 'LV': (0, 4),
+    'LT': (0, 5), 'PT': (0, 4), 'GR': (0, 3), 'CY': (0, 3), 'MT': (0, 4),
+    'SA': (0, 2), 'AE': (0, 3), 'TR': (0, 5), 'IL': (0, 3), 'QA': (0, 4),
+    'KW': (0, 4), 'BH': (0, 4),
+}
 
 TARGET_CODE = '8894'
 
 
-def check_rules(features: Dict) -> Tuple[bool, List[str]]:
-    """
-    Check if 8894 should fire based on extracted rules.
-    Returns (should_fire, list_of_reasons)
+class BankDirectory:
+    """Lookup for known-valid bank codes built from production data."""
     
-    8894 = IBAN Validation Failed
-    Fires when IBAN has format/checksum/BBAN structure issues.
+    def __init__(self, directory_file: str = None):
+        self.valid_codes: Dict[str, Set[str]] = {}
+        self.potentially_invalid: Dict[str, Set[str]] = {}
+        self.metadata = {}
+        
+        if directory_file:
+            self.load(directory_file)
+    
+    def load(self, filepath: str):
+        """Load bank directory from JSON file."""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        
+        self.metadata = data.get('metadata', {})
+        self.valid_codes = {
+            country: set(codes)
+            for country, codes in data.get('valid_bank_codes', {}).items()
+        }
+        self.potentially_invalid = {
+            country: set(codes)
+            for country, codes in data.get('potentially_invalid', {}).items()
+        }
+        
+        total = sum(len(v) for v in self.valid_codes.values())
+        print(f"Loaded bank directory: {total:,} valid codes from {len(self.valid_codes)} countries")
+    
+    def is_known_valid(self, country: str, bank_code: str) -> bool:
+        """Check if bank code is in our known-valid set."""
+        if not country or not bank_code:
+            return True  # Can't validate, assume OK
+        
+        country = country.upper()
+        
+        if country not in self.valid_codes:
+            return True  # Unknown country, can't validate
+        
+        return bank_code in self.valid_codes[country]
+    
+    def is_potentially_invalid(self, country: str, bank_code: str) -> bool:
+        """Check if bank code was ONLY seen with 8894 errors."""
+        if not country or not bank_code:
+            return False
+        
+        country = country.upper()
+        return bank_code in self.potentially_invalid.get(country, set())
+
+
+def looks_like_iban(s: str) -> bool:
+    """Check if string looks like an IBAN."""
+    if not s or not isinstance(s, str):
+        return False
+    cleaned = s.upper().replace(' ', '').replace('-', '')
+    if len(cleaned) < 15 or len(cleaned) > 34:
+        return False
+    return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned))
+
+
+def extract_bank_code(iban: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract country and bank code from IBAN."""
+    if not iban:
+        return None, None
+    
+    cleaned = iban.upper().replace(' ', '').replace('-', '')
+    if len(cleaned) < 5:
+        return None, None
+    
+    country = cleaned[:2]
+    bban = cleaned[4:]
+    
+    positions = BANK_CODE_POSITIONS.get(country)
+    if not positions:
+        if len(bban) >= 4:
+            return country, bban[:4]
+        return country, None
+    
+    start, end = positions
+    if len(bban) >= end:
+        return country, bban[start:end]
+    
+    return country, None
+
+
+def extract_ibans_from_obj(obj) -> List[str]:
+    """Recursively extract all IBAN values from a JSON object."""
+    ibans = []
+    
+    if isinstance(obj, dict):
+        # Check ID fields
+        if 'ID' in obj:
+            id_field = obj['ID']
+            if isinstance(id_field, dict):
+                id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
+                id_text = id_field.get('text') or id_field.get('#text') or ''
+                if id_type == 'IBAN' or looks_like_iban(str(id_text)):
+                    ibans.append(str(id_text))
+            elif isinstance(id_field, str) and looks_like_iban(id_field):
+                ibans.append(id_field)
+        
+        # Check AcctIDInfo / AcctIDInf
+        for acct_key in ['AcctIDInfo', 'AcctIDInf']:
+            if acct_key in obj:
+                acct = obj[acct_key]
+                if isinstance(acct, dict):
+                    acct_id = acct.get('ID', {})
+                    if isinstance(acct_id, dict):
+                        acct_type = (acct_id.get('Type') or acct_id.get('@Type') or '').upper()
+                        acct_text = acct_id.get('text') or acct_id.get('#text') or ''
+                        if acct_type == 'IBAN' or looks_like_iban(str(acct_text)):
+                            ibans.append(str(acct_text))
+        
+        for value in obj.values():
+            ibans.extend(extract_ibans_from_obj(value))
+    
+    elif isinstance(obj, list):
+        for item in obj:
+            ibans.extend(extract_ibans_from_obj(item))
+    
+    return ibans
+
+
+def extract_error_codes(obj) -> List[str]:
+    """Extract error codes from response object."""
+    codes = []
+    
+    if isinstance(obj, dict):
+        if 'MsgStatus' in obj:
+            status_list = obj['MsgStatus']
+            if isinstance(status_list, dict):
+                status_list = [status_list]
+            for status in status_list:
+                if isinstance(status, dict):
+                    code = status.get('Code')
+                    info = status.get('InformationalData', '')
+                    if code:
+                        # Include party hint if available
+                        party = ''
+                        for prefix in ['BNFBNK', 'BNPPTY', 'CDTPTY', 'DBTPTY', 'INTBNK']:
+                            if info.startswith(prefix):
+                                party = prefix
+                                break
+                        if party:
+                            codes.append(f"{code}_{party}")
+                        codes.append(str(code))
+        
+        if 'AuditTrail' in obj:
+            codes.extend(extract_error_codes(obj['AuditTrail']))
+        
+        for value in obj.values():
+            codes.extend(extract_error_codes(value))
+    
+    elif isinstance(obj, list):
+        for item in obj:
+            codes.extend(extract_error_codes(item))
+    
+    return codes
+
+
+def check_iban_validation(iban: str) -> Dict[str, bool]:
+    """
+    Perform IBAN validation checks (format, checksum).
+    Returns dict of validation results.
+    """
+    result = {
+        'has_iban': False,
+        'format_valid': False,
+        'checksum_valid': False,
+    }
+    
+    if not iban or not looks_like_iban(iban):
+        return result
+    
+    result['has_iban'] = True
+    cleaned = iban.upper().replace(' ', '').replace('-', '')
+    
+    # Check format (length for country)
+    country = cleaned[:2]
+    IBAN_LENGTHS = {
+        'DE': 22, 'FR': 27, 'ES': 24, 'IT': 27, 'NL': 18, 'BE': 16, 'AT': 20,
+        'CH': 21, 'GB': 22, 'IE': 22, 'PL': 28, 'PT': 25, 'SE': 24, 'NO': 15,
+        'DK': 18, 'FI': 18, 'CZ': 24, 'SK': 24, 'HU': 28, 'RO': 24, 'BG': 22,
+        'HR': 21, 'SI': 19, 'EE': 20, 'LV': 21, 'LT': 20, 'GR': 27, 'CY': 28,
+        'MT': 31, 'LU': 20, 'SA': 24, 'AE': 23, 'TR': 26,
+    }
+    expected_len = IBAN_LENGTHS.get(country)
+    if expected_len:
+        result['format_valid'] = len(cleaned) == expected_len
+    else:
+        result['format_valid'] = 15 <= len(cleaned) <= 34
+    
+    # Check mod-97 checksum
+    try:
+        rearranged = cleaned[4:] + cleaned[:4]
+        numeric = ''
+        for char in rearranged:
+            if char.isdigit():
+                numeric += char
+            elif char.isalpha():
+                numeric += str(ord(char) - ord('A') + 10)
+        result['checksum_valid'] = int(numeric) % 97 == 1
+    except:
+        result['checksum_valid'] = False
+    
+    return result
+
+
+def check_rules_v6(ibans: List[str], bank_directory: BankDirectory) -> Tuple[bool, List[str]]:
+    """
+    Check if 8894 should fire based on V6 rules.
+    
+    Rules:
+    1. IBAN checksum invalid (mod-97)
+    2. IBAN format invalid (wrong length)
+    3. Bank code not in known-valid directory
+    4. Bank code only seen with 8894 errors (potentially invalid)
     """
     reasons = []
     
-    def get(feat, default=None):
-        return features.get(feat, default)
-
-    # Check all party prefixes
-    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_', 'intm_', 'send_']:
-        party = prefix.upper().rstrip('_')
+    for iban in ibans:
+        if not iban:
+            continue
         
-        # Rule 1: Account contains invalid characters (STRONG signal)
-        if get(f'{prefix}account_has_dirty_chars', False):
-            reasons.append(f"{party}: account has dirty chars")
+        # Basic IBAN validation
+        validation = check_iban_validation(iban)
         
-        # Rule 2: IBAN checksum is invalid (STRONG signal)
-        if get(f'{prefix}has_iban', False) and get(f'{prefix}iban_checksum_valid') == False:
-            reasons.append(f"{party}: IBAN checksum invalid")
+        if validation['has_iban']:
+            if not validation['checksum_valid']:
+                reasons.append(f"IBAN checksum invalid: {iban[:10]}...")
+            
+            if not validation['format_valid']:
+                reasons.append(f"IBAN format invalid: {iban[:10]}...")
         
-        # Rule 3: IBAN format is invalid (STRONG signal)
-        if get(f'{prefix}has_iban', False) and get(f'{prefix}iban_valid_format') == False:
-            reasons.append(f"{party}: IBAN format invalid")
+        # Bank directory lookup
+        country, bank_code = extract_bank_code(iban)
         
-        # Rule 4: BBAN structure is invalid (NEW - for country-specific formats)
-        if get(f'{prefix}has_iban', False) and get(f'{prefix}bban_structure_valid') == False:
-            reasons.append(f"{party}: BBAN structure invalid")
-        
-        # Rule 5: BBAN internal check digit is invalid (NEW)
-        if get(f'{prefix}has_iban', False) and get(f'{prefix}bban_check_valid') == False:
-            reasons.append(f"{party}: BBAN check digit invalid")
-        
-        # Rule 6: Composite check - IBAN not fully valid
-        # This catches any IBAN validation failure
-        if get(f'{prefix}has_iban', False) and get(f'{prefix}iban_fully_valid') == False:
-            # Only add if not already caught by specific rules above
-            if not any(party in r for r in reasons):
-                reasons.append(f"{party}: IBAN not fully valid")
+        if country and bank_code:
+            if not bank_directory.is_known_valid(country, bank_code):
+                reasons.append(f"Unknown bank code: {country}:{bank_code}")
+            
+            if bank_directory.is_potentially_invalid(country, bank_code):
+                reasons.append(f"Potentially invalid bank code: {country}:{bank_code}")
     
     return len(reasons) > 0, reasons
 
 
-def get_debug_features(features: Dict) -> Dict:
-    """Extract key features for debugging failures."""
-    debug = {}
-    for prefix in ['bnf_', 'cdt_', 'dbt_']:
-        debug[f'{prefix}has_iban'] = features.get(f'{prefix}has_iban')
-        debug[f'{prefix}iban_valid_format'] = features.get(f'{prefix}iban_valid_format')
-        debug[f'{prefix}iban_checksum_valid'] = features.get(f'{prefix}iban_checksum_valid')
-        debug[f'{prefix}bban_structure_valid'] = features.get(f'{prefix}bban_structure_valid')
-        debug[f'{prefix}bban_check_valid'] = features.get(f'{prefix}bban_check_valid')
-        debug[f'{prefix}iban_fully_valid'] = features.get(f'{prefix}iban_fully_valid')
-        debug[f'{prefix}account_has_dirty_chars'] = features.get(f'{prefix}account_has_dirty_chars')
-        # Show the actual IBAN value for debugging
-        acct = features.get(f'{prefix}account_value', '')
-        if acct and len(acct) > 4:
-            debug[f'{prefix}iban_preview'] = acct[:4] + '...' + acct[-4:] if len(acct) > 12 else acct
-    return debug
+def process_json_file(filepath: Path) -> List[Tuple[str, List[str], List[str]]]:
+    """Process a JSON file, return list of (txn_id, ibans, error_codes)."""
+    results = []
+    
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        return results
+    
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, dict):
+                request = value.get('Request', {})
+                response = value.get('Response', {})
+                
+                ibans = extract_ibans_from_obj(request)
+                error_codes = extract_error_codes(response)
+                
+                results.append((key, ibans, error_codes))
+    
+    return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules V4 (with BBAN)')
-    parser.add_argument('--data-dir', nargs='?', default=None, help='IFML JSON directory')
-    parser.add_argument('--limit', type=int, default=100000, help='Max records')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Show all')
-    parser.add_argument('--show-failures', type=int, default=10, help='FN to show')
-    parser.add_argument('--show-fp', type=int, default=10, help='FP to show')
-    parser.add_argument('--show-docs', action='store_true', help='Show rule docs')
+    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules V6 with bank directory')
+    parser.add_argument('--data-dir', required=True, help='IFML JSON directory')
+    parser.add_argument('--directory', required=True, help='Bank directory JSON file')
+    parser.add_argument('--limit', type=int, default=0, help='Max transactions (0=all)')
+    parser.add_argument('--show-fn', type=int, default=10, help='False negatives to show')
+    parser.add_argument('--show-fp', type=int, default=10, help='False positives to show')
     
     args = parser.parse_args()
     
-    if args.show_docs:
-        print("""
-================================================================================
-8894 RULES V4 - IBAN Validation Failed (with BBAN validation)
-================================================================================
-
-RULES:
-  1. account_has_dirty_chars = True
-  2. has_iban=True AND iban_checksum_valid=False  (IBAN mod-97 check)
-  3. has_iban=True AND iban_valid_format=False    (IBAN length/format)
-  4. has_iban=True AND bban_structure_valid=False (NEW: country-specific format)
-  5. has_iban=True AND bban_check_valid=False     (NEW: internal check digits)
-  6. has_iban=True AND iban_fully_valid=False     (catches any validation failure)
-
-NEW FEATURES (V4):
-  - bban_structure_valid: Does BBAN match country-specific structure?
-    Example: German BBAN must be 8 digits bank code + 10 digits account
-  
-  - bban_check_valid: Do internal check digits pass?
-    Countries with internal checks: ES, IT, FR, BE, FI, NO, PL, PT, etc.
-  
-  - iban_fully_valid: Composite - all validation passes
-    True only if: iban_valid_format AND iban_checksum_valid AND bban_*_valid
-
-COUNTRIES WITH BBAN CHECK DIGITS:
-  Spain (ES): 2 check digits in positions 9-10
-  Italy (IT): CIN letter at position 1
-  France (FR): RIB key at end (2 digits)
-  Belgium (BE): mod 97 check
-  Finland (FI): Luhn-style check
-  Norway (NO): mod 11 check
-  Poland (PL): check digit in bank code
-  Portugal (PT): mod 97 check
-================================================================================
-        """)
-        return
+    # Load bank directory
+    print(f"Loading bank directory from {args.directory}...")
+    bank_dir = BankDirectory(args.directory)
     
-    if not args.data_dir:
-        parser.error("--data-dir required (or use --show-docs)")
-    
-    print(f"Loading IFML data for {TARGET_CODE} validation (V4 with BBAN)...")
-    pipeline = IFMLDataPipeline()
+    # Process data files
+    print(f"\nScanning {args.data_dir} for JSON files...")
     data_path = Path(args.data_dir)
-    
-    if data_path.is_file():
-        pipeline.load_single_file(str(data_path))
-    else:
-        pipeline.load_directory(str(data_path), "*.json")
-    
-    print(f"Pipeline has {len(pipeline.records)} records")
+    json_files = list(data_path.glob("*.json"))
+    print(f"Found {len(json_files)} files")
     
     # Classification
     tp_list, tn_list, fp_list, fn_list = [], [], [], []
+    processed = 0
     
-    for i, record in enumerate(pipeline.records):
-        if i >= args.limit:
+    # Track reasons for analysis
+    reason_counts = defaultdict(int)
+    
+    for json_file in json_files:
+        transactions = process_json_file(json_file)
+        
+        for txn_id, ibans, error_codes in transactions:
+            if args.limit > 0 and processed >= args.limit:
+                break
+            
+            processed += 1
+            
+            # Check actual result
+            has_actual = any(TARGET_CODE in str(c) for c in error_codes)
+            
+            # Check predicted result
+            predicted, reasons = check_rules_v6(ibans, bank_dir)
+            
+            # Track reasons
+            for reason in reasons:
+                reason_type = reason.split(':')[0]
+                reason_counts[reason_type] += 1
+            
+            # Classify
+            if predicted and has_actual:
+                tp_list.append((txn_id, reasons, error_codes))
+            elif not predicted and not has_actual:
+                tn_list.append((txn_id,))
+            elif predicted and not has_actual:
+                fp_list.append((txn_id, reasons, error_codes[:5]))
+            else:
+                fn_list.append((txn_id, ibans[:3], error_codes[:5]))
+        
+        if args.limit > 0 and processed >= args.limit:
             break
-        
-        txn_id = record.transaction_id
-        features = record.request_features
-        codes = record.error_codes_only + (record.composite_codes or [])
-        
-        has_actual = any(TARGET_CODE in str(c) for c in codes)
-        predicted, reasons = check_rules(features)
-        
-        if predicted and has_actual:
-            tp_list.append((txn_id, reasons, codes))
-        elif not predicted and not has_actual:
-            tn_list.append((txn_id,))
-        elif predicted and not has_actual:
-            fp_list.append((txn_id, reasons, codes, get_debug_features(features)))
-        else:
-            fn_list.append((txn_id, codes, get_debug_features(features)))
     
     # Metrics
     tp, tn, fp, fn = len(tp_list), len(tn_list), len(fp_list), len(fn_list)
-    total = tp + tn + fp + fn
     
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-    accuracy = (tp + tn) / total if total > 0 else 0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
     
     # Report
-    print("\n" + "="*70)
-    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Validation Failed (V4 + BBAN)")
+    print(f"\n{'='*70}")
+    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Validation Failed (V6 + Bank Directory)")
     print("="*70)
     
     print(f"""
 ┌─────────────────────────────────────────────────────────────────────┐
-│  CONFUSION MATRIX                                                    │
+│  CONFUSION MATRIX                                                   │
 ├─────────────────────────────────────────────────────────────────────┤
-│                              Actual                                  │
-│                      {TARGET_CODE}        Not {TARGET_CODE}                         │
+│                              Actual                                 │
+│                      {TARGET_CODE}        Not {TARGET_CODE}                        │
 │                  ┌──────────┬──────────┐                            │
 │  Predicted       │          │          │                            │
-│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Predicted Pos: {tp+fp:<6}    │
+│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Predicted Pos: {tp+fp:<6}   │
 │                  ├──────────┼──────────┤                            │
-│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Predicted Neg: {tn+fn:<6}    │
+│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Predicted Neg: {tn+fn:<6}   │
 │                  └──────────┴──────────┘                            │
 │                    Actual+    Actual-                               │
-│                    {tp+fn:<6}     {tn+fp:<6}                                │
+│                    {tp+fn:<6}    {tn+fp:<6}                                 │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌────────────────┬──────────┬─────────────────────────────────────────┐
 │ Metric         │ Value    │ Meaning                                 │
 ├────────────────┼──────────┼─────────────────────────────────────────┤
-│ Precision      │ {precision*100:>6.2f}%  │ TP/(TP+FP) - Prediction accuracy        │
-│ Recall         │ {recall*100:>6.2f}%  │ TP/(TP+FN) - Catch rate ⬅ IMPORTANT     │
-│ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean of Precision & Recall     │
-│ Specificity    │ {specificity*100:>6.2f}%  │ TN/(TN+FP) - True negative rate         │
-│ Accuracy       │ {accuracy*100:>6.2f}%  │ (TP+TN)/Total                           │
+│ Precision      │ {precision*100:>6.2f}%  │ When we predict 8894, how often right?  │
+│ Recall         │ {recall*100:>6.2f}%  │ What % of actual 8894 do we catch?      │
+│ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean                           │
+│ Specificity    │ {specificity*100:>6.2f}%  │ True negative rate                      │
 └────────────────┴──────────┴─────────────────────────────────────────┘
     """)
     
-    # False Negatives
+    # Reason breakdown
+    print("PREDICTION TRIGGERS:")
+    for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
+        print(f"  {reason}: {count:,}")
+    
+    # False negatives
     if fn_list:
-        print("\n" + "="*70)
-        print(f"FALSE NEGATIVES ({fn} total, showing {min(fn, args.show_failures)}):")
+        print(f"\n{'='*70}")
+        print(f"FALSE NEGATIVES ({fn} total, showing {min(args.show_fn, fn)}):")
         print("="*70)
         print("MISSED: 8894 occurred but rules didn't predict it.\n")
         
-        # Analyze patterns in FN
-        fn_patterns = defaultdict(int)
-        for _, _, debug in fn_list:
-            for k, v in debug.items():
-                if v is True: 
-                    fn_patterns[f"{k}=True"] += 1
-                elif v is False: 
-                    fn_patterns[f"{k}=False"] += 1
-        
-        if fn_patterns:
-            print("Pattern Analysis (why we missed them):")
-            for p, c in sorted(fn_patterns.items(), key=lambda x: -x[1])[:12]:
-                print(f"  {p}: {c}/{fn} ({c/fn*100:.1f}%)")
-            print()
-        
-        for i, (txn, codes, debug) in enumerate(fn_list[:args.show_failures], 1):
+        for i, (txn, ibans, codes) in enumerate(fn_list[:args.show_fn], 1):
             print(f"{i}. {txn}")
-            print(f"   Codes: {[c for c in codes if '8894' in str(c)]}")
-            # Show IBAN-related debug features
-            relevant = {k: v for k, v in debug.items() 
-                       if v not in [None, ''] and 'iban' in k.lower() or 'bban' in k.lower()}
-            print(f"   IBAN Features: {relevant}\n")
+            print(f"   IBANs: {ibans}")
+            
+            # Show bank codes
+            for iban in ibans:
+                country, bank_code = extract_bank_code(iban)
+                if country and bank_code:
+                    known = "KNOWN" if bank_dir.is_known_valid(country, bank_code) else "UNKNOWN"
+                    print(f"   Bank code: {country}:{bank_code} ({known})")
+            
+            relevant_codes = [c for c in codes if TARGET_CODE in str(c)]
+            print(f"   Codes: {relevant_codes}")
+            print()
     
-    # False Positives  
-    if fp_list and args.show_fp > 0:
-        print("\n" + "="*70)
-        print(f"FALSE POSITIVES ({fp} total, showing {min(fp, args.show_fp)}):")
+    # False positives
+    if fp_list:
+        print(f"\n{'='*70}")
+        print(f"FALSE POSITIVES ({fp} total, showing {min(args.show_fp, fp)}):")
         print("="*70)
         print("OVER-PREDICTED: Rules said 8894 but it didn't occur.\n")
         
-        for i, (txn, reasons, codes, debug) in enumerate(fp_list[:args.show_fp], 1):
+        for i, (txn, reasons, codes) in enumerate(fp_list[:args.show_fp], 1):
             print(f"{i}. {txn}")
             print(f"   Trigger: {reasons}")
-            print(f"   Actual codes: {codes[:5]}...\n")
+            print(f"   Actual codes: {codes}")
+            print()
     
     # Summary
-    print("\n" + "="*70)
+    print("="*70)
     print("SUMMARY")
     print("="*70)
     
-    r_icon = "✅" if recall >= 0.95 else "⚠️" if recall >= 0.50 else "❌"
-    p_icon = "✅" if precision >= 0.30 else "⚠️" if precision >= 0.10 else "ℹ️"
+    recall_icon = "✅" if recall >= 0.95 else "⚠️" if recall >= 0.5 else "❌"
+    precision_icon = "✅" if precision >= 0.5 else "⚠️" if precision >= 0.1 else "ℹ️"
     
     print(f"""
-    Recall:    {recall*100:>6.1f}%  {r_icon}  (Target: ≥95%)
-    Precision: {precision*100:>6.1f}%  {p_icon}  (Acceptable: ≥10% for rare errors)
+    Recall:    {recall*100:>6.1f}%  {recall_icon}  (Target: ≥95%)
+    Precision: {precision*100:>6.1f}%  {precision_icon}  (Acceptable: ≥10% for rare errors)
     F1 Score:  {f1*100:>6.1f}%
     
-    V4 adds BBAN validation:
-    - bban_structure_valid: Country-specific BBAN format check
-    - bban_check_valid: Internal check digit validation (ES, IT, FR, BE, etc.)
-    - iban_fully_valid: Composite of all IBAN/BBAN checks
+    V6 Strategy:
+    - Bank directory lookup: Flag unknown bank codes
+    - IBAN validation: Flag invalid checksum/format
+    - Combined approach for comprehensive coverage
+    
+    Bank Directory Stats:
+    - Valid bank codes: {sum(len(v) for v in bank_dir.valid_codes.values()):,}
+    - Countries covered: {len(bank_dir.valid_codes)}
     """)
 
 
