@@ -1,263 +1,237 @@
 #!/usr/bin/env python3
 """
-Test rules for 8004 - IBAN Cannot Be Derived (V4 - Tighter Rules)
+Test 8004 Rules - V6 (CDT Party - Beneficiary)
 
-V4 CHANGES:
-- REMOVED Rule 2 (has_account but no IBAN) - caused 6021 FPs instead of 8004
-- Keep only: needs_iban + missing_required_iban
+8004 = IBAN Cannot Be Derived
 
-8004 = "IBAN Cannot Be Derived"
-ACE attempts IBAN derivation and FAILS (bank not in directory)
+Key insight from debug:
+- Error is 8004_BNPPTY = Beneficiary PARTY = CreditPartyInfo (CDT), not BeneficiaryBankInfo (BNF)!
+- Mapping: BNPPTY -> CDT (credit party = beneficiary party)
+- 8004 fires when CDT is international, has account but no IBAN
 
-Usage:
-    python 8004.py --data-dir /path/to/ifml/data
+Rules:
+1. cdt_is_international=True AND cdt_has_iban=False AND cdt_has_account=True
+2. missing_required_iban=True
 """
 
-import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
 from collections import defaultdict
+from typing import Dict, List, Tuple
 
 sys.path.insert(0, '/mnt/project')
 from data_pipeline import IFMLDataPipeline
 
 TARGET_CODE = '8004'
 
+
 def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
-    8004 = IBAN Cannot Be Derived
+    Check if 8004 should be predicted.
     
-    V4: Tighter rules - removed has_account rule that caused 6021 FPs
-    
-    Only predict when:
-    1. Party NEEDS IBAN (in IBAN country) but doesn't have one
-    2. IBAN is missing
-    
-    REMOVED: has_account but no IBAN (triggers 6021, not 8004)
+    V6: Check CDT (CreditPartyInfo = Beneficiary Party) since 8004_BNPPTY refers to CDT not BNF.
     """
     reasons = []
     
     def get(feat, default=None):
         return features.get(feat, default)
     
-    # -------------------------------------------------------------------------
-    # Rule 1: Party needs IBAN but doesn't have one
-    # This is the PRIMARY trigger for IBAN derivation
-    # -------------------------------------------------------------------------
-    for prefix in ['bnf_', 'cdt_', 'dbt_', 'orig_']:
-        if get(f'{prefix}needs_iban', False) and not get(f'{prefix}has_iban', False):
-            party = prefix.rstrip('_').upper()
-            reasons.append(f"{party}: needs_iban but no IBAN")
+    # Rule 1: CDT (Beneficiary Party) is international, has account, but no IBAN
+    cdt_is_intl = get('cdt_is_international', False)
+    cdt_has_iban = get('cdt_has_iban', False)
+    cdt_has_account = get('cdt_has_account', False)
     
-    # -------------------------------------------------------------------------
+    if cdt_is_intl and not cdt_has_iban and cdt_has_account:
+        reasons.append("CDT: international + has_account + no IBAN")
+    
     # Rule 2: System flag for missing required IBAN
-    # -------------------------------------------------------------------------
     if get('missing_required_iban', False):
         reasons.append("missing_required_iban=True")
-    
-    # -------------------------------------------------------------------------
-    # REMOVED: has_account but no IBAN
-    # This rule was causing FPs where 6021 fired instead of 8004
-    # 6021 = different validation (not IBAN derivation failure)
-    # -------------------------------------------------------------------------
     
     return len(reasons) > 0, reasons
 
 
-def get_debug_features(features: Dict) -> Dict:
-    """Extract key features for debugging."""
-    return {
-        'bnf_needs_iban': features.get('bnf_needs_iban'),
-        'bnf_has_iban': features.get('bnf_has_iban'),
-        'bnf_has_account': features.get('bnf_has_account'),
-        'cdt_needs_iban': features.get('cdt_needs_iban'),
-        'cdt_has_iban': features.get('cdt_has_iban'),
-        'cdt_has_account': features.get('cdt_has_account'),
-        'dbt_needs_iban': features.get('dbt_needs_iban'),
-        'dbt_has_iban': features.get('dbt_has_iban'),
-        'missing_required_iban': features.get('missing_required_iban'),
-    }
-
-
 def main():
-    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules V4')
-    parser.add_argument('--data-dir', required=True, help='IFML JSON directory')
-    parser.add_argument('--limit', type=int, default=0, help='Max records (0=all)')
-    parser.add_argument('--show-fp', type=int, default=10, help='FP to show')
-    parser.add_argument('--show-fn', type=int, default=10, help='FN to show')
+    import argparse
+    parser = argparse.ArgumentParser(description='Test 8004 rules (V6 - CDT Party)')
+    parser.add_argument('--data-dir', required=True, help='Directory with IFML JSON files')
+    parser.add_argument('--sample-size', type=int, default=10, help='Number of samples to show')
     
     args = parser.parse_args()
     
-    print(f"Loading IFML data for {TARGET_CODE} validation...")
+    # Load data
+    print("Loading IFML data...")
     pipeline = IFMLDataPipeline()
-    data_path = Path(args.data_dir)
     
+    data_path = Path(args.data_dir)
     if data_path.is_file():
         pipeline.load_single_file(str(data_path))
     else:
-        pipeline.load_directory(str(data_path), "*.json")
+        json_files = sorted(data_path.glob("*.json"))
+        for i, f in enumerate(json_files[:10]):
+            count = pipeline.load_single_file(str(f))
+            print(f"  [{i+1:2d}] {f.name}: {count} payment(s)")
+        print("-" * 60)
     
     print(f"Pipeline has {len(pipeline.records)} records")
     
-    # Classification
-    tp, tn, fp, fn = 0, 0, 0, 0
+    # Test rules
+    tp, fp, tn, fn = 0, 0, 0, 0
     fp_list = []
     fn_list = []
-    trigger_counts = defaultdict(int)
+    tp_list = []
     
-    limit = args.limit if args.limit > 0 else len(pipeline.records)
+    prediction_triggers = defaultdict(int)
     
-    for i, record in enumerate(pipeline.records):
-        if i >= limit:
-            break
-        
-        txn_id = record.transaction_id
+    for record in pipeline.records:
         features = record.request_features
         codes = record.error_codes_only + (record.composite_codes or [])
         
-        has_actual = any(TARGET_CODE in str(c) for c in codes)
+        # Check if 8004 actually fired
+        actual_8004 = any(TARGET_CODE in str(c) for c in codes)
+        
+        # Predict using our rules
         predicted, reasons = check_8004_rules(features)
         
-        # Track triggers
+        # Track what triggered predictions
         for r in reasons:
-            trigger = r.split(':')[0] if ':' in r else r
-            trigger_counts[trigger] += 1
+            prediction_triggers[r] += 1
         
-        if predicted and has_actual:
+        # Confusion matrix
+        if predicted and actual_8004:
             tp += 1
-        elif not predicted and not has_actual:
-            tn += 1
-        elif predicted and not has_actual:
+            tp_list.append((record.transaction_id, reasons, codes, features))
+        elif predicted and not actual_8004:
             fp += 1
-            if len(fp_list) < 100:
-                fp_list.append((txn_id, reasons, codes[:8], get_debug_features(features)))
-        else:
+            fp_list.append((record.transaction_id, reasons, codes, features))
+        elif not predicted and actual_8004:
             fn += 1
-            if len(fn_list) < 100:
-                fn_list.append((txn_id, codes, get_debug_features(features)))
+            fn_list.append((record.transaction_id, reasons, codes, features))
+        else:
+            tn += 1
     
-    # Metrics
-    total = tp + tn + fp + fn
+    # Calculate metrics
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
     
-    # Report
-    print("\n" + "="*70)
-    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Cannot Be Derived (V4 - Tighter)")
-    print("="*70)
+    # Print results
+    print("\n" + "=" * 70)
+    print(f"TEST RESULTS: 8004 - IBAN Cannot Be Derived (V6 - CDT Party)")
+    print("=" * 70)
     
-    print(f"""
-CONFUSION MATRIX:
-                    Actual
-                 {TARGET_CODE}      Not {TARGET_CODE}
-              ┌──────────┬──────────┐
-Predicted     │          │          │
-   {TARGET_CODE}       │ TP={tp:<5} │ FP={fp:<5} │
-              ├──────────┼──────────┤
-Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │
-              └──────────┴──────────┘
-
-METRICS:
-  Precision: {precision*100:>6.2f}%  (TP / (TP + FP))
-  Recall:    {recall*100:>6.2f}%  (TP / (TP + FN))
-  F1 Score:  {f1*100:>6.2f}%
-
-RULES (V4 - TIGHTER):
-  1. needs_iban=True AND has_iban=False
-  2. missing_required_iban=True
-  
-  REMOVED: has_account AND NOT has_iban (caused 6021 FPs)
-    """)
+    print(f"\nCONFUSION MATRIX:")
+    print(f"                 Actual")
+    print(f"                 8004        Not 8004")
+    print(f"Predicted")
+    print(f"  8004      |  TP={tp:<6}  |  FP={fp:<6}  |")
+    print(f"  Not 8004  |  FN={fn:<6}  |  TN={tn:<6}  |")
     
-    # Trigger analysis
-    if trigger_counts:
-        print("\nPREDICTION TRIGGERS:")
-        for trigger, count in sorted(trigger_counts.items(), key=lambda x: -x[1]):
-            print(f"  {trigger}: {count}")
+    print(f"\nMETRICS:")
+    print(f"  Precision:  {precision*100:.2f}%  (TP / (TP + FP))")
+    print(f"  Recall:     {recall*100:.2f}%  (TP / (TP + FN))")
+    print(f"  F1 Score:   {f1*100:.2f}%")
     
-    # False Positives Analysis
-    if fp_list and args.show_fp > 0:
-        print("\n" + "="*70)
-        print(f"FALSE POSITIVES ({fp} total, showing {min(fp, args.show_fp)}):")
-        print("="*70)
-        
-        # Analyze what codes actually fired
-        fp_actual_codes = defaultdict(int)
-        for _, _, codes, _ in fp_list:
-            for c in codes:
-                code_base = str(c).split('_')[0] if '_' in str(c) else str(c)
-                fp_actual_codes[code_base] += 1
-        
-        print("\nWhat codes ACTUALLY fired (instead of 8004):")
-        for code, count in sorted(fp_actual_codes.items(), key=lambda x: -x[1])[:10]:
-            print(f"  {code}: {count}")
-        
-        # Analyze which rules triggered FPs
-        fp_triggers = defaultdict(int)
-        for _, reasons, _, _ in fp_list:
-            for r in reasons:
-                trigger = r.split(':')[0] if ':' in r else r
-                fp_triggers[trigger] += 1
-        
-        print("\nFP Trigger Analysis:")
-        for trigger, count in sorted(fp_triggers.items(), key=lambda x: -x[1]):
-            print(f"  {trigger}: {count} ({count/fp*100:.1f}%)")
-        
-        print("\nSample FPs:")
-        for i, (txn, reasons, codes, debug) in enumerate(fp_list[:args.show_fp], 1):
-            print(f"  {i}. {txn}")
-            print(f"     Trigger: {reasons[0] if reasons else '?'}")
-            print(f"     Actual codes: {codes}")
+    print(f"\nRULES (V6 - CDT = BENEFICIARY PARTY):")
+    print(f"  1. cdt_is_international=True AND cdt_has_iban=False AND cdt_has_account=True")
+    print(f"  2. missing_required_iban=True")
+    print(f"\n  KEY INSIGHT: 8004_BNPPTY refers to CDT (CreditPartyInfo), not BNF!")
+    print(f"               BNPPTY = Beneficiary Party = Credit Party")
     
-    # False Negatives Analysis  
-    if fn_list and args.show_fn > 0:
-        print("\n" + "="*70)
-        print(f"FALSE NEGATIVES ({fn} total, showing {min(fn, args.show_fn)}):")
-        print("="*70)
+    print(f"\nPREDICTION TRIGGERS:")
+    for trigger, count in sorted(prediction_triggers.items(), key=lambda x: -x[1]):
+        print(f"  {trigger}: {count}")
+    
+    # Show FP analysis
+    print("\n" + "=" * 70)
+    print(f"FALSE POSITIVES ({len(fp_list)} total, showing {min(args.sample_size, len(fp_list))}):")
+    print("=" * 70)
+    
+    # Analyze what codes ACTUALLY fired instead of 8004
+    fp_actual_codes = defaultdict(int)
+    for _, _, codes, _ in fp_list:
+        for c in codes:
+            code_base = str(c).split('_')[0]
+            fp_actual_codes[code_base] += 1
+    
+    print(f"\nWhat codes ACTUALLY fired (instead of 8004):")
+    for code, count in sorted(fp_actual_codes.items(), key=lambda x: -x[1])[:10]:
+        print(f"  {code}: {count}")
+    
+    # Analyze FP countries
+    fp_countries = defaultdict(int)
+    for _, _, _, features in fp_list[:100]:
+        country = features.get('cdt_residence_country') or features.get('cdt_address_country') or features.get('cdt_country')
+        if country:
+            fp_countries[country] += 1
+    
+    print(f"\nFP by CDT country:")
+    for country, count in sorted(fp_countries.items(), key=lambda x: -x[1])[:10]:
+        print(f"  {country}: {count}")
+    
+    print(f"\nSample FPs:")
+    for i, (txn_id, reasons, codes, features) in enumerate(fp_list[:args.sample_size]):
+        cdt_country = features.get('cdt_residence_country') or features.get('cdt_address_country')
+        print(f"  {i+1}. {txn_id}")
+        print(f"     Trigger: {reasons[0] if reasons else 'none'}")
+        print(f"     CDT country: {cdt_country}")
+        print(f"     Actual codes: {codes[:5]}")
+    
+    # Show FN analysis
+    print("\n" + "=" * 70)
+    print(f"FALSE NEGATIVES ({len(fn_list)} total, showing {min(args.sample_size, len(fn_list))}):")
+    print("=" * 70)
+    
+    # Analyze patterns in FN
+    fn_patterns = defaultdict(int)
+    for _, _, codes, features in fn_list[:100]:
+        if features.get('cdt_is_international') == False:
+            fn_patterns['cdt_is_international=False'] += 1
+        if features.get('cdt_is_international') == True:
+            fn_patterns['cdt_is_international=True'] += 1
+        if features.get('cdt_has_iban') == False:
+            fn_patterns['cdt_has_iban=False'] += 1
+        if features.get('cdt_has_account') == True:
+            fn_patterns['cdt_has_account=True'] += 1
+        if features.get('cdt_has_account') == False:
+            fn_patterns['cdt_has_account=False'] += 1
+        if features.get('cdt_present') == False:
+            fn_patterns['cdt_present=False'] += 1
         
-        # Analyze FN patterns
-        fn_patterns = defaultdict(int)
-        for _, _, debug in fn_list:
-            for k, v in debug.items():
-                if v is True:
-                    fn_patterns[f"{k}=True"] += 1
-                elif v is False:
-                    fn_patterns[f"{k}=False"] += 1
-        
-        if fn_patterns:
-            print("\nPattern Analysis (features in FN cases):")
-            for p, c in sorted(fn_patterns.items(), key=lambda x: -x[1])[:10]:
-                pct = c / fn * 100 if fn > 0 else 0
-                print(f"  {p}: {c} ({pct:.1f}%)")
-        
-        print("\nSample FNs:")
-        for i, (txn, codes, debug) in enumerate(fn_list[:args.show_fn], 1):
-            print(f"  {i}. {txn}")
-            print(f"     Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
-            print(f"     needs_iban: bnf={debug.get('bnf_needs_iban')}, cdt={debug.get('cdt_needs_iban')}, dbt={debug.get('dbt_needs_iban')}")
-            print(f"     has_iban: bnf={debug.get('bnf_has_iban')}, cdt={debug.get('cdt_has_iban')}, dbt={debug.get('dbt_has_iban')}")
-            print(f"     missing_required_iban={debug.get('missing_required_iban')}")
+        country = features.get('cdt_residence_country') or features.get('cdt_address_country')
+        if country:
+            fn_patterns[f'cdt_country={country}'] += 1
+    
+    print(f"\nPattern Analysis (CDT features in FN cases):")
+    for pattern, count in sorted(fn_patterns.items(), key=lambda x: -x[1])[:20]:
+        pct = count / min(100, len(fn_list)) * 100
+        print(f"  {pattern}: {count} ({pct:.1f}%)")
+    
+    print(f"\nSample FNs:")
+    for i, (txn_id, reasons, codes, features) in enumerate(fn_list[:args.sample_size]):
+        cdt_country = features.get('cdt_residence_country') or features.get('cdt_address_country')
+        print(f"  {i+1}. {txn_id}")
+        print(f"     Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
+        print(f"     cdt_is_international={features.get('cdt_is_international')}")
+        print(f"     cdt_has_account={features.get('cdt_has_account')}")
+        print(f"     cdt_has_iban={features.get('cdt_has_iban')}")
+        print(f"     cdt_country={cdt_country}")
     
     # Summary
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("SUMMARY")
-    print("="*70)
+    print("=" * 70)
     
-    recall_icon = "✅" if recall >= 0.95 else "⚠️" if recall >= 0.50 else "❌"
-    precision_icon = "✅" if precision >= 0.30 else "⚠️" if precision >= 0.10 else "❌"
+    recall_status = "✓" if recall >= 0.95 else "✗"
+    precision_status = "✓" if precision >= 0.30 else "⚠" if precision >= 0.10 else "✗"
     
-    print(f"""
-    Recall:    {recall*100:>6.1f}%  {recall_icon}
-    Precision: {precision*100:>6.1f}%  {precision_icon}
-    F1 Score:  {f1*100:>6.1f}%
+    print(f"\n  Recall:     {recall*100:.1f}% {recall_status}")
+    print(f"  Precision:  {precision*100:.1f}% {precision_status}")
+    print(f"  F1 Score:   {f1*100:.1f}%")
     
-    V4 Changes:
-    - REMOVED: has_account but no IBAN (was causing 6021 FPs)
-    - KEPT: needs_iban but no IBAN
-    - KEPT: missing_required_iban flag
-    """)
+    print(f"\nV6 Changes:")
+    print(f"  - Fixed party mapping: BNPPTY = CDT (CreditPartyInfo), not BNF")
+    print(f"  - Rule: cdt_is_international + cdt_has_account + no cdt_has_iban")
 
 
 if __name__ == "__main__":
