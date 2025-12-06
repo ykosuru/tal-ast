@@ -44,6 +44,146 @@ IBAN_LENGTHS = {
     'UA': 29,
 }
 
+# BBAN specifications by country (structure regex, has internal check digit)
+# BBAN is the country-specific part of IBAN after country code and check digits
+BBAN_SPECS = {
+    # Western Europe
+    'DE': {'length': 18, 'pattern': r'^(\d{8})(\d{10})$', 'check': None},
+    'FR': {'length': 23, 'pattern': r'^(\d{5})(\d{5})([A-Z0-9]{11})(\d{2})$', 'check': 'fr'},
+    'ES': {'length': 20, 'pattern': r'^(\d{4})(\d{4})(\d{2})(\d{10})$', 'check': 'es'},
+    'IT': {'length': 23, 'pattern': r'^([A-Z])(\d{5})(\d{5})([A-Z0-9]{12})$', 'check': 'it'},
+    'NL': {'length': 14, 'pattern': r'^([A-Z]{4})(\d{10})$', 'check': None},
+    'BE': {'length': 12, 'pattern': r'^(\d{3})(\d{7})(\d{2})$', 'check': 'be'},
+    'AT': {'length': 16, 'pattern': r'^(\d{5})(\d{11})$', 'check': None},
+    'CH': {'length': 17, 'pattern': r'^(\d{5})([A-Z0-9]{12})$', 'check': None},
+    'LU': {'length': 16, 'pattern': r'^(\d{3})([A-Z0-9]{13})$', 'check': None},
+    # UK & Ireland
+    'GB': {'length': 18, 'pattern': r'^([A-Z]{4})(\d{6})(\d{8})$', 'check': None},
+    'IE': {'length': 18, 'pattern': r'^([A-Z]{4})(\d{6})(\d{8})$', 'check': None},
+    # Nordic
+    'FI': {'length': 14, 'pattern': r'^(\d{3})(\d{11})$', 'check': 'fi'},
+    'SE': {'length': 20, 'pattern': r'^(\d{3})(\d{17})$', 'check': None},
+    'NO': {'length': 11, 'pattern': r'^(\d{4})(\d{6})(\d{1})$', 'check': 'no'},
+    'DK': {'length': 14, 'pattern': r'^(\d{4})(\d{10})$', 'check': None},
+    # Eastern Europe
+    'PL': {'length': 24, 'pattern': r'^(\d{8})(\d{16})$', 'check': 'pl'},
+    'CZ': {'length': 20, 'pattern': r'^(\d{4})(\d{6})(\d{10})$', 'check': 'cz'},
+    'SK': {'length': 20, 'pattern': r'^(\d{4})(\d{6})(\d{10})$', 'check': 'cz'},
+    'HU': {'length': 24, 'pattern': r'^(\d{3})(\d{4})(\d{1})(\d{15})(\d{1})$', 'check': 'hu'},
+    'RO': {'length': 20, 'pattern': r'^([A-Z]{4})([A-Z0-9]{16})$', 'check': None},
+    'BG': {'length': 18, 'pattern': r'^([A-Z]{4})(\d{4})(\d{2})([A-Z0-9]{8})$', 'check': None},
+    'HR': {'length': 17, 'pattern': r'^(\d{7})(\d{10})$', 'check': None},
+    'SI': {'length': 15, 'pattern': r'^(\d{5})(\d{8})(\d{2})$', 'check': 'si'},
+    # Baltic
+    'EE': {'length': 16, 'pattern': r'^(\d{2})(\d{14})$', 'check': 'ee'},
+    'LV': {'length': 17, 'pattern': r'^([A-Z]{4})([A-Z0-9]{13})$', 'check': None},
+    'LT': {'length': 16, 'pattern': r'^(\d{5})(\d{11})$', 'check': None},
+    # Southern Europe
+    'PT': {'length': 21, 'pattern': r'^(\d{4})(\d{4})(\d{11})(\d{2})$', 'check': 'pt'},
+    'GR': {'length': 23, 'pattern': r'^(\d{3})(\d{4})([A-Z0-9]{16})$', 'check': None},
+    'CY': {'length': 24, 'pattern': r'^(\d{3})(\d{5})([A-Z0-9]{16})$', 'check': None},
+    # Middle East
+    'SA': {'length': 20, 'pattern': r'^(\d{2})([A-Z0-9]{18})$', 'check': None},
+    'AE': {'length': 19, 'pattern': r'^(\d{3})(\d{16})$', 'check': None},
+    'TR': {'length': 22, 'pattern': r'^(\d{5})(0)([A-Z0-9]{16})$', 'check': None},
+}
+
+
+def _spanish_bban_check(bank: str, branch: str, stated_check: str, account: str) -> bool:
+    """Validate Spanish BBAN check digits."""
+    try:
+        weights = [1, 2, 4, 8, 5, 10, 9, 7, 3, 6]
+        # First check digit: validates "00" + bank + branch
+        digits1 = "00" + bank + branch
+        sum1 = sum(int(d) * w for d, w in zip(digits1, weights))
+        check1 = 11 - (sum1 % 11)
+        if check1 == 11: check1 = 0
+        elif check1 == 10: check1 = 1
+        # Second check digit: validates account
+        sum2 = sum(int(d) * w for d, w in zip(account, weights))
+        check2 = 11 - (sum2 % 11)
+        if check2 == 11: check2 = 0
+        elif check2 == 10: check2 = 1
+        return stated_check == f"{check1}{check2}"
+    except (ValueError, TypeError):
+        return False
+
+
+def _belgian_bban_check(bank: str, account: str, stated_check: str) -> bool:
+    """Validate Belgian BBAN check (mod 97)."""
+    try:
+        num = int(bank + account)
+        calculated = num % 97
+        if calculated == 0: calculated = 97
+        return int(stated_check) == calculated
+    except (ValueError, TypeError):
+        return False
+
+
+def _mod97_bban_check(*parts) -> bool:
+    """Generic mod 97 check for BBAN."""
+    try:
+        num = int(''.join(parts[:-1]))
+        calculated = 98 - (num * 100) % 97
+        return int(parts[-1]) == calculated
+    except (ValueError, TypeError):
+        return False
+
+
+def validate_bban(iban: str) -> Tuple[bool, bool, Optional[str]]:
+    """
+    Validate the BBAN portion of an IBAN.
+    
+    Returns:
+        Tuple of (structure_valid, check_valid, error_detail)
+    """
+    if not iban:
+        return False, False, "Empty IBAN"
+    
+    cleaned = iban.upper().replace(' ', '').replace('-', '')
+    if len(cleaned) < 5:
+        return False, False, "IBAN too short"
+    
+    country = cleaned[:2]
+    bban = cleaned[4:]  # Skip country (2) + check digits (2)
+    
+    spec = BBAN_SPECS.get(country)
+    if not spec:
+        return True, True, None  # Unknown country, assume valid
+    
+    # Check length
+    if len(bban) != spec['length']:
+        return False, False, f"BBAN length {len(bban)} != expected {spec['length']}"
+    
+    # Check structure
+    match = re.match(spec['pattern'], bban)
+    if not match:
+        return False, False, f"BBAN structure invalid for {country}"
+    
+    # Check internal check digits if applicable
+    check_type = spec.get('check')
+    if not check_type:
+        return True, True, None
+    
+    parts = match.groups()
+    check_valid = True
+    
+    try:
+        if check_type == 'es':
+            check_valid = _spanish_bban_check(*parts)
+        elif check_type == 'be':
+            check_valid = _belgian_bban_check(*parts)
+        elif check_type in ('pt', 'si'):
+            check_valid = _mod97_bban_check(*parts)
+        # Add more check types as needed
+    except Exception:
+        check_valid = True  # On error, don't fail
+    
+    if not check_valid:
+        return True, False, f"BBAN check digit invalid for {country}"
+    
+    return True, True, None
+
 
 def validate_bic(bic: str) -> Tuple[bool, bool]:
     """
@@ -313,6 +453,9 @@ class PartyInfo:
     iban_country: Optional[str] = None  # Country code from IBAN (first 2 chars)
     iban_valid_format: bool = False  # Is IBAN format valid?
     iban_checksum_valid: bool = False  # Does IBAN pass mod-97 check?
+    bban_structure_valid: bool = True  # Does BBAN match country-specific structure?
+    bban_check_valid: bool = True      # Do BBAN internal check digits pass?
+    iban_fully_valid: bool = False     # All IBAN checks pass (format + checksum + BBAN)
     bic_iban_country_match: Optional[bool] = None  # Do BIC and IBAN countries match?
     bic_party_country_match: Optional[bool] = None  # Does BIC country match party country?
     # Account identifier types detected
@@ -1030,6 +1173,16 @@ class IFMLParser:
                 party.iban_country = party.account_value[0:2].upper()
             # Validate IBAN format and checksum
             party.iban_valid_format, party.iban_checksum_valid = validate_iban(party.account_value)
+            # Validate BBAN structure and check digits
+            bban_struct, bban_check, _ = validate_bban(party.account_value)
+            party.bban_structure_valid = bban_struct
+            party.bban_check_valid = bban_check
+            # IBAN is fully valid only if all checks pass
+            party.iban_fully_valid = (
+                party.iban_valid_format and 
+                party.iban_checksum_valid and 
+                bban_struct and bban_check
+            )
         
         # Detect account type (CLABE, FEDABA, etc.) and get length
         if party.account_value:
@@ -1250,6 +1403,15 @@ class IFMLParser:
                         cleaned = id_text.upper().replace(' ', '').replace('-', '')
                         existing_party.iban_country = cleaned[:2]
                     existing_party.iban_valid_format, existing_party.iban_checksum_valid = validate_iban(id_text)
+                    # Validate BBAN structure
+                    bban_struct, bban_check, _ = validate_bban(id_text)
+                    existing_party.bban_structure_valid = bban_struct
+                    existing_party.bban_check_valid = bban_check
+                    existing_party.iban_fully_valid = (
+                        existing_party.iban_valid_format and
+                        existing_party.iban_checksum_valid and
+                        bban_struct and bban_check
+                    )
                     # Check if needs formatting
                     if ' ' in id_text or '-' in id_text:
                         existing_party.iban_needs_formatting = True
@@ -1267,6 +1429,15 @@ class IFMLParser:
                         cleaned = id_text.upper().replace(' ', '').replace('-', '')
                         existing_party.iban_country = cleaned[:2]
                     existing_party.iban_valid_format, existing_party.iban_checksum_valid = validate_iban(id_text)
+                    # Validate BBAN structure
+                    bban_struct, bban_check, _ = validate_bban(id_text)
+                    existing_party.bban_structure_valid = bban_struct
+                    existing_party.bban_check_valid = bban_check
+                    existing_party.iban_fully_valid = (
+                        existing_party.iban_valid_format and
+                        existing_party.iban_checksum_valid and
+                        bban_struct and bban_check
+                    )
                     # Check if needs formatting
                     if ' ' in id_text or '-' in id_text:
                         existing_party.iban_needs_formatting = True
@@ -1419,6 +1590,9 @@ class IFMLParser:
                 result[f'{prefix}_iban_country'] = party.iban_country
                 result[f'{prefix}_iban_valid_format'] = party.iban_valid_format
                 result[f'{prefix}_iban_checksum_valid'] = party.iban_checksum_valid
+                result[f'{prefix}_bban_structure_valid'] = party.bban_structure_valid
+                result[f'{prefix}_bban_check_valid'] = party.bban_check_valid
+                result[f'{prefix}_iban_fully_valid'] = party.iban_fully_valid
                 result[f'{prefix}_bic_iban_match'] = party.bic_iban_country_match
                 result[f'{prefix}_bic_party_country_match'] = party.bic_party_country_match
                 result[f'{prefix}_is_clabe'] = party.is_clabe
@@ -1492,6 +1666,9 @@ class IFMLParser:
                 result[f'{prefix}_iban_country'] = None
                 result[f'{prefix}_iban_valid_format'] = False
                 result[f'{prefix}_iban_checksum_valid'] = False
+                result[f'{prefix}_bban_structure_valid'] = True  # Default True (no IBAN = no BBAN issue)
+                result[f'{prefix}_bban_check_valid'] = True
+                result[f'{prefix}_iban_fully_valid'] = False
                 result[f'{prefix}_bic_iban_match'] = None
                 result[f'{prefix}_bic_party_country_match'] = None
                 result[f'{prefix}_is_clabe'] = False
