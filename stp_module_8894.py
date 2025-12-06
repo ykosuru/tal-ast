@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-Test rules for 8894 - IBAN Validation Failed (V6 with Bank Directory Lookup)
+Test rules for 8894 - IBAN Validation Failed (V7 - Missing/Unextractable IBAN)
 
-V6 CHANGES:
-- Integrates bank directory lookup (built from production data)
-- Unknown bank codes trigger 8894 prediction
-- Combined with existing BBAN validation rules
+V7 INSIGHT:
+Looking at false negatives, most 8894 cases have:
+- NO extractable IBAN (parser can't find it)
+- OR IBAN in unexpected format/location
+
+New hypothesis: 8894 fires when IBAN is EXPECTED but not properly provided.
+
+V7 RULES:
+1. Has BeneficiaryParty but NO extractable IBAN → risky
+2. International payment to IBAN country but no IBAN found
+3. Has IBAN-like field but it fails basic pattern matching
+4. Account field exists but doesn't look like valid IBAN
 
 Usage:
-    # First, build the bank directory (one-time)
-    python build_bank_directory.py --data-dir ./prd_emts --output bank_directory.json
-    
-    # Then test with the directory
-    python test_8894_rules_v6.py --data-dir ./prd_emts --directory bank_directory.json
+    python test_8894_rules_v7.py --data-dir ./prd_emts
 """
 
 import argparse
@@ -23,121 +27,115 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Set
 
-# Bank code positions by country (same as build_bank_directory.py)
-BANK_CODE_POSITIONS = {
-    'DE': (0, 8), 'FR': (0, 5), 'ES': (0, 4), 'IT': (1, 6), 'NL': (0, 4),
-    'BE': (0, 3), 'AT': (0, 5), 'CH': (0, 5), 'LU': (0, 3), 'GB': (0, 4),
-    'IE': (0, 4), 'FI': (0, 3), 'SE': (0, 3), 'NO': (0, 4), 'DK': (0, 4),
-    'PL': (0, 8), 'CZ': (0, 4), 'SK': (0, 4), 'HU': (0, 3), 'RO': (0, 4),
-    'BG': (0, 4), 'HR': (0, 7), 'SI': (0, 5), 'EE': (0, 2), 'LV': (0, 4),
-    'LT': (0, 5), 'PT': (0, 4), 'GR': (0, 3), 'CY': (0, 3), 'MT': (0, 4),
-    'SA': (0, 2), 'AE': (0, 3), 'TR': (0, 5), 'IL': (0, 3), 'QA': (0, 4),
-    'KW': (0, 4), 'BH': (0, 4),
-}
-
 TARGET_CODE = '8894'
 
+# Countries that use IBAN
+IBAN_COUNTRIES = {
+    'AD', 'AE', 'AL', 'AT', 'AZ', 'BA', 'BE', 'BG', 'BH', 'BR', 'BY', 'CH',
+    'CR', 'CY', 'CZ', 'DE', 'DK', 'DO', 'EE', 'ES', 'FI', 'FO', 'FR', 'GB',
+    'GE', 'GI', 'GL', 'GR', 'GT', 'HR', 'HU', 'IE', 'IL', 'IQ', 'IS', 'IT',
+    'JO', 'KW', 'KZ', 'LB', 'LI', 'LT', 'LU', 'LV', 'MC', 'MD', 'ME', 'MK',
+    'MR', 'MT', 'MU', 'NL', 'NO', 'PK', 'PL', 'PS', 'PT', 'QA', 'RO', 'RS',
+    'SA', 'SC', 'SE', 'SI', 'SK', 'SM', 'TL', 'TN', 'TR', 'UA', 'VA', 'VG', 'XK'
+}
 
-class BankDirectory:
-    """Lookup for known-valid bank codes built from production data."""
-    
-    def __init__(self, directory_file: str = None):
-        self.valid_codes: Dict[str, Set[str]] = {}
-        self.potentially_invalid: Dict[str, Set[str]] = {}
-        self.metadata = {}
-        
-        if directory_file:
-            self.load(directory_file)
-    
-    def load(self, filepath: str):
-        """Load bank directory from JSON file."""
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        
-        self.metadata = data.get('metadata', {})
-        self.valid_codes = {
-            country: set(codes)
-            for country, codes in data.get('valid_bank_codes', {}).items()
-        }
-        self.potentially_invalid = {
-            country: set(codes)
-            for country, codes in data.get('potentially_invalid', {}).items()
-        }
-        
-        total = sum(len(v) for v in self.valid_codes.values())
-        print(f"Loaded bank directory: {total:,} valid codes from {len(self.valid_codes)} countries")
-    
-    def is_known_valid(self, country: str, bank_code: str) -> bool:
-        """Check if bank code is in our known-valid set."""
-        if not country or not bank_code:
-            return True  # Can't validate, assume OK
-        
-        country = country.upper()
-        
-        if country not in self.valid_codes:
-            return True  # Unknown country, can't validate
-        
-        return bank_code in self.valid_codes[country]
-    
-    def is_potentially_invalid(self, country: str, bank_code: str) -> bool:
-        """Check if bank code was ONLY seen with 8894 errors."""
-        if not country or not bank_code:
-            return False
-        
-        country = country.upper()
-        return bank_code in self.potentially_invalid.get(country, set())
+# Countries that do NOT use IBAN (should not expect IBAN)
+NON_IBAN_COUNTRIES = {
+    'US', 'CA', 'AU', 'NZ', 'JP', 'CN', 'IN', 'SG', 'HK', 'TW', 'KR', 'TH',
+    'MY', 'ID', 'PH', 'VN', 'MX', 'AR', 'CL', 'CO', 'PE', 'ZA', 'NG', 'KE',
+    'EG', 'MA'  # Note: Some of these may have adopted IBAN
+}
 
 
 def looks_like_iban(s: str) -> bool:
-    """Check if string looks like an IBAN."""
+    """Check if string looks like a valid IBAN pattern."""
     if not s or not isinstance(s, str):
         return False
     cleaned = s.upper().replace(' ', '').replace('-', '')
     if len(cleaned) < 15 or len(cleaned) > 34:
         return False
-    return bool(re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned))
-
-
-def extract_bank_code(iban: str) -> Tuple[Optional[str], Optional[str]]:
-    """Extract country and bank code from IBAN."""
-    if not iban:
-        return None, None
-    
-    cleaned = iban.upper().replace(' ', '').replace('-', '')
-    if len(cleaned) < 5:
-        return None, None
-    
+    # Must start with 2 letters (country) + 2 digits (check)
+    if not re.match(r'^[A-Z]{2}[0-9]{2}[A-Z0-9]+$', cleaned):
+        return False
+    # Country must be valid IBAN country
     country = cleaned[:2]
-    bban = cleaned[4:]
-    
-    positions = BANK_CODE_POSITIONS.get(country)
-    if not positions:
-        if len(bban) >= 4:
-            return country, bban[:4]
-        return country, None
-    
-    start, end = positions
-    if len(bban) >= end:
-        return country, bban[start:end]
-    
-    return country, None
+    if country not in IBAN_COUNTRIES:
+        return False
+    return True
 
 
-def extract_ibans_from_obj(obj) -> List[str]:
-    """Recursively extract all IBAN values from a JSON object."""
-    ibans = []
+def looks_like_malformed_iban(s: str) -> bool:
+    """Check if string looks like an IBAN attempt but is malformed."""
+    if not s or not isinstance(s, str):
+        return False
+    
+    cleaned = s.upper().replace(' ', '').replace('-', '')
+    
+    # Too short or too long
+    if len(cleaned) < 10 or len(cleaned) > 40:
+        return False
+    
+    # Starts with 2 letters but something is wrong
+    if re.match(r'^[A-Z]{2}', cleaned):
+        # Has letters at start but:
+        # - Wrong length
+        # - Invalid check digits (not 2 digits after country)
+        # - Contains invalid characters
+        # - Country not in IBAN list
+        
+        country = cleaned[:2]
+        
+        # Country code that doesn't use IBAN
+        if country in NON_IBAN_COUNTRIES:
+            return True  # Trying to use IBAN format for non-IBAN country
+        
+        # Position 3-4 should be digits
+        if len(cleaned) >= 4 and not cleaned[2:4].isdigit():
+            return True  # Malformed check digits
+        
+        # Contains lowercase (original had lowercase)
+        if s != s.upper() and re.match(r'^[a-zA-Z]{2}', s):
+            return True  # Lowercase IBAN attempt
+        
+        # Has special characters in middle
+        if re.search(r'[^A-Z0-9]', cleaned):
+            return True
+    
+    return False
+
+
+def extract_all_potential_ibans(obj, path="") -> List[dict]:
+    """
+    Extract all potential IBAN-like values from JSON, tracking where they came from.
+    Returns list of {value, path, is_valid_iban, is_malformed}
+    """
+    results = []
     
     if isinstance(obj, dict):
         # Check ID fields
-        if 'ID' in obj:
-            id_field = obj['ID']
-            if isinstance(id_field, dict):
-                id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
-                id_text = id_field.get('text') or id_field.get('#text') or ''
-                if id_type == 'IBAN' or looks_like_iban(str(id_text)):
-                    ibans.append(str(id_text))
-            elif isinstance(id_field, str) and looks_like_iban(id_field):
-                ibans.append(id_field)
+        for id_key in ['ID', 'Id']:
+            if id_key in obj:
+                id_field = obj[id_key]
+                if isinstance(id_field, dict):
+                    id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
+                    id_text = str(id_field.get('text') or id_field.get('#text') or '')
+                    
+                    if id_text:
+                        results.append({
+                            'value': id_text,
+                            'path': f"{path}.{id_key}",
+                            'declared_type': id_type,
+                            'is_valid_iban': looks_like_iban(id_text),
+                            'is_malformed': looks_like_malformed_iban(id_text),
+                        })
+                elif isinstance(id_field, str) and id_field:
+                    results.append({
+                        'value': id_field,
+                        'path': f"{path}.{id_key}",
+                        'declared_type': '',
+                        'is_valid_iban': looks_like_iban(id_field),
+                        'is_malformed': looks_like_malformed_iban(id_field),
+                    })
         
         # Check AcctIDInfo / AcctIDInf
         for acct_key in ['AcctIDInfo', 'AcctIDInf']:
@@ -147,22 +145,76 @@ def extract_ibans_from_obj(obj) -> List[str]:
                     acct_id = acct.get('ID', {})
                     if isinstance(acct_id, dict):
                         acct_type = (acct_id.get('Type') or acct_id.get('@Type') or '').upper()
-                        acct_text = acct_id.get('text') or acct_id.get('#text') or ''
-                        if acct_type == 'IBAN' or looks_like_iban(str(acct_text)):
-                            ibans.append(str(acct_text))
+                        acct_text = str(acct_id.get('text') or acct_id.get('#text') or '')
+                        if acct_text:
+                            results.append({
+                                'value': acct_text,
+                                'path': f"{path}.{acct_key}.ID",
+                                'declared_type': acct_type,
+                                'is_valid_iban': looks_like_iban(acct_text),
+                                'is_malformed': looks_like_malformed_iban(acct_text),
+                            })
+        
+        # Recurse
+        for key, value in obj.items():
+            results.extend(extract_all_potential_ibans(value, f"{path}.{key}"))
+    
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            results.extend(extract_all_potential_ibans(item, f"{path}[{i}]"))
+    
+    return results
+
+
+def extract_countries(obj) -> Set[str]:
+    """Extract all country codes from the message."""
+    countries = set()
+    
+    if isinstance(obj, dict):
+        for key in ['Country', 'MailingCountry', 'ResidenceCountry']:
+            if key in obj:
+                val = obj[key]
+                if isinstance(val, str) and len(val) == 2:
+                    countries.add(val.upper())
+        
+        # Check BIC for country (positions 5-6)
+        for id_key in ['ID', 'Id']:
+            if id_key in obj:
+                id_field = obj[id_key]
+                if isinstance(id_field, dict):
+                    id_type = (id_field.get('Type') or id_field.get('@Type') or '').upper()
+                    id_text = str(id_field.get('text') or id_field.get('#text') or '')
+                    if id_type in ('BIC', 'S', 'SWIFT') and len(id_text) >= 6:
+                        countries.add(id_text[4:6].upper())
         
         for value in obj.values():
-            ibans.extend(extract_ibans_from_obj(value))
+            countries.update(extract_countries(value))
     
     elif isinstance(obj, list):
         for item in obj:
-            ibans.extend(extract_ibans_from_obj(item))
+            countries.update(extract_countries(item))
     
-    return ibans
+    return countries
+
+
+def has_beneficiary_party(obj) -> bool:
+    """Check if message has BeneficiaryParty or similar."""
+    if isinstance(obj, dict):
+        for key in obj.keys():
+            if 'Beneficiary' in key or 'BNPPTY' in key or 'Credit' in key:
+                return True
+        for value in obj.values():
+            if has_beneficiary_party(value):
+                return True
+    elif isinstance(obj, list):
+        for item in obj:
+            if has_beneficiary_party(item):
+                return True
+    return False
 
 
 def extract_error_codes(obj) -> List[str]:
-    """Extract error codes from response object."""
+    """Extract error codes from response."""
     codes = []
     
     if isinstance(obj, dict):
@@ -175,14 +227,10 @@ def extract_error_codes(obj) -> List[str]:
                     code = status.get('Code')
                     info = status.get('InformationalData', '')
                     if code:
-                        # Include party hint if available
-                        party = ''
                         for prefix in ['BNFBNK', 'BNPPTY', 'CDTPTY', 'DBTPTY', 'INTBNK']:
                             if info.startswith(prefix):
-                                party = prefix
+                                codes.append(f"{code}_{prefix}")
                                 break
-                        if party:
-                            codes.append(f"{code}_{party}")
                         codes.append(str(code))
         
         if 'AuditTrail' in obj:
@@ -198,101 +246,71 @@ def extract_error_codes(obj) -> List[str]:
     return codes
 
 
-def check_iban_validation(iban: str) -> Dict[str, bool]:
+def check_rules_v7(request_data: dict) -> Tuple[bool, List[str]]:
     """
-    Perform IBAN validation checks (format, checksum).
-    Returns dict of validation results.
-    """
-    result = {
-        'has_iban': False,
-        'format_valid': False,
-        'checksum_valid': False,
-    }
-    
-    if not iban or not looks_like_iban(iban):
-        return result
-    
-    result['has_iban'] = True
-    cleaned = iban.upper().replace(' ', '').replace('-', '')
-    
-    # Check format (length for country)
-    country = cleaned[:2]
-    IBAN_LENGTHS = {
-        'DE': 22, 'FR': 27, 'ES': 24, 'IT': 27, 'NL': 18, 'BE': 16, 'AT': 20,
-        'CH': 21, 'GB': 22, 'IE': 22, 'PL': 28, 'PT': 25, 'SE': 24, 'NO': 15,
-        'DK': 18, 'FI': 18, 'CZ': 24, 'SK': 24, 'HU': 28, 'RO': 24, 'BG': 22,
-        'HR': 21, 'SI': 19, 'EE': 20, 'LV': 21, 'LT': 20, 'GR': 27, 'CY': 28,
-        'MT': 31, 'LU': 20, 'SA': 24, 'AE': 23, 'TR': 26,
-    }
-    expected_len = IBAN_LENGTHS.get(country)
-    if expected_len:
-        result['format_valid'] = len(cleaned) == expected_len
-    else:
-        result['format_valid'] = 15 <= len(cleaned) <= 34
-    
-    # Check mod-97 checksum
-    try:
-        rearranged = cleaned[4:] + cleaned[:4]
-        numeric = ''
-        for char in rearranged:
-            if char.isdigit():
-                numeric += char
-            elif char.isalpha():
-                numeric += str(ord(char) - ord('A') + 10)
-        result['checksum_valid'] = int(numeric) % 97 == 1
-    except:
-        result['checksum_valid'] = False
-    
-    return result
-
-
-def check_rules_v6(ibans: List[str], bank_directory: BankDirectory) -> Tuple[bool, List[str]]:
-    """
-    Check if 8894 should fire based on V6 rules.
+    V7 Rules: Predict 8894 when IBAN is expected but not properly extractable.
     
     Rules:
-    1. IBAN checksum invalid (mod-97)
-    2. IBAN format invalid (wrong length)
-    3. Bank code not in known-valid directory
-    4. Bank code only seen with 8894 errors (potentially invalid)
+    1. Beneficiary in IBAN country but no valid IBAN found
+    2. ID field declared as IBAN but doesn't match pattern
+    3. Malformed IBAN-like string detected
+    4. Has account field but it's not a valid IBAN for IBAN-required country
     """
     reasons = []
     
-    for iban in ibans:
-        if not iban:
-            continue
-        
-        # Basic IBAN validation
-        validation = check_iban_validation(iban)
-        
-        if validation['has_iban']:
-            if not validation['checksum_valid']:
-                reasons.append(f"IBAN checksum invalid: {iban[:10]}...")
-            
-            if not validation['format_valid']:
-                reasons.append(f"IBAN format invalid: {iban[:10]}...")
-        
-        # Bank directory lookup
-        country, bank_code = extract_bank_code(iban)
-        
-        if country and bank_code:
-            if not bank_directory.is_known_valid(country, bank_code):
-                reasons.append(f"Unknown bank code: {country}:{bank_code}")
-            
-            if bank_directory.is_potentially_invalid(country, bank_code):
-                reasons.append(f"Potentially invalid bank code: {country}:{bank_code}")
+    # Extract all potential IBANs
+    potential_ibans = extract_all_potential_ibans(request_data)
+    
+    # Extract countries mentioned
+    countries = extract_countries(request_data)
+    
+    # Check if beneficiary exists
+    has_beneficiary = has_beneficiary_party(request_data)
+    
+    # Count valid vs invalid
+    valid_ibans = [p for p in potential_ibans if p['is_valid_iban']]
+    declared_ibans = [p for p in potential_ibans if p['declared_type'] == 'IBAN']
+    malformed = [p for p in potential_ibans if p['is_malformed']]
+    
+    # Rule 1: Field declared as IBAN but value is not valid IBAN
+    for p in declared_ibans:
+        if not p['is_valid_iban']:
+            reasons.append(f"Declared IBAN invalid: {p['value'][:15]}...")
+    
+    # Rule 2: Malformed IBAN-like strings
+    for p in malformed:
+        # Skip if we already caught it as declared IBAN
+        if p not in declared_ibans:
+            reasons.append(f"Malformed IBAN-like: {p['value'][:15]}...")
+    
+    # Rule 3: Beneficiary in IBAN country but no valid IBAN
+    iban_countries_in_msg = countries & IBAN_COUNTRIES
+    if iban_countries_in_msg and has_beneficiary and not valid_ibans:
+        reasons.append(f"IBAN country {iban_countries_in_msg} but no valid IBAN")
+    
+    # Rule 4: Has potential account values that fail IBAN validation
+    for p in potential_ibans:
+        # If it looks like it could be an IBAN attempt but fails
+        val = p['value'].upper().replace(' ', '').replace('-', '')
+        if len(val) >= 15 and len(val) <= 34:
+            if val[:2].isalpha() and not p['is_valid_iban']:
+                # Starts with 2 letters, right length, but not valid IBAN
+                if p not in declared_ibans and p not in malformed:
+                    country = val[:2]
+                    if country in IBAN_COUNTRIES:
+                        reasons.append(f"Invalid IBAN format: {val[:15]}...")
     
     return len(reasons) > 0, reasons
 
 
-def process_json_file(filepath: Path) -> List[Tuple[str, List[str], List[str]]]:
-    """Process a JSON file, return list of (txn_id, ibans, error_codes)."""
+def process_json_file(filepath: Path) -> List[Tuple[str, dict, dict, List[str]]]:
+    """Process JSON file, return (txn_id, request, response, error_codes)."""
     results = []
     
     try:
         with open(filepath, 'r') as f:
             data = json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
+    except (json.JSONDecodeError, IOError):
         return results
     
     if isinstance(data, dict):
@@ -300,31 +318,23 @@ def process_json_file(filepath: Path) -> List[Tuple[str, List[str], List[str]]]:
             if isinstance(value, dict):
                 request = value.get('Request', {})
                 response = value.get('Response', {})
-                
-                ibans = extract_ibans_from_obj(request)
                 error_codes = extract_error_codes(response)
-                
-                results.append((key, ibans, error_codes))
+                results.append((key, request, response, error_codes))
     
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules V6 with bank directory')
+    parser = argparse.ArgumentParser(description=f'Test {TARGET_CODE} rules V7')
     parser.add_argument('--data-dir', required=True, help='IFML JSON directory')
-    parser.add_argument('--directory', required=True, help='Bank directory JSON file')
-    parser.add_argument('--limit', type=int, default=0, help='Max transactions (0=all)')
-    parser.add_argument('--show-fn', type=int, default=10, help='False negatives to show')
-    parser.add_argument('--show-fp', type=int, default=10, help='False positives to show')
+    parser.add_argument('--limit', type=int, default=0, help='Max transactions')
+    parser.add_argument('--show-fn', type=int, default=15, help='FN to show')
+    parser.add_argument('--show-fp', type=int, default=10, help='FP to show')
+    parser.add_argument('--show-tp', type=int, default=5, help='TP to show')
     
     args = parser.parse_args()
     
-    # Load bank directory
-    print(f"Loading bank directory from {args.directory}...")
-    bank_dir = BankDirectory(args.directory)
-    
-    # Process data files
-    print(f"\nScanning {args.data_dir} for JSON files...")
+    print(f"Scanning {args.data_dir} for JSON files...")
     data_path = Path(args.data_dir)
     json_files = list(data_path.glob("*.json"))
     print(f"Found {len(json_files)} files")
@@ -333,38 +343,33 @@ def main():
     tp_list, tn_list, fp_list, fn_list = [], [], [], []
     processed = 0
     
-    # Track reasons for analysis
-    reason_counts = defaultdict(int)
+    # Track triggers
+    trigger_counts = defaultdict(int)
     
     for json_file in json_files:
         transactions = process_json_file(json_file)
         
-        for txn_id, ibans, error_codes in transactions:
+        for txn_id, request, response, error_codes in transactions:
             if args.limit > 0 and processed >= args.limit:
                 break
             
             processed += 1
             
-            # Check actual result
             has_actual = any(TARGET_CODE in str(c) for c in error_codes)
+            predicted, reasons = check_rules_v7(request)
             
-            # Check predicted result
-            predicted, reasons = check_rules_v6(ibans, bank_dir)
+            for r in reasons:
+                trigger_type = r.split(':')[0]
+                trigger_counts[trigger_type] += 1
             
-            # Track reasons
-            for reason in reasons:
-                reason_type = reason.split(':')[0]
-                reason_counts[reason_type] += 1
-            
-            # Classify
             if predicted and has_actual:
-                tp_list.append((txn_id, reasons, error_codes))
+                tp_list.append((txn_id, reasons, error_codes, request))
             elif not predicted and not has_actual:
                 tn_list.append((txn_id,))
             elif predicted and not has_actual:
                 fp_list.append((txn_id, reasons, error_codes[:5]))
             else:
-                fn_list.append((txn_id, ibans[:3], error_codes[:5]))
+                fn_list.append((txn_id, request, error_codes))
         
         if args.limit > 0 and processed >= args.limit:
             break
@@ -379,7 +384,7 @@ def main():
     
     # Report
     print(f"\n{'='*70}")
-    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Validation Failed (V6 + Bank Directory)")
+    print(f"TEST RESULTS: {TARGET_CODE} - IBAN Validation Failed (V7)")
     print("="*70)
     
     print(f"""
@@ -390,62 +395,80 @@ def main():
 │                      {TARGET_CODE}        Not {TARGET_CODE}                        │
 │                  ┌──────────┬──────────┐                            │
 │  Predicted       │          │          │                            │
-│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Predicted Pos: {tp+fp:<6}   │
+│  {TARGET_CODE}          │ TP={tp:<5} │ FP={fp:<5} │  Pred Pos: {tp+fp:<7}   │
 │                  ├──────────┼──────────┤                            │
-│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Predicted Neg: {tn+fn:<6}   │
+│  Not {TARGET_CODE}      │ FN={fn:<5} │ TN={tn:<5} │  Pred Neg: {tn+fn:<7}   │
 │                  └──────────┴──────────┘                            │
-│                    Actual+    Actual-                               │
-│                    {tp+fn:<6}    {tn+fp:<6}                                 │
+│                   Actual+     Actual-                               │
+│                   {tp+fn:<7}    {tn+fp:<7}                              │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌────────────────┬──────────┬─────────────────────────────────────────┐
 │ Metric         │ Value    │ Meaning                                 │
 ├────────────────┼──────────┼─────────────────────────────────────────┤
-│ Precision      │ {precision*100:>6.2f}%  │ When we predict 8894, how often right?  │
+│ Precision      │ {precision*100:>6.2f}%  │ When we predict, how often right?       │
 │ Recall         │ {recall*100:>6.2f}%  │ What % of actual 8894 do we catch?      │
 │ F1 Score       │ {f1*100:>6.2f}%  │ Harmonic mean                           │
 │ Specificity    │ {specificity*100:>6.2f}%  │ True negative rate                      │
 └────────────────┴──────────┴─────────────────────────────────────────┘
     """)
     
-    # Reason breakdown
+    # Triggers
     print("PREDICTION TRIGGERS:")
-    for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
-        print(f"  {reason}: {count:,}")
+    for trigger, count in sorted(trigger_counts.items(), key=lambda x: -x[1]):
+        print(f"  {trigger}: {count:,}")
     
-    # False negatives
+    # True Positives (what worked)
+    if tp_list and args.show_tp > 0:
+        print(f"\n{'='*70}")
+        print(f"TRUE POSITIVES ({tp} total, showing {min(args.show_tp, tp)}):")
+        print("="*70)
+        print("SUCCESS: We correctly predicted 8894\n")
+        
+        for i, (txn, reasons, codes, _) in enumerate(tp_list[:args.show_tp], 1):
+            print(f"{i}. {txn}")
+            print(f"   Trigger: {reasons}")
+            print(f"   Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
+            print()
+    
+    # False Negatives
     if fn_list:
         print(f"\n{'='*70}")
         print(f"FALSE NEGATIVES ({fn} total, showing {min(args.show_fn, fn)}):")
         print("="*70)
-        print("MISSED: 8894 occurred but rules didn't predict it.\n")
+        print("MISSED: 8894 occurred but rules didn't predict\n")
         
-        for i, (txn, ibans, codes) in enumerate(fn_list[:args.show_fn], 1):
+        for i, (txn, request, codes) in enumerate(fn_list[:args.show_fn], 1):
             print(f"{i}. {txn}")
-            print(f"   IBANs: {ibans}")
             
-            # Show bank codes
-            for iban in ibans:
-                country, bank_code = extract_bank_code(iban)
-                if country and bank_code:
-                    known = "KNOWN" if bank_dir.is_known_valid(country, bank_code) else "UNKNOWN"
-                    print(f"   Bank code: {country}:{bank_code} ({known})")
+            # Extract what we found
+            potential = extract_all_potential_ibans(request)
+            countries = extract_countries(request)
+            has_bnf = has_beneficiary_party(request)
             
-            relevant_codes = [c for c in codes if TARGET_CODE in str(c)]
-            print(f"   Codes: {relevant_codes}")
+            print(f"   Has beneficiary: {has_bnf}")
+            print(f"   Countries: {countries}")
+            print(f"   Potential IBANs found: {len(potential)}")
+            
+            for p in potential[:3]:
+                valid = "✓" if p['is_valid_iban'] else "✗"
+                print(f"     {valid} {p['declared_type'] or 'unknown'}: {p['value'][:25]}...")
+            
+            relevant = [c for c in codes if TARGET_CODE in str(c)]
+            print(f"   Actual codes: {relevant}")
             print()
     
-    # False positives
+    # False Positives
     if fp_list:
         print(f"\n{'='*70}")
         print(f"FALSE POSITIVES ({fp} total, showing {min(args.show_fp, fp)}):")
         print("="*70)
-        print("OVER-PREDICTED: Rules said 8894 but it didn't occur.\n")
+        print("OVER-PREDICTED: Rules said 8894 but didn't occur\n")
         
         for i, (txn, reasons, codes) in enumerate(fp_list[:args.show_fp], 1):
             print(f"{i}. {txn}")
             print(f"   Trigger: {reasons}")
-            print(f"   Actual codes: {codes}")
+            print(f"   Actual: {codes}")
             print()
     
     # Summary
@@ -458,17 +481,13 @@ def main():
     
     print(f"""
     Recall:    {recall*100:>6.1f}%  {recall_icon}  (Target: ≥95%)
-    Precision: {precision*100:>6.1f}%  {precision_icon}  (Acceptable: ≥10% for rare errors)
+    Precision: {precision*100:>6.1f}%  {precision_icon}  (Acceptable: ≥10%)
     F1 Score:  {f1*100:>6.1f}%
     
-    V6 Strategy:
-    - Bank directory lookup: Flag unknown bank codes
-    - IBAN validation: Flag invalid checksum/format
-    - Combined approach for comprehensive coverage
-    
-    Bank Directory Stats:
-    - Valid bank codes: {sum(len(v) for v in bank_dir.valid_codes.values()):,}
-    - Countries covered: {len(bank_dir.valid_codes)}
+    V7 Strategy: Predict 8894 when IBAN is expected but not properly provided
+    - Declared IBAN but invalid format
+    - Malformed IBAN-like strings
+    - IBAN country in message but no valid IBAN found
     """)
 
 
