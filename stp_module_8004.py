@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Test 8004 Rules - V8 (CDT in IBAN Country)
+Test 8004 Rules - V9 (NON-IBAN Countries)
 
 8004 = IBAN Cannot Be Derived
 
-Logic:
-- 8004 fires when ACE tries to derive IBAN but fails
-- IBAN derivation only happens for countries that USE IBAN
-- So check if CDT country is in IBAN_LENGTHS (73 countries)
+Key insight from V8:
+- FN: 8004 fires for MX, AU, TH, PH, IN, CA, ZA, JP (NON-IBAN countries!)
+- FP: 8004 does NOT fire for BE, GB, CH, ES (IBAN countries get 6021 instead)
+
+The logic is INVERTED:
+- For IBAN countries: other validation (6021) runs first
+- For NON-IBAN countries: ACE tries bank lookup, fails → 8004
 
 Rules:
-1. CDT country IN IBAN_COUNTRIES AND cdt_has_account=True AND cdt_has_iban=False
+1. CDT country NOT IN IBAN_COUNTRIES AND cdt_has_account=True AND cdt_has_iban=False
 2. missing_required_iban=True
-
-NO HARDCODING - uses IBAN_LENGTHS from ifml_parser.py
 """
 
 import sys
@@ -47,7 +48,7 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     """
     Check if 8004 should be predicted.
     
-    V8: Check if CDT country is in IBAN_COUNTRIES (no hardcoding)
+    V9: Check if CDT country is NOT in IBAN_COUNTRIES (inverted logic!)
     """
     reasons = []
     
@@ -57,15 +58,15 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
     # Get CDT country from various sources
     cdt_country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
     
-    # Rule 1: CDT is in IBAN country, has account, but no IBAN
+    # Rule 1: CDT is NOT in IBAN country, has account, but no IBAN
     cdt_has_iban = get('cdt_has_iban', False)
     cdt_has_account = get('cdt_has_account', False)
     
-    # Check if country uses IBAN
-    is_iban_country = cdt_country in IBAN_COUNTRIES
+    # Check if country does NOT use IBAN (and country is known)
+    is_non_iban_country = cdt_country and cdt_country not in IBAN_COUNTRIES
     
-    if is_iban_country and cdt_has_account and not cdt_has_iban:
-        reasons.append(f"CDT: country={cdt_country} (IBAN country) + has_account + no IBAN")
+    if is_non_iban_country and cdt_has_account and not cdt_has_iban:
+        reasons.append(f"CDT: country={cdt_country} (non-IBAN) + has_account + no IBAN")
     
     # Rule 2: System flag for missing required IBAN
     if get('missing_required_iban', False):
@@ -76,16 +77,17 @@ def check_8004_rules(features: Dict) -> Tuple[bool, List[str]]:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Test 8004 rules (V8 - IBAN Country)')
+    parser = argparse.ArgumentParser(description='Test 8004 rules (V9 - Non-IBAN)')
     parser.add_argument('--data-dir', required=True, help='Directory with IFML JSON files')
     parser.add_argument('--sample-size', type=int, default=10, help='Number of samples to show')
     
     args = parser.parse_args()
     
-    print(f"Using {len(IBAN_COUNTRIES)} IBAN countries from IBAN_LENGTHS")
+    print(f"IBAN_COUNTRIES has {len(IBAN_COUNTRIES)} countries")
+    print(f"V9: Predict 8004 for countries NOT in IBAN_COUNTRIES")
     
     # Load data
-    print("Loading IFML data...")
+    print("\nLoading IFML data...")
     pipeline = IFMLDataPipeline()
     
     data_path = Path(args.data_dir)
@@ -120,9 +122,8 @@ def main():
         
         # Track what triggered predictions
         for r in reasons:
-            # Simplify trigger for counting
-            if "IBAN country" in r:
-                prediction_triggers["CDT: IBAN country + has_account + no IBAN"] += 1
+            if "non-IBAN" in r:
+                prediction_triggers["CDT: non-IBAN country + has_account + no IBAN"] += 1
             else:
                 prediction_triggers[r] += 1
         
@@ -146,7 +147,7 @@ def main():
     
     # Print results
     print("\n" + "=" * 70)
-    print(f"TEST RESULTS: 8004 - IBAN Cannot Be Derived (V8 - IBAN Country)")
+    print(f"TEST RESULTS: 8004 - IBAN Cannot Be Derived (V9 - Non-IBAN)")
     print("=" * 70)
     
     print(f"\nCONFUSION MATRIX:")
@@ -161,11 +162,11 @@ def main():
     print(f"  Recall:     {recall*100:.2f}%  (TP / (TP + FN))")
     print(f"  F1 Score:   {f1*100:.2f}%")
     
-    print(f"\nRULES (V8 - IBAN COUNTRY CHECK):")
-    print(f"  1. cdt_country IN IBAN_COUNTRIES AND cdt_has_account=True AND cdt_has_iban=False")
+    print(f"\nRULES (V9 - NON-IBAN COUNTRIES):")
+    print(f"  1. cdt_country NOT IN IBAN_COUNTRIES AND cdt_has_account=True AND cdt_has_iban=False")
     print(f"  2. missing_required_iban=True")
-    print(f"\n  Uses IBAN_LENGTHS from ifml_parser.py ({len(IBAN_COUNTRIES)} countries)")
-    print(f"  NO HARDCODING - only predicts for actual IBAN countries")
+    print(f"\n  KEY INSIGHT: 8004 fires for NON-IBAN countries (MX, AU, TH, etc.)")
+    print(f"               IBAN countries get 6021 instead")
     
     print(f"\nPREDICTION TRIGGERS:")
     for trigger, count in sorted(prediction_triggers.items(), key=lambda x: -x[1]):
@@ -176,7 +177,7 @@ def main():
     print(f"FALSE POSITIVES ({len(fp_list)} total, showing {min(args.sample_size, len(fp_list))}):")
     print("=" * 70)
     
-    # Analyze what codes ACTUALLY fired instead of 8004
+    # Analyze what codes ACTUALLY fired
     fp_actual_codes = defaultdict(int)
     for _, _, codes, _ in fp_list:
         for c in codes:
@@ -190,19 +191,19 @@ def main():
     # Analyze FP countries
     fp_countries = defaultdict(int)
     for _, _, _, features in fp_list[:200]:
-        country = get_cdt_country(features)
+        country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
         if country:
-            fp_countries[country.upper()] += 1
+            fp_countries[country] += 1
     
     print(f"\nFP by CDT country:")
     for country, count in sorted(fp_countries.items(), key=lambda x: -x[1])[:10]:
-        in_iban = "✓ IBAN" if country in IBAN_COUNTRIES else "✗ not IBAN"
+        in_iban = "IBAN" if country in IBAN_COUNTRIES else "non-IBAN"
         print(f"  {country}: {count} ({in_iban})")
     
     print(f"\nSample FPs:")
     for i, (txn_id, reasons, codes, features) in enumerate(fp_list[:args.sample_size]):
         cdt_country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
-        in_iban = "IBAN" if cdt_country in IBAN_COUNTRIES else "not IBAN"
+        in_iban = "IBAN" if cdt_country in IBAN_COUNTRIES else "non-IBAN"
         print(f"  {i+1}. {txn_id}")
         print(f"     CDT country: {cdt_country} ({in_iban})")
         print(f"     Actual codes: {codes[:5]}")
@@ -239,18 +240,17 @@ def main():
     
     print(f"\nFN by CDT country:")
     for country, count in sorted(fn_countries.items(), key=lambda x: -x[1])[:10]:
-        in_iban = "✓ IBAN" if country in IBAN_COUNTRIES else "✗ not IBAN"
+        in_iban = "IBAN" if country in IBAN_COUNTRIES else "non-IBAN"
         print(f"  {country}: {count} ({in_iban})")
     
     print(f"\nSample FNs:")
     for i, (txn_id, reasons, codes, features) in enumerate(fn_list[:args.sample_size]):
         cdt_country = get_cdt_country(features).upper() if get_cdt_country(features) else ''
-        in_iban = "IBAN" if cdt_country in IBAN_COUNTRIES else "not IBAN"
+        in_iban = "IBAN" if cdt_country in IBAN_COUNTRIES else "non-IBAN"
         print(f"  {i+1}. {txn_id}")
         print(f"     Codes: {[c for c in codes if TARGET_CODE in str(c)]}")
         print(f"     cdt_country={cdt_country} ({in_iban})")
         print(f"     cdt_has_account={features.get('cdt_has_account')}")
-        print(f"     cdt_has_iban={features.get('cdt_has_iban')}")
     
     # Summary
     print("\n" + "=" * 70)
@@ -264,10 +264,10 @@ def main():
     print(f"  Precision:  {precision*100:.1f}% {precision_status}")
     print(f"  F1 Score:   {f1*100:.1f}%")
     
-    print(f"\nV8 Changes:")
-    print(f"  - No hardcoding - uses IBAN_LENGTHS from ifml_parser.py")
-    print(f"  - Only predicts 8004 for countries that actually use IBAN")
-    print(f"  - Rule: cdt_country IN IBAN_COUNTRIES + has_account + no IBAN")
+    print(f"\nV9 Changes:")
+    print(f"  - INVERTED logic from V8")
+    print(f"  - Predict 8004 for NON-IBAN countries (MX, AU, TH, IN, etc.)")
+    print(f"  - Don't predict for IBAN countries (they get 6021 instead)")
 
 
 if __name__ == "__main__":
