@@ -11,7 +11,7 @@ Two-Pass Architecture:
 2. Extract procedures and find references with global context
 
 Embedding Options (all optional):
-- Set EMBEDDING_API_URL for OpenAI-compatible API (Tachyon)
+- Set EMBEDDING_API_URL for OpenAI-compatible API
 - Or run without embeddings (index still works, just no vector search)
 
 Usage:
