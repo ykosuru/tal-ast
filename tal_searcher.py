@@ -18,7 +18,7 @@ Embedding Options (in order of preference):
 3. BM25 only - Always works, no dependencies
 
 Environment variables for OpenAI-compatible embeddings:
-  EMBEDDING_API_URL  - Base URL (e.g., https://Tachyon-api/v1)
+  EMBEDDING_API_URL  - Base URL (e.g., https://Tachyon/v1)
   EMBEDDING_API_KEY  - API key (optional)
   EMBEDDING_MODEL    - Model name (default: text-embedding-ada-002)
 
