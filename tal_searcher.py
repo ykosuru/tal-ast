@@ -12,23 +12,222 @@ Features:
 - STRUCT: Structure definition display
 - LIST: Browse procedures, defines, literals, rules
 
+Embedding Options (in order of preference):
+1. OpenAI-compatible API - Set EMBEDDING_API_URL environment variable
+2. HuggingFace transformers - If torch/transformers installed
+3. BM25 only - Always works, no dependencies
+
+Environment variables for OpenAI-compatible embeddings:
+  EMBEDDING_API_URL  - Base URL (e.g., https://tachyon/v1)
+  EMBEDDING_API_KEY  - API key (optional)
+  EMBEDDING_MODEL    - Model name (default: text-embedding-ada-002)
+
 Usage:
     python tal_searcher_v2.py --db-path ./tal_index
-#YK123
+    #YK123
 """
 
 import re
 import os
 import json
-import torch
+import math
 import argparse
 from typing import List, Dict, Tuple, Set, Optional
 from dataclasses import dataclass
 from collections import defaultdict
 
-from transformers import AutoModel, AutoTokenizer
-from qdrant_client import QdrantClient
-from rank_bm25 import BM25Okapi
+# BM25 - try to import, otherwise provide simple fallback
+try:
+    from rank_bm25 import BM25Okapi
+    HAS_BM25 = True
+except ImportError:
+    HAS_BM25 = False
+
+# Optional: requests for OpenAI-compatible API
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+# Optional: Qdrant for vector storage
+try:
+    from qdrant_client import QdrantClient
+    HAS_QDRANT = True
+except ImportError:
+    HAS_QDRANT = False
+
+# Optional: HuggingFace transformers
+HAS_TRANSFORMERS = False
+try:
+    import torch
+    from transformers import AutoModel, AutoTokenizer
+    HAS_TRANSFORMERS = True
+except ImportError:
+    pass
+
+
+class EmbeddingProvider:
+    """Abstraction for different embedding providers"""
+    
+    def __init__(self, db_path: str = None):
+        self.provider = None
+        self.model = None
+        self.tokenizer = None
+        self.qdrant = None
+        self.db_path = db_path
+        self._init_provider()
+    
+    def _init_provider(self):
+        """Initialize the best available embedding provider"""
+        
+        # Option 1: OpenAI-compatible API (check env vars)
+        api_url = os.environ.get('EMBEDDING_API_URL')
+        if api_url and HAS_REQUESTS:
+            self.provider = 'openai_compatible'
+            self.api_url = api_url.rstrip('/')
+            self.api_key = os.environ.get('EMBEDDING_API_KEY', '')
+            self.model_name = os.environ.get('EMBEDDING_MODEL', 'text-embedding-ada-002')
+            self.dimension = int(os.environ.get('EMBEDDING_DIMENSION', '1536'))
+            print(f"   📡 Using OpenAI-compatible embeddings: {self.api_url}")
+            self._init_qdrant()
+            return
+        
+        # Option 2: HuggingFace transformers
+        if HAS_TRANSFORMERS:
+            try:
+                self.provider = 'transformers'
+                model_name = 'sentence-transformers/all-MiniLM-L6-v2'
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.model = AutoModel.from_pretrained(model_name)
+                self.model.eval()
+                self.dimension = 384
+                print("   🤗 Using HuggingFace transformers embeddings")
+                self._init_qdrant()
+                return
+            except Exception as e:
+                print(f"   ⚠️  Could not load transformers: {e}")
+        
+        # Option 3: No embeddings - BM25 only
+        self.provider = None
+        self.dimension = 0
+        print("   📚 Using BM25 search only (no vector embeddings)")
+    
+    def _init_qdrant(self):
+        """Initialize Qdrant if available"""
+        if HAS_QDRANT and self.db_path:
+            try:
+                self.qdrant = QdrantClient(path=self.db_path)
+            except Exception as e:
+                print(f"   ⚠️  Could not init Qdrant: {e}")
+                self.qdrant = None
+    
+    def encode(self, texts: List[str]) -> List[List[float]]:
+        """Encode texts to embeddings"""
+        if not self.provider:
+            return []
+        
+        if isinstance(texts, str):
+            texts = [texts]
+        
+        if self.provider == 'openai_compatible':
+            return self._encode_openai(texts)
+        elif self.provider == 'transformers':
+            return self._encode_transformers(texts)
+        
+        return []
+    
+    def _encode_openai(self, texts: List[str]) -> List[List[float]]:
+        """Encode using OpenAI-compatible API"""
+        try:
+            headers = {'Content-Type': 'application/json'}
+            if self.api_key:
+                headers['Authorization'] = f'Bearer {self.api_key}'
+            
+            response = requests.post(
+                f"{self.api_url}/embeddings",
+                headers=headers,
+                json={
+                    'model': self.model_name,
+                    'input': texts
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            embeddings = [item['embedding'] for item in sorted(data['data'], key=lambda x: x['index'])]
+            return embeddings
+        
+        except Exception as e:
+            print(f"   ⚠️  Embedding API error: {e}")
+            return []
+    
+    def _encode_transformers(self, texts: List[str]) -> List[List[float]]:
+        """Encode using HuggingFace transformers"""
+        try:
+            inputs = self.tokenizer(texts, padding=True, truncation=True, 
+                                   max_length=512, return_tensors='pt')
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                # Mean pooling
+                embeddings = outputs.last_hidden_state.mean(dim=1)
+            return embeddings.tolist()
+        except Exception as e:
+            print(f"   ⚠️  Transformers encoding error: {e}")
+            return []
+    
+    def is_available(self) -> bool:
+        """Check if embeddings are available"""
+        return self.provider is not None
+
+
+# Simple BM25 fallback if rank_bm25 not installed
+class SimpleBM25:
+    """Simple BM25 implementation as fallback"""
+    
+    def __init__(self, corpus: List[List[str]], k1: float = 1.5, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+        self.corpus = corpus
+        self.doc_len = [len(doc) for doc in corpus]
+        self.avgdl = sum(self.doc_len) / len(corpus) if corpus else 0
+        self.doc_freqs = []
+        self.idf = {}
+        self._calc_idf()
+    
+    def _calc_idf(self):
+        """Calculate IDF for all terms"""
+        df = defaultdict(int)
+        for doc in self.corpus:
+            for term in set(doc):
+                df[term] += 1
+        
+        n = len(self.corpus)
+        for term, freq in df.items():
+            self.idf[term] = math.log((n - freq + 0.5) / (freq + 0.5) + 1)
+    
+    def get_scores(self, query: List[str]) -> List[float]:
+        """Get BM25 scores for query"""
+        scores = []
+        for i, doc in enumerate(self.corpus):
+            score = 0
+            doc_len = self.doc_len[i]
+            term_freqs = defaultdict(int)
+            for term in doc:
+                term_freqs[term] += 1
+            
+            for term in query:
+                if term not in self.idf:
+                    continue
+                tf = term_freqs.get(term, 0)
+                idf = self.idf[term]
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / self.avgdl)
+                score += idf * numerator / denominator
+            
+            scores.append(score)
+        return scores
 
 
 @dataclass
@@ -47,21 +246,19 @@ class SearchResult:
 class TalSearcherV2:
     """
     Production-grade TAL code searcher with hybrid search.
+    Works with or without vector embeddings.
     """
     
     def __init__(self, db_path: str = "./tal_index", collection_name: str = "tal"):
         print("🔍 Loading TAL Intelligence System v2.0...")
         
-        # Embedding model
-        model_name = 'nomic-ai/nomic-embed-text-v1.5'
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name, trust_remote_code=True).eval()
-        
-        # Vector DB
         self.db_path = db_path
-        self.qdrant = QdrantClient(path=db_path)
+        self.collection_name = collection_name
         self.logic_coll = f"{collection_name}_logic"
         self.symbol_coll = f"{collection_name}_symbols"
+        
+        # Initialize embedding provider (handles all the complexity)
+        self.embedder = EmbeddingProvider(db_path)
         
         # Load JSON stores
         self.procedures = self._load_json('procedures.json')
@@ -124,56 +321,48 @@ class TalSearcherV2:
     
     def _build_bm25_indices(self):
         """Build BM25 indices"""
+        # Choose BM25 implementation
+        BM25Class = BM25Okapi if HAS_BM25 else SimpleBM25
+        
         # Procedures: name + code
         proc_texts = [
             f"{p.get('name', '')} {p.get('code', '')}"
             for p in self.procedures
         ]
-        self.proc_bm25 = BM25Okapi([self._tokenize(t) for t in proc_texts]) if proc_texts else None
+        self.proc_bm25 = BM25Class([self._tokenize(t) for t in proc_texts]) if proc_texts else None
         
         # Symbols: name + type
         symbol_texts = [
             f"{s['name']} {s.get('data_type', '')} {s.get('section', '')}"
             for s in self.symbols
         ]
-        self.symbol_bm25 = BM25Okapi([self._tokenize(t) for t in symbol_texts]) if symbol_texts else None
+        self.symbol_bm25 = BM25Class([self._tokenize(t) for t in symbol_texts]) if symbol_texts else None
         
         # Structs: name + fields
         struct_texts = [
             f"{s['name']} STRUCT {' '.join(f.get('name', '') for f in s.get('fields', []))}"
             for s in self.structs
         ]
-        self.struct_bm25 = BM25Okapi([self._tokenize(t) for t in struct_texts]) if struct_texts else None
+        self.struct_bm25 = BM25Class([self._tokenize(t) for t in struct_texts]) if struct_texts else None
         
         # Business rules
         rule_texts = [
             f"{r.get('rule_type', '')} {r.get('description', '')} {r.get('source_code', '')}"
             for r in self.business_rules
         ]
-        self.rule_bm25 = BM25Okapi([self._tokenize(t) for t in rule_texts]) if rule_texts else None
+        self.rule_bm25 = BM25Class([self._tokenize(t) for t in rule_texts]) if rule_texts else None
     
     def _tokenize(self, text: str) -> List[str]:
         """Simple tokenization"""
         return re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_^]*\b', text.lower())
     
     def _embed_query(self, query: str) -> List[float]:
-        """Embed query text"""
-        prefixed = "search_query: " + query
-        inputs = self.tokenizer(
-            [prefixed],
-            padding=True,
-            truncation=True,
-            return_tensors='pt',
-            max_length=512
-        )
+        """Embed query text using available provider"""
+        if not self.embedder.is_available():
+            return []
         
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            embedding = torch.nn.functional.normalize(
-                outputs.last_hidden_state.mean(dim=1),
-                p=2, dim=1
-            )
-            return embedding[0].cpu().numpy().tolist()
+        embeddings = self.embedder.encode([query])
+        return embeddings[0] if embeddings else []
     
     def _rrf_fusion(
         self,
@@ -293,8 +482,14 @@ class TalSearcherV2:
             bm25_ranked = sorted(enumerate(bm25_scores), key=lambda x: x[1], reverse=True)[:20]
             bm25_results = [(idx, score) for idx, score in bm25_ranked if score > 0.1]
             
-            vec_results = self.qdrant.query_points(self.logic_coll, query=query_vec, limit=20).points
-            vector_results = [(p.id, p.score) for p in vec_results]
+            # Vector search if available
+            vector_results = []
+            if self.embedder.qdrant and query_vec:
+                try:
+                    vec_results = self.embedder.qdrant.query_points(self.logic_coll, query=query_vec, limit=20).points
+                    vector_results = [(p.id, p.score) for p in vec_results]
+                except Exception:
+                    pass  # Vector search unavailable, continue with BM25 only
             
             fused = self._rrf_fusion(bm25_results, vector_results)
             
@@ -321,8 +516,14 @@ class TalSearcherV2:
             sym_bm25_ranked = sorted(enumerate(sym_bm25_scores), key=lambda x: x[1], reverse=True)[:10]
             sym_bm25_results = [(idx, score) for idx, score in sym_bm25_ranked if score > 0.1]
             
-            sym_vec = self.qdrant.query_points(self.symbol_coll, query=query_vec, limit=10).points
-            sym_vector_results = [(p.id - 1000000, p.score) for p in sym_vec if p.id >= 1000000]
+            # Vector search if available
+            sym_vector_results = []
+            if self.embedder.qdrant and query_vec:
+                try:
+                    sym_vec = self.embedder.qdrant.query_points(self.symbol_coll, query=query_vec, limit=10).points
+                    sym_vector_results = [(p.id - 1000000, p.score) for p in sym_vec if p.id >= 1000000]
+                except Exception:
+                    pass
             
             fused_sym = self._rrf_fusion(sym_bm25_results, sym_vector_results)
             
@@ -1249,7 +1450,11 @@ class TalSearcherV2:
     
     def close(self):
         """Close database connection"""
-        self.qdrant.close()
+        if self.embedder.qdrant:
+            try:
+                self.embedder.qdrant.close()
+            except Exception:
+                pass
 
 
 def print_search_results(results: List[SearchResult]):
