@@ -18,7 +18,7 @@ Embedding Options (in order of preference):
 3. BM25 only - Always works, no dependencies
 
 Environment variables for OpenAI-compatible embeddings:
-  EMBEDDING_API_URL  - Base URL (e.g., https://tachyon/v1)
+  EMBEDDING_API_URL  - Base URL (e.g., https://Tachyon-api/v1)
   EMBEDDING_API_KEY  - API key (optional)
   EMBEDDING_MODEL    - Model name (default: text-embedding-ada-002)
 
@@ -180,6 +180,216 @@ class EmbeddingProvider:
     def is_available(self) -> bool:
         """Check if embeddings are available"""
         return self.provider is not None
+
+
+# =============================================================================
+# LLM INTEGRATION
+# =============================================================================
+
+def CALL_LLM(system_prompt: str, user_prompt: str, model: str = "gpt-4") -> str:
+    """
+    STUB: Call your internal LLM API here.
+    
+    Replace this implementation with your internal API call.
+    Expected to return the LLM's response as a string.
+    
+    Example implementation for OpenAI-compatible API:
+    
+        import requests
+        
+        response = requests.post(
+            "https://your-internal-api.company.com/v1/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {os.environ.get('LLM_API_KEY', '')}"
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 4000
+            }
+        )
+        return response.json()["choices"][0]["message"]["content"]
+    
+    Args:
+        system_prompt: System instructions for the LLM
+        user_prompt: User's question with context
+        model: Model identifier (optional)
+    
+    Returns:
+        LLM response as string, or error message if not configured
+    """
+    # Check for environment variable to enable LLM
+    api_url = os.environ.get('LLM_API_URL')
+    api_key = os.environ.get('LLM_API_KEY', '')
+    
+    if not api_url:
+        return "[LLM not configured. Set LLM_API_URL environment variable to enable AI analysis.]"
+    
+    if not HAS_REQUESTS:
+        return "[requests library not installed. Cannot call LLM API.]"
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        
+        response = requests.post(
+            f"{api_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json={
+                "model": os.environ.get('LLM_MODEL', model),
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 4000
+            },
+            timeout=120
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    
+    except Exception as e:
+        return f"[LLM API error: {e}]"
+
+
+# ISO Standards Reference for Wire Transfer Compliance
+ISO_STANDARDS_CONTEXT = """
+## Relevant ISO Standards for Wire Transfer Validation
+
+### SWIFT/ISO 20022 (MX Messages)
+- pacs.008: FI to FI Customer Credit Transfer
+- pacs.009: FI to FI Financial Institution Credit Transfer
+- pain.001: Customer Credit Transfer Initiation
+- camt.053: Bank to Customer Statement
+Key elements: IBAN (max 34 chars), BIC (8 or 11 chars), structured addresses, purpose codes
+
+### Fedwire (Federal Reserve)
+- Fedwire Funds Service Format (2024)
+- Type/Subtype codes for transaction classification
+- Mandatory fields: Sender ABA (9 digits), Amount, Beneficiary info
+- OFAC screening requirements before settlement
+
+### CHIPS (Clearing House Interbank Payments System)
+- CHIPS UID (Universal Identifier) format
+- Participant identifiers and routing
+- Same-day settlement requirements
+- Enhanced beneficiary information requirements
+
+### ISO 13616 (IBAN)
+- Country code (2 alpha) + Check digits (2 numeric) + BBAN
+- Modulus 97 check digit validation
+- Country-specific BBAN formats
+
+### ISO 9362 (BIC/SWIFT Code)
+- 8 or 11 character format: BANKCCLL[XXX]
+- Institution code (4) + Country (2) + Location (2) + Branch (3, optional)
+
+### Common Compliance Requirements
+1. OFAC/Sanctions screening (SDN, SSI lists)
+2. AML transaction monitoring (CTR thresholds, SAR filing)
+3. KYC verification before high-value transfers
+4. Beneficiary validation (name matching, account verification)
+5. Cross-border reporting (CMIR, FBAR)
+"""
+
+
+@dataclass
+class LLMContext:
+    """Context package for LLM analysis"""
+    question: str
+    main_procedure: Dict
+    called_procedures: List[Dict]
+    data_structures: List[Dict]
+    symbols: List[Dict]
+    business_rules: List[Dict]
+    validation_steps: List[Dict]
+    error_codes: List[Dict]
+    
+    def to_prompt_context(self) -> str:
+        """Format all context for LLM prompt"""
+        sections = []
+        
+        # Main procedure
+        if self.main_procedure:
+            proc = self.main_procedure
+            sections.append(f"""
+## Main Procedure: {proc.get('name', 'Unknown')}
+File: {proc.get('file', 'unknown')}
+Type: {proc.get('proc_type', 'PROC')}
+Parameters: {', '.join(proc.get('parameters', []))}
+
+### Source Code:
+```tal
+{proc.get('raw_code', proc.get('code', 'No code available'))[:8000]}
+```
+""")
+        
+        # Validation steps
+        if self.validation_steps:
+            sections.append("\n## Validation Steps:")
+            for step in self.validation_steps:
+                step_num = step.get('step_num', '?')
+                desc = step.get('description', '')
+                calls = ', '.join(step.get('calls', []))
+                errors = ', '.join(step.get('errors', []))
+                sections.append(f"  Step {step_num}: {desc}")
+                if calls:
+                    sections.append(f"    Calls: {calls}")
+                if errors:
+                    sections.append(f"    Error codes: {errors}")
+        
+        # Called procedures (sub-procedures)
+        if self.called_procedures:
+            sections.append("\n## Called Sub-Procedures:")
+            for proc in self.called_procedures[:10]:  # Limit to 10
+                sections.append(f"""
+### {proc.get('name', 'Unknown')}
+```tal
+{proc.get('raw_code', proc.get('code', ''))[:3000]}
+```
+""")
+        
+        # Data structures
+        if self.data_structures:
+            sections.append("\n## Data Structures (STRUCTs):")
+            for struct in self.data_structures:
+                fields = struct.get('fields', [])
+                field_list = '\n'.join(
+                    f"    {f.get('type', 'INT')} {f.get('name', '?')}" 
+                    for f in fields[:20]
+                )
+                sections.append(f"""
+### STRUCT {struct.get('name', 'Unknown')}
+{field_list}
+""")
+        
+        # Symbols (DEFINEs, LITERALs)
+        if self.symbols:
+            sections.append("\n## Constants and Definitions:")
+            for sym in self.symbols[:30]:  # Limit
+                sections.append(f"  {sym.get('type', 'DEFINE')} {sym.get('name', '?')} = {sym.get('value', sym.get('definition', '?'))}")
+        
+        # Error codes
+        if self.error_codes:
+            sections.append("\n## Error Codes:")
+            for err in self.error_codes:
+                err_type = "🚫" if err.get('type') == 'ERROR' else "⚡"
+                sections.append(f"  {err_type} {err.get('code', '?')}: {err.get('message', '')}")
+        
+        # Business rules
+        if self.business_rules:
+            sections.append("\n## Business Rules:")
+            for rule in self.business_rules[:20]:
+                sections.append(f"  [{rule.get('rule_type', '?')}] {rule.get('source_code', '')[:100]}")
+        
+        return '\n'.join(sections)
 
 
 # Simple BM25 fallback if rank_bm25 not installed
@@ -642,6 +852,241 @@ class TalSearcherV2:
             'business_rules': rules,
             'call_info': self.trace_procedure(proc_name),
             'data_refs': proc.get('data_refs', [])
+        }
+    
+    # =========================================================================
+    # LLM-POWERED ANALYSIS
+    # =========================================================================
+    
+    def gather_full_context(self, proc_name: str, max_depth: int = 2) -> LLMContext:
+        """
+        Gather complete context for a procedure including:
+        - Main procedure code
+        - Called sub-procedures (recursive to max_depth)
+        - Referenced data structures (STRUCTs)
+        - Referenced symbols (DEFINEs, LITERALs)
+        - Business rules
+        - Validation steps and error codes
+        """
+        name_upper = proc_name.strip().upper()
+        
+        if name_upper not in self.proc_by_name:
+            return LLMContext(
+                question="",
+                main_procedure={},
+                called_procedures=[],
+                data_structures=[],
+                symbols=[],
+                business_rules=[],
+                validation_steps=[],
+                error_codes=[]
+            )
+        
+        main_proc = self.proc_by_name[name_upper]
+        
+        # Gather called procedures recursively
+        called_procs = []
+        visited = {name_upper}
+        to_visit = []
+        
+        # Get direct calls
+        calls = main_proc.get('calls', [])
+        if calls:
+            if isinstance(calls[0], dict):
+                to_visit = [c.get('target', '').upper() for c in calls]
+            else:
+                to_visit = [str(c).upper() for c in calls]
+        
+        depth = 0
+        while to_visit and depth < max_depth:
+            next_level = []
+            for callee_name in to_visit:
+                if callee_name in visited:
+                    continue
+                visited.add(callee_name)
+                
+                if callee_name in self.proc_by_name:
+                    callee_proc = self.proc_by_name[callee_name]
+                    called_procs.append(callee_proc)
+                    
+                    # Get callees of this procedure for next level
+                    callee_calls = callee_proc.get('calls', [])
+                    if callee_calls:
+                        if isinstance(callee_calls[0], dict):
+                            next_level.extend(c.get('target', '').upper() for c in callee_calls)
+                        else:
+                            next_level.extend(str(c).upper() for c in callee_calls)
+            
+            to_visit = next_level
+            depth += 1
+        
+        # Gather referenced data structures
+        data_structs = []
+        referenced_names = set()
+        
+        # From parameters
+        params = main_proc.get('parameters', [])
+        for param in params:
+            param_name = param.upper() if isinstance(param, str) else param
+            if param_name in self.struct_by_name:
+                referenced_names.add(param_name)
+        
+        # From data refs
+        data_refs = main_proc.get('data_refs', [])
+        for ref in data_refs:
+            ref_upper = ref.upper()
+            if ref_upper in self.struct_by_name:
+                referenced_names.add(ref_upper)
+        
+        # From code (look for STRUCT references)
+        code = main_proc.get('raw_code', main_proc.get('code', ''))
+        for struct_name in self.struct_by_name:
+            if struct_name in code.upper():
+                referenced_names.add(struct_name)
+        
+        for struct_name in referenced_names:
+            if struct_name in self.struct_by_name:
+                data_structs.append(self.struct_by_name[struct_name])
+        
+        # Gather referenced symbols
+        symbols = []
+        for ref in data_refs:
+            ref_upper = ref.upper()
+            if ref_upper in self.symbol_by_name:
+                symbols.extend(self.symbol_by_name[ref_upper])
+        
+        # Get business rules
+        rules = self.rules_by_proc.get(name_upper, [])
+        
+        # Get validation steps
+        steps = main_proc.get('validation_steps', [])
+        
+        # Get error codes
+        error_codes = main_proc.get('error_codes', [])
+        
+        return LLMContext(
+            question="",
+            main_procedure=main_proc,
+            called_procedures=called_procs,
+            data_structures=data_structs,
+            symbols=symbols,
+            business_rules=rules,
+            validation_steps=steps,
+            error_codes=error_codes
+        )
+    
+    def analyze_with_llm(self, question: str, proc_name: str, include_iso_uplift: bool = True) -> Dict:
+        """
+        Analyze a procedure using LLM with full context.
+        
+        Args:
+            question: User's question about the code
+            proc_name: Name of the main procedure to analyze
+            include_iso_uplift: Whether to ask for ISO standard compliance suggestions
+        
+        Returns:
+            Dict with 'answer', 'iso_recommendations', and 'context_summary'
+        """
+        # Gather full context
+        context = self.gather_full_context(proc_name)
+        context.question = question
+        
+        # Build system prompt
+        system_prompt = """You are an expert in payment systems, wire transfer processing, and legacy code modernization. 
+You have deep knowledge of:
+- TAL (Transaction Application Language) for HPE NonStop systems
+- SWIFT/ISO 20022 message formats (pacs.008, pacs.009, pain.001)
+- Fedwire Funds Service specifications
+- CHIPS (Clearing House Interbank Payments System) requirements
+- OFAC sanctions screening and AML compliance
+- ISO standards: ISO 13616 (IBAN), ISO 9362 (BIC/SWIFT), ISO 20022
+
+Your task is to:
+1. Analyze the provided TAL code and answer the user's question accurately
+2. Explain business logic in clear, professional terms
+3. Identify any validation steps, error handling, and compliance checks
+4. When requested, suggest improvements for ISO standard compliance
+
+Be specific and reference the actual code when explaining behavior."""
+
+        # Build user prompt with context
+        user_prompt = f"""## User Question
+{question}
+
+## Code Context
+{context.to_prompt_context()}
+"""
+
+        # Add ISO standards request if enabled
+        if include_iso_uplift:
+            user_prompt += f"""
+## ISO Standards Reference
+{ISO_STANDARDS_CONTEXT}
+
+## Additional Request
+After answering the main question, please also provide:
+
+### ISO Compliance Assessment
+1. Current compliance level with SWIFT/ISO 20022
+2. Gaps or improvements needed for Fedwire 2024 format
+3. CHIPS compatibility considerations
+4. Recommendations for modernization
+
+### Suggested Code Improvements
+Provide specific suggestions to uplift this code to current ISO standards, including:
+- Field format changes (e.g., IBAN validation, BIC structure)
+- Additional validation rules needed
+- Message format alignment with pacs.008/pacs.009
+- Enhanced error codes and messages per ISO specifications
+"""
+
+        # Call LLM
+        llm_response = CALL_LLM(system_prompt, user_prompt)
+        
+        return {
+            'question': question,
+            'procedure': proc_name,
+            'answer': llm_response,
+            'context_summary': {
+                'main_procedure': context.main_procedure.get('name', ''),
+                'called_procedures_count': len(context.called_procedures),
+                'data_structures_count': len(context.data_structures),
+                'validation_steps_count': len(context.validation_steps),
+                'error_codes_count': len(context.error_codes),
+                'business_rules_count': len(context.business_rules)
+            },
+            'include_iso_uplift': include_iso_uplift
+        }
+    
+    def ask_with_llm(self, question: str, debug: bool = False) -> Dict:
+        """
+        Enhanced ASK that uses LLM for intelligent analysis.
+        First finds relevant procedures, then invokes LLM with full context.
+        """
+        # Use existing ask_question logic to find relevant procedure
+        result = self.ask_question(question, debug=debug)
+        
+        if 'error' in result:
+            return result
+        
+        # Get the main procedure name from result
+        proc = result.get('procedure', {})
+        proc_name = proc.get('name', '')
+        
+        if not proc_name:
+            return {
+                'error': 'No relevant procedure found for LLM analysis',
+                'basic_result': result
+            }
+        
+        # Perform LLM analysis
+        llm_result = self.analyze_with_llm(question, proc_name, include_iso_uplift=True)
+        
+        # Merge results
+        return {
+            **result,
+            'llm_analysis': llm_result.get('answer', ''),
+            'llm_context': llm_result.get('context_summary', {})
         }
     
     def get_struct(self, struct_name: str) -> Dict:
@@ -1786,6 +2231,60 @@ def print_ask_result(result: Dict):
     print("\n" + "=" * 70)
 
 
+def print_llm_result(result: Dict):
+    """Pretty print LLM analysis result"""
+    if 'error' in result:
+        print(f"\n   ❌ {result['error']}")
+        if 'basic_result' in result:
+            print("\n   Falling back to basic analysis:")
+            print_ask_result(result['basic_result'])
+        return
+    
+    print("\n" + "=" * 70)
+    print("🤖 LLM ANALYSIS RESULT")
+    print("=" * 70)
+    
+    # Show context summary
+    ctx = result.get('llm_context', {})
+    if ctx:
+        print(f"\n📊 Context gathered:")
+        print(f"   Main procedure: {ctx.get('main_procedure', 'N/A')}")
+        print(f"   Called procedures: {ctx.get('called_procedures_count', 0)}")
+        print(f"   Data structures: {ctx.get('data_structures_count', 0)}")
+        print(f"   Validation steps: {ctx.get('validation_steps_count', 0)}")
+        print(f"   Error codes: {ctx.get('error_codes_count', 0)}")
+        print(f"   Business rules: {ctx.get('business_rules_count', 0)}")
+    
+    # Show LLM response
+    llm_response = result.get('llm_analysis', '')
+    if llm_response:
+        print("\n" + "-" * 70)
+        print("📝 LLM Response:")
+        print("-" * 70)
+        print(llm_response)
+    else:
+        print("\n   ⚠️  No LLM response received")
+        print("   Make sure LLM_API_URL environment variable is set")
+    
+    print("\n" + "=" * 70)
+    
+    # Also print the basic analysis for reference
+    if 'procedure' in result:
+        print("\n📋 Basic Analysis (for reference):")
+        print("-" * 40)
+        proc = result.get('procedure', {})
+        print(f"   Procedure: {proc.get('name', 'Unknown')}")
+        print(f"   File: {proc.get('file', 'unknown')}")
+        
+        steps = result.get('validation_steps', [])
+        if steps:
+            print(f"   Validation steps: {len(steps)}")
+        
+        error_codes = result.get('error_codes', [])
+        if error_codes:
+            print(f"   Error codes: {len(error_codes)}")
+
+
 def interactive_search(searcher: TalSearcherV2):
     """Interactive search REPL"""
     print("\n" + "=" * 60)
@@ -1825,17 +2324,33 @@ def interactive_search(searcher: TalSearcherV2):
                 print("\nCommands:")
                 print("  <query>                - Search procedures and symbols")
                 print("  ASK <question>         - Explain business logic (or end with ?)")
+                print("  ANALYZE <question>     - Deep analysis with LLM + ISO uplift")
                 print("  TRACE <proc>           - Show call graph")
                 print("  USAGE <symbol>         - Find symbol references")
                 print("  EXPLAIN <proc>         - Full procedure context")
-                print("  STRUCT <name>          - Show struct definition")
+                print("  STRUCT <n>          - Show struct definition")
                 print("  LIST PROC [pattern]    - List procedures")
                 print("  LIST DEFINE [pattern]  - List DEFINE macros")
                 print("  LIST LITERAL [pattern] - List LITERAL constants")
                 print("  LIST RULES [type]      - List business rules")
+                print("\nLLM Analysis (requires LLM_API_URL env var):")
+                print("  ANALYZE <question>     - Full code analysis with ISO recommendations")
                 print("\nTip: End any query with ? for business logic explanation")
                 continue
             
+            # ANALYZE command - LLM-powered deep analysis
+            if query_upper.startswith('ANALYZE '):
+                question = query[8:].strip()
+                if not question:
+                    print("   Usage: ANALYZE <your question about the code>")
+                    continue
+                
+                print("\n🤖 Analyzing with LLM...")
+                print("   (Gathering code context and calling LLM API)")
+                
+                result = searcher.ask_with_llm(question, debug=False)
+                print_llm_result(result)
+                continue
             # ASK command or question ending with ?
             if query_upper.startswith('ASK ') or query.endswith('?'):
                 question = query[4:].strip() if query_upper.startswith('ASK ') else query.rstrip('?').strip()
