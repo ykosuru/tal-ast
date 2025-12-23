@@ -10,8 +10,8 @@ New Features:
 - Token matching (individual word matching)
 - Better suggestions when no results found
 
-Based on tal_searcher_v2.py by ykosuru
-#YK345
+Based on tal_searcher_v2.py
+#YK456
 """
 
 import re
@@ -306,6 +306,330 @@ def CALL_LLM(system_prompt: str, user_prompt: str, model: str = "gpt-4") -> str:
     
     except Exception as e:
         return f"[LLM API error: {e}]"
+
+
+# =============================================================================
+# LLM INVOKE - STUB FOR OPENAI CHAT COMPLETION API
+# =============================================================================
+
+def LLM_Invoke(
+    system_prompt: str,
+    user_prompt: str,
+    model: str = "gpt-4",
+    temperature: float = 0.3,
+    max_tokens: int = 4000,
+    api_url: str = None,
+    api_key: str = None
+) -> Dict:
+    """
+    Invoke LLM using OpenAI Chat Completion API format.
+    
+    STUB IMPLEMENTATION - Fill in with your actual LLM API call.
+    
+    Args:
+        system_prompt: System instructions for the LLM
+        user_prompt: User message with context and question
+        model: Model identifier (e.g., "gpt-4", "gpt-3.5-turbo", "claude-3-opus")
+        temperature: Sampling temperature (0.0-1.0)
+        max_tokens: Maximum tokens in response
+        api_url: API endpoint URL (defaults to env var LLM_API_URL)
+        api_key: API key (defaults to env var LLM_API_KEY)
+    
+    Returns:
+        Dict with keys:
+            - success: bool
+            - content: str (LLM response text)
+            - model: str (model used)
+            - usage: dict (token usage if available)
+            - error: str (error message if failed)
+    
+    Example usage:
+        result = LLM_Invoke(
+            system_prompt="You are a TAL code expert...",
+            user_prompt="Explain how this procedure validates credit party...",
+            model="gpt-4"
+        )
+        if result['success']:
+            print(result['content'])
+    """
+    
+    # Get API configuration from environment if not provided
+    api_url = api_url or os.environ.get('LLM_API_URL', 'https://api.openai.com/v1')
+    api_key = api_key or os.environ.get('LLM_API_KEY', '')
+    model = os.environ.get('LLM_MODEL', model)
+    
+    # =========================================================================
+    # STUB IMPLEMENTATION - Replace with your actual API call
+    # =========================================================================
+    
+    if not api_key:
+        return {
+            'success': False,
+            'content': '',
+            'model': model,
+            'usage': {},
+            'error': 'LLM_API_KEY not set. Set environment variable or pass api_key parameter.'
+        }
+    
+    if not HAS_REQUESTS:
+        return {
+            'success': False,
+            'content': '',
+            'model': model,
+            'usage': {},
+            'error': 'requests library not installed. Run: pip install requests'
+        }
+    
+    # Build the request payload (OpenAI Chat Completion format)
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user", 
+                "content": user_prompt
+            }
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+    
+    # Build headers
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    try:
+        # Make the API request
+        response = requests.post(
+            f"{api_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+        
+        response.raise_for_status()
+        data = response.json()
+        
+        # Extract response content
+        content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+        usage = data.get('usage', {})
+        
+        return {
+            'success': True,
+            'content': content,
+            'model': data.get('model', model),
+            'usage': {
+                'prompt_tokens': usage.get('prompt_tokens', 0),
+                'completion_tokens': usage.get('completion_tokens', 0),
+                'total_tokens': usage.get('total_tokens', 0)
+            },
+            'error': None
+        }
+        
+    except requests.exceptions.Timeout:
+        return {
+            'success': False,
+            'content': '',
+            'model': model,
+            'usage': {},
+            'error': 'Request timed out after 120 seconds'
+        }
+    except requests.exceptions.HTTPError as e:
+        error_detail = ''
+        try:
+            error_detail = e.response.json().get('error', {}).get('message', str(e))
+        except:
+            error_detail = str(e)
+        return {
+            'success': False,
+            'content': '',
+            'model': model,
+            'usage': {},
+            'error': f'HTTP error: {error_detail}'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'content': '',
+            'model': model,
+            'usage': {},
+            'error': f'Error: {str(e)}'
+        }
+
+
+# =============================================================================
+# LLM CONTEXT BUILDER
+# =============================================================================
+
+@dataclass
+class LLMContext:
+    """Context package for LLM analysis"""
+    query: str
+    procedures: List[Dict]
+    files: List[str]
+    symbols: List[Dict]
+    structs: List[Dict]
+    call_graph: Dict[str, List[str]]
+    total_lines: int
+    
+    def to_prompt_context(self, max_code_lines: int = 500) -> str:
+        """
+        Format collected context as a prompt string for LLM.
+        
+        Args:
+            max_code_lines: Maximum lines of code to include per procedure
+        
+        Returns:
+            Formatted string with all context
+        """
+        sections = []
+        
+        # Header
+        sections.append(f"# TAL Code Analysis Context")
+        sections.append(f"Query: {self.query}")
+        sections.append(f"Files: {len(self.files)}")
+        sections.append(f"Procedures: {len(self.procedures)}")
+        sections.append(f"Total Lines: {self.total_lines}")
+        sections.append("")
+        
+        # Procedures with code
+        if self.procedures:
+            sections.append("=" * 70)
+            sections.append("# PROCEDURES")
+            sections.append("=" * 70)
+            
+            for proc in self.procedures:
+                name = proc.get('name', 'UNKNOWN')
+                file = proc.get('file', 'unknown')
+                proc_type = proc.get('proc_type', 'PROC')
+                start_line = proc.get('start_line', 1)
+                end_line = proc.get('end_line', start_line)
+                params = proc.get('parameters', [])
+                
+                sections.append(f"\n## {name}")
+                sections.append(f"File: {file}:L{start_line}-{end_line}")
+                sections.append(f"Type: {proc_type}")
+                if params:
+                    sections.append(f"Parameters: {', '.join(params)}")
+                
+                # Include validation steps if available
+                steps = proc.get('validation_steps', [])
+                if steps:
+                    sections.append(f"\nValidation Steps ({len(steps)}):")
+                    for step in steps[:10]:
+                        step_num = step.get('step_num', '?')
+                        desc = step.get('description', '')
+                        sections.append(f"  Step {step_num}: {desc}")
+                        if step.get('errors'):
+                            sections.append(f"    Errors: {', '.join(step['errors'][:5])}")
+                
+                # Include calls
+                calls = proc.get('calls', [])
+                if calls:
+                    if isinstance(calls[0], dict):
+                        call_names = [c.get('target', '') for c in calls[:15]]
+                    else:
+                        call_names = calls[:15]
+                    sections.append(f"\nCalls: {', '.join(call_names)}")
+                
+                # Include code (prefer raw_code with comments)
+                code = proc.get('raw_code', proc.get('code', ''))
+                if code:
+                    code_lines = code.split('\n')
+                    if len(code_lines) > max_code_lines:
+                        # Truncate but show beginning and end
+                        half = max_code_lines // 2
+                        truncated = code_lines[:half] + [f'\n... [{len(code_lines) - max_code_lines} lines omitted] ...\n'] + code_lines[-half:]
+                        code = '\n'.join(truncated)
+                    sections.append(f"\n```tal\n{code}\n```")
+                
+                sections.append("")
+        
+        # Structs
+        if self.structs:
+            sections.append("=" * 70)
+            sections.append("# DATA STRUCTURES (STRUCTs)")
+            sections.append("=" * 70)
+            
+            for struct in self.structs:
+                name = struct.get('name', 'UNKNOWN')
+                file = struct.get('file', 'unknown')
+                fields = struct.get('fields', [])
+                
+                sections.append(f"\n## STRUCT {name}")
+                sections.append(f"File: {file}")
+                sections.append(f"Fields ({len(fields)}):")
+                
+                for field in fields[:30]:  # Limit fields
+                    fname = field.get('name', '?')
+                    ftype = field.get('data_type', '?')
+                    bounds = field.get('array_bounds', '')
+                    if bounds:
+                        sections.append(f"  {ftype} {fname}[{bounds}]")
+                    else:
+                        sections.append(f"  {ftype} {fname}")
+                
+                if len(fields) > 30:
+                    sections.append(f"  ... and {len(fields) - 30} more fields")
+                sections.append("")
+        
+        # Symbols
+        if self.symbols:
+            sections.append("=" * 70)
+            sections.append("# SYMBOLS (DEFINEs, LITERALs)")
+            sections.append("=" * 70)
+            
+            # Group by type
+            defines = [s for s in self.symbols if s.get('data_type') == 'DEFINE']
+            literals = [s for s in self.symbols if s.get('data_type') == 'LITERAL']
+            others = [s for s in self.symbols if s.get('data_type') not in ('DEFINE', 'LITERAL')]
+            
+            if defines:
+                sections.append(f"\n## DEFINEs ({len(defines)})")
+                for sym in defines[:20]:
+                    sections.append(f"  {sym.get('name', '?')}: {sym.get('definition', '')[:60]}")
+            
+            if literals:
+                sections.append(f"\n## LITERALs ({len(literals)})")
+                for sym in literals[:20]:
+                    sections.append(f"  {sym.get('name', '?')}: {sym.get('definition', '')[:60]}")
+            
+            if others:
+                sections.append(f"\n## Other Symbols ({len(others)})")
+                for sym in others[:20]:
+                    sections.append(f"  {sym.get('data_type', '?')} {sym.get('name', '?')}")
+            
+            sections.append("")
+        
+        # Call graph
+        if self.call_graph:
+            sections.append("=" * 70)
+            sections.append("# CALL RELATIONSHIPS")
+            sections.append("=" * 70)
+            
+            for proc_name, callees in list(self.call_graph.items())[:20]:
+                if callees:
+                    sections.append(f"  {proc_name} → {', '.join(callees[:10])}")
+            sections.append("")
+        
+        return '\n'.join(sections)
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'query': self.query,
+            'files': self.files,
+            'procedure_count': len(self.procedures),
+            'procedures': [{'name': p.get('name'), 'file': p.get('file')} for p in self.procedures],
+            'struct_count': len(self.structs),
+            'symbol_count': len(self.symbols),
+            'total_lines': self.total_lines
+        }
 
 
 # =============================================================================
@@ -1306,6 +1630,420 @@ class TalSearcherV3:
                 self.embedder.qdrant.close()
             except Exception:
                 pass
+    
+    # =========================================================================
+    # LLM CONTEXT COLLECTION
+    # =========================================================================
+    
+    def collect_context(self, query: str, max_procedures: int = 10, 
+                       include_callees: bool = True, callee_depth: int = 1) -> LLMContext:
+        """
+        Collect all relevant context for LLM analysis based on search query.
+        
+        Args:
+            query: Search query (natural language or procedure name)
+            max_procedures: Maximum procedures to include
+            include_callees: Include procedures that are called by matched procedures
+            callee_depth: How many levels of callees to include (1 = direct calls only)
+        
+        Returns:
+            LLMContext with all collected procedures, files, symbols, structs
+        """
+        # Search for relevant procedures
+        search_results = self.search(query, top_k=max_procedures * 2)
+        
+        # Collect unique procedures
+        procedures = []
+        proc_names = set()
+        files = set()
+        
+        for result in search_results:
+            if result.result_type == 'procedure' and result.name not in proc_names:
+                proc_names.add(result.name)
+                files.add(result.file)
+                
+                # Get full procedure data
+                if result.name in self.proc_by_name:
+                    procedures.append(self.proc_by_name[result.name])
+                elif result.data:
+                    procedures.append(result.data)
+                
+                if len(procedures) >= max_procedures:
+                    break
+        
+        # Optionally include callees (called procedures)
+        if include_callees and procedures:
+            callees_to_add = []
+            for proc in procedures:
+                calls = proc.get('calls', [])
+                for call in calls:
+                    callee_name = call.get('target', call) if isinstance(call, dict) else call
+                    callee_name = str(callee_name).upper()
+                    
+                    if callee_name not in proc_names and callee_name in self.proc_by_name:
+                        callee_proc = self.proc_by_name[callee_name]
+                        callees_to_add.append(callee_proc)
+                        proc_names.add(callee_name)
+                        files.add(callee_proc.get('file', ''))
+            
+            procedures.extend(callees_to_add[:max_procedures])  # Limit callees
+        
+        # Collect referenced symbols
+        symbols = []
+        symbol_names = set()
+        for proc in procedures:
+            for ref in proc.get('data_refs', []):
+                if ref not in symbol_names and ref in self.symbol_by_name:
+                    symbol_names.add(ref)
+                    symbols.extend(self.symbol_by_name[ref])
+        
+        # Collect referenced structs
+        structs = []
+        struct_names = set()
+        
+        # From parameters and data refs
+        for proc in procedures:
+            code = proc.get('raw_code', proc.get('code', '')).upper()
+            for struct_name in self.struct_by_name:
+                if struct_name in code and struct_name not in struct_names:
+                    struct_names.add(struct_name)
+                    structs.append(self.struct_by_name[struct_name])
+        
+        # Build call graph for included procedures
+        call_graph = {}
+        for proc in procedures:
+            proc_name = proc.get('name', '')
+            calls = proc.get('calls', [])
+            if calls:
+                if isinstance(calls[0], dict):
+                    call_graph[proc_name] = [c.get('target', '') for c in calls]
+                else:
+                    call_graph[proc_name] = [str(c) for c in calls]
+        
+        # Calculate total lines
+        total_lines = sum(
+            proc.get('end_line', 0) - proc.get('start_line', 0) + 1 
+            for proc in procedures
+        )
+        
+        return LLMContext(
+            query=query,
+            procedures=procedures,
+            files=sorted(files),
+            symbols=symbols[:50],  # Limit symbols
+            structs=structs[:20],  # Limit structs
+            call_graph=call_graph,
+            total_lines=total_lines
+        )
+    
+    def collect_context_by_files(self, file_patterns: List[str], 
+                                 max_procedures: int = 20) -> LLMContext:
+        """
+        Collect context from specific files.
+        
+        Args:
+            file_patterns: List of file name patterns to include
+            max_procedures: Maximum procedures to include
+        
+        Returns:
+            LLMContext with procedures from specified files
+        """
+        procedures = []
+        files = set()
+        
+        for proc in self.procedures:
+            file_name = proc.get('file', '')
+            for pattern in file_patterns:
+                if pattern.upper() in file_name.upper():
+                    procedures.append(proc)
+                    files.add(file_name)
+                    break
+            
+            if len(procedures) >= max_procedures:
+                break
+        
+        # Collect symbols and structs
+        symbols = []
+        structs = []
+        
+        for proc in procedures:
+            for ref in proc.get('data_refs', []):
+                if ref in self.symbol_by_name:
+                    symbols.extend(self.symbol_by_name[ref])
+            
+            code = proc.get('raw_code', proc.get('code', '')).upper()
+            for struct_name in self.struct_by_name:
+                if struct_name in code:
+                    structs.append(self.struct_by_name[struct_name])
+        
+        total_lines = sum(
+            proc.get('end_line', 0) - proc.get('start_line', 0) + 1 
+            for proc in procedures
+        )
+        
+        return LLMContext(
+            query=f"Files: {', '.join(file_patterns)}",
+            procedures=procedures,
+            files=sorted(files),
+            symbols=symbols[:50],
+            structs=list({s['name']: s for s in structs}.values())[:20],
+            call_graph={},
+            total_lines=total_lines
+        )
+    
+    def collect_context_by_procedures(self, proc_names: List[str],
+                                      include_callees: bool = True,
+                                      callee_depth: int = 2) -> LLMContext:
+        """
+        Collect context for specific procedures by name.
+        
+        Args:
+            proc_names: List of procedure names
+            include_callees: Include called procedures
+            callee_depth: Depth of call tree to include
+        
+        Returns:
+            LLMContext with specified procedures and their callees
+        """
+        procedures = []
+        proc_set = set()
+        files = set()
+        
+        # Add requested procedures
+        for name in proc_names:
+            name_upper = name.upper()
+            if name_upper in self.proc_by_name and name_upper not in proc_set:
+                proc = self.proc_by_name[name_upper]
+                procedures.append(proc)
+                proc_set.add(name_upper)
+                files.add(proc.get('file', ''))
+        
+        # Add callees recursively
+        if include_callees:
+            for depth in range(callee_depth):
+                new_callees = []
+                for proc in procedures:
+                    calls = proc.get('calls', [])
+                    for call in calls:
+                        callee_name = call.get('target', call) if isinstance(call, dict) else str(call)
+                        callee_name = callee_name.upper()
+                        
+                        if callee_name not in proc_set and callee_name in self.proc_by_name:
+                            callee_proc = self.proc_by_name[callee_name]
+                            new_callees.append(callee_proc)
+                            proc_set.add(callee_name)
+                            files.add(callee_proc.get('file', ''))
+                
+                procedures.extend(new_callees)
+        
+        # Collect symbols
+        symbols = []
+        for proc in procedures:
+            for ref in proc.get('data_refs', []):
+                if ref in self.symbol_by_name:
+                    symbols.extend(self.symbol_by_name[ref])
+        
+        # Collect structs
+        structs = []
+        for proc in procedures:
+            code = proc.get('raw_code', proc.get('code', '')).upper()
+            for struct_name in self.struct_by_name:
+                if struct_name in code:
+                    structs.append(self.struct_by_name[struct_name])
+        
+        # Build call graph
+        call_graph = {}
+        for proc in procedures:
+            proc_name = proc.get('name', '')
+            calls = proc.get('calls', [])
+            if calls:
+                if isinstance(calls[0], dict):
+                    call_graph[proc_name] = [c.get('target', '') for c in calls]
+                else:
+                    call_graph[proc_name] = [str(c) for c in calls]
+        
+        total_lines = sum(
+            proc.get('end_line', 0) - proc.get('start_line', 0) + 1 
+            for proc in procedures
+        )
+        
+        return LLMContext(
+            query=f"Procedures: {', '.join(proc_names)}",
+            procedures=procedures,
+            files=sorted(files),
+            symbols=symbols[:50],
+            structs=list({s['name']: s for s in structs}.values())[:20],
+            call_graph=call_graph,
+            total_lines=total_lines
+        )
+    
+    # =========================================================================
+    # LLM ANALYSIS METHODS
+    # =========================================================================
+    
+    def ask_llm(self, question: str, max_procedures: int = 10,
+                include_iso_context: bool = True) -> Dict:
+        """
+        Ask a question about TAL code using LLM with collected context.
+        
+        Args:
+            question: Natural language question about the code
+            max_procedures: Maximum procedures to include in context
+            include_iso_context: Include ISO standards reference
+        
+        Returns:
+            Dict with 'answer', 'context_summary', 'success'
+        """
+        # Collect context based on the question
+        context = self.collect_context(question, max_procedures=max_procedures)
+        
+        # Build system prompt
+        system_prompt = self._build_system_prompt(include_iso_context)
+        
+        # Build user prompt with context
+        user_prompt = self._build_user_prompt(question, context)
+        
+        # Call LLM
+        result = LLM_Invoke(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt
+        )
+        
+        return {
+            'question': question,
+            'answer': result.get('content', ''),
+            'success': result.get('success', False),
+            'error': result.get('error'),
+            'context_summary': context.to_dict(),
+            'usage': result.get('usage', {})
+        }
+    
+    def analyze_procedures(self, proc_names: List[str], question: str = None,
+                          include_callees: bool = True) -> Dict:
+        """
+        Analyze specific procedures using LLM.
+        
+        Args:
+            proc_names: List of procedure names to analyze
+            question: Optional specific question (default: general analysis)
+            include_callees: Include called procedures in context
+        
+        Returns:
+            Dict with analysis results
+        """
+        # Collect context for specified procedures
+        context = self.collect_context_by_procedures(
+            proc_names, 
+            include_callees=include_callees,
+            callee_depth=2
+        )
+        
+        if not context.procedures:
+            return {
+                'success': False,
+                'error': f"No procedures found matching: {', '.join(proc_names)}",
+                'suggestions': self.suggest(' '.join(proc_names))
+            }
+        
+        # Build prompts
+        system_prompt = self._build_system_prompt(include_iso_context=True)
+        
+        if question:
+            user_question = question
+        else:
+            user_question = f"""Analyze the following TAL procedures and provide:
+1. Purpose and functionality of each procedure
+2. Business logic and validation rules implemented
+3. Data flow and dependencies
+4. Error handling patterns
+5. Potential issues or improvements
+
+Procedures to analyze: {', '.join(proc_names)}"""
+        
+        user_prompt = self._build_user_prompt(user_question, context)
+        
+        # Call LLM
+        result = LLM_Invoke(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=6000  # Longer for detailed analysis
+        )
+        
+        return {
+            'procedures': proc_names,
+            'question': user_question,
+            'answer': result.get('content', ''),
+            'success': result.get('success', False),
+            'error': result.get('error'),
+            'context_summary': context.to_dict(),
+            'usage': result.get('usage', {})
+        }
+    
+    def _build_system_prompt(self, include_iso_context: bool = True) -> str:
+        """Build system prompt for LLM"""
+        prompt = """You are an expert in payment systems, wire transfer processing, and legacy code analysis.
+
+You have deep knowledge of:
+- TAL (Transaction Application Language) for HPE NonStop Tandem systems
+- SWIFT/ISO 20022 message formats (pacs.008, pacs.009, pain.001)
+- Fedwire Funds Service specifications
+- CHIPS (Clearing House Interbank Payments System) requirements
+- OFAC sanctions screening and AML compliance
+- ISO standards: ISO 13616 (IBAN), ISO 9362 (BIC/SWIFT), ISO 20022
+
+TAL Language Notes:
+- PROC defines procedures, SUBPROC defines local sub-procedures
+- Comments start with ! and go to end of line
+- Variables: INT, STRING, FIXED, REAL, UNSIGNED
+- STRUCT defines record structures
+- DEFINE creates macros, LITERAL creates constants
+- CALL invokes procedures, := is assignment
+- BEGIN/END delimit code blocks
+
+Your task is to:
+1. Analyze the provided TAL code accurately
+2. Explain business logic in clear, professional terms
+3. Identify validation steps, error handling, and compliance checks
+4. Reference specific code when explaining behavior
+5. Suggest improvements for ISO standard compliance when relevant"""
+
+        if include_iso_context:
+            prompt += """
+
+## Relevant ISO Standards Reference
+
+### SWIFT/ISO 20022
+- pacs.008: FI to FI Customer Credit Transfer
+- pacs.009: FI to FI Financial Institution Credit Transfer
+- Key elements: IBAN (max 34 chars), BIC (8 or 11 chars)
+
+### Fedwire
+- Type/Subtype codes for transaction classification
+- Sender ABA (9 digits), OFAC screening requirements
+
+### ISO 13616 (IBAN)
+- Country code (2 alpha) + Check digits (2 numeric) + BBAN
+- Modulus 97 check digit validation
+
+### ISO 9362 (BIC/SWIFT)
+- 8 or 11 character format: BANKCCLL[XXX]
+
+### Compliance Requirements
+- OFAC/Sanctions screening (SDN, SSI lists)
+- AML transaction monitoring
+- KYC verification
+- Beneficiary validation"""
+
+        return prompt
+    
+    def _build_user_prompt(self, question: str, context: LLMContext) -> str:
+        """Build user prompt with context"""
+        prompt_parts = [
+            f"## Question\n{question}\n",
+            f"## Code Context\n{context.to_prompt_context()}"
+        ]
+        
+        return '\n'.join(prompt_parts)
 
 
 # =============================================================================
@@ -1438,28 +2176,31 @@ def print_struct_result(struct: Dict):
 # INTERACTIVE CLI
 # =============================================================================
 
+
 def interactive_search(searcher: TalSearcherV3):
     """Interactive search REPL"""
     print("\n" + "=" * 60)
-    print("TAL Intelligence System v3.0 (Enhanced Search)")
+    print("TAL Intelligence System v3.0 (Enhanced Search + LLM)")
     print("=" * 60)
-    print("\nCommands:")
-    print("  <query>                - Cascading search (exact→fuzzy→contains→token)")
+    print("\nSearch Commands:")
+    print("  <query>                - Cascading search")
     print("  TRACE <proc>           - Show call graph")
     print("  USAGE <symbol>         - Find symbol references")
     print("  EXPLAIN <proc>         - Full procedure context")
     print("  STRUCT <name>          - Show struct definition")
     print("  CODE <query>           - Search within code content")
+    print("\nLLM Commands (requires LLM_API_KEY):")
+    print("  ASK <question>         - Ask LLM about code")
+    print("  ANALYZE <proc1,proc2>  - Deep LLM analysis")
+    print("  CONTEXT <query>        - Preview LLM context")
+    print("\nOther:")
     print("  LIST PROC [pattern]    - List procedures")
-    print("  LIST DEFINE [pattern]  - List DEFINE macros")
-    print("  HELP                   - Show this help")
-    print("  QUIT                   - Exit")
-    print("\n💡 Try: 'VALIDTE_CREDIT' (typo) or 'validate iban' (tokens)")
+    print("  HELP / QUIT")
     print("=" * 60)
     
     while True:
         try:
-            query = input("\n❓ Search: ").strip()
+            query = input("\n? Search: ").strip()
             
             if not query:
                 continue
@@ -1467,21 +2208,101 @@ def interactive_search(searcher: TalSearcherV3):
             query_upper = query.upper()
             
             if query_upper in ('QUIT', 'EXIT', 'Q'):
-                print("👋 Goodbye!")
+                print("Goodbye!")
                 break
             
             if query_upper == 'HELP':
                 print("\nSearch Types:")
-                print("  ✓ exact    - Direct name match")
-                print("  ≈ fuzzy    - Close match (handles typos)")
-                print("  ⊃ contains - Substring in name")
-                print("  ∩ token    - Individual word match")
-                print("  🔍 hybrid   - BM25 + vector search")
-                print("\nExamples:")
-                print("  VALIDATE_CREDIT_PARTY  → exact match")
-                print("  VALIDTE_CREDIT         → fuzzy match (typo)")
-                print("  CREDIT                 → contains match")
-                print("  validate iban          → token match")
+                print("  exact    - Direct name match")
+                print("  fuzzy    - Close match (typos)")
+                print("  contains - Substring in name")
+                print("  token    - Individual word match")
+                print("  code     - Found in code/comments")
+                print("\nLLM Commands:")
+                print("  ASK <question>      - Q&A with code context")
+                print("  ANALYZE proc1,proc2 - Deep analysis")
+                print("  CONTEXT <query>     - Preview context")
+                print("\nEnvironment Variables:")
+                print("  LLM_API_URL  - API endpoint")
+                print("  LLM_API_KEY  - Your API key")
+                print("  LLM_MODEL    - Model name (default: gpt-4)")
+                continue
+            
+            # ASK command - LLM Q&A
+            if query_upper.startswith('ASK ') or query.endswith('?'):
+                question = query[4:].strip() if query_upper.startswith('ASK ') else query.rstrip('?').strip()
+                if not question:
+                    print("   Usage: ASK <your question>")
+                    continue
+                
+                print(f"\nAsking LLM: \"{question}\"")
+                print("   Collecting context...")
+                
+                result = searcher.ask_llm(question, max_procedures=8)
+                
+                if result.get('success'):
+                    ctx = result.get('context_summary', {})
+                    print(f"   Context: {ctx.get('procedure_count', 0)} procedures")
+                    print("\n" + "=" * 60)
+                    print(result.get('answer', 'No response'))
+                    print("=" * 60)
+                else:
+                    print(f"   Error: {result.get('error', 'Unknown error')}")
+                    print("   Set LLM_API_KEY environment variable")
+                continue
+            
+            # ANALYZE command
+            if query_upper.startswith('ANALYZE '):
+                proc_input = query[8:].strip()
+                if not proc_input:
+                    print("   Usage: ANALYZE proc1,proc2,proc3")
+                    continue
+                
+                proc_names = [p.strip() for p in re.split(r'[,\s]+', proc_input) if p.strip()]
+                
+                print(f"\nAnalyzing: {', '.join(proc_names)}")
+                print("   Collecting context...")
+                
+                result = searcher.analyze_procedures(proc_names)
+                
+                if result.get('success'):
+                    print("\n" + "=" * 60)
+                    print(result.get('answer', 'No response'))
+                    print("=" * 60)
+                else:
+                    print(f"   Error: {result.get('error', 'Unknown error')}")
+                    if result.get('suggestions'):
+                        print(f"   Did you mean: {', '.join(result['suggestions'][:5])}")
+                continue
+            
+            # CONTEXT command
+            if query_upper.startswith('CONTEXT '):
+                ctx_query = query[8:].strip()
+                if not ctx_query:
+                    print("   Usage: CONTEXT <query>")
+                    continue
+                
+                print(f"\nCollecting context for: \"{ctx_query}\"")
+                context = searcher.collect_context(ctx_query, max_procedures=5)
+                
+                print(f"\n   Files: {len(context.files)}")
+                for f in context.files[:10]:
+                    print(f"      {f}")
+                
+                print(f"\n   Procedures: {len(context.procedures)}")
+                for p in context.procedures[:10]:
+                    print(f"      {p.get('name', '?')} ({p.get('file', '?')})")
+                
+                print(f"\n   Structs: {len(context.structs)}")
+                print(f"   Symbols: {len(context.symbols)}")
+                print(f"   Total Lines: {context.total_lines}")
+                
+                prompt_preview = context.to_prompt_context(max_code_lines=10)
+                print(f"\n   Prompt Preview (first 800 chars):")
+                print("-" * 40)
+                print(prompt_preview[:800])
+                if len(prompt_preview) > 800:
+                    print(f"... [{len(prompt_preview) - 800} more chars]")
                 continue
             
             # TRACE
@@ -1503,14 +2324,14 @@ def interactive_search(searcher: TalSearcherV3):
                 proc_name = query[8:].strip()
                 result = searcher.explain_procedure(proc_name)
                 if 'error' in result:
-                    print(f"   ❌ {result['error']}")
+                    print(f"   Error: {result['error']}")
                     if result.get('suggestions'):
-                        print(f"   💡 Did you mean: {', '.join(result['suggestions'][:5])}")
+                        print(f"   Did you mean: {', '.join(result['suggestions'][:5])}")
                 else:
                     proc = result['procedure']
-                    print(f"\n📖 {proc['name']} ({proc['file']})")
+                    print(f"\n{proc['name']} ({proc['file']})")
                     print(f"   Type: {proc.get('proc_type', 'PROC')}")
-                    code_preview = proc.get('code', '')[:500]
+                    code_preview = proc.get('raw_code', proc.get('code', ''))[:800]
                     print(f"\n   Code:\n{code_preview}")
                 continue
             
@@ -1537,28 +2358,28 @@ def interactive_search(searcher: TalSearcherV3):
                 
                 if list_type in ('PROC', 'PROCS', 'PROCEDURE', 'PROCEDURES'):
                     items = searcher.list_procedures(pattern)
-                    print(f"\n📋 Procedures ({len(items)}):")
+                    print(f"\nProcedures ({len(items)}):")
                     for item in items[:30]:
-                        print(f"   • {item['name']} ({item['file']})")
+                        print(f"   {item['name']} ({item['file']})")
                 elif list_type in ('DEFINE', 'DEFINES'):
                     items = searcher.list_defines(pattern)
-                    print(f"\n🏷️ Defines ({len(items)}):")
+                    print(f"\nDefines ({len(items)}):")
                     for item in items[:30]:
-                        print(f"   • {item['name']} ({item['file']})")
+                        print(f"   {item['name']} ({item['file']})")
                 else:
                     print(f"   Unknown list type: {list_type}")
                 continue
             
             # Default: cascading search
-            print(f"\n🔍 Searching: '{query}'")
+            print(f"\nSearching: '{query}'")
             results = searcher.search(query)
             print_search_results(results)
             
         except KeyboardInterrupt:
-            print("\n👋 Goodbye!")
+            print("\nGoodbye!")
             break
         except Exception as e:
-            print(f"   ❌ Error: {e}")
+            print(f"   Error: {e}")
 
 
 def main():
