@@ -11,7 +11,7 @@ New Features:
 - Better suggestions when no results found
 
 Based on tal_searcher_v2.py
-#YK123
+#YK234
 """
 
 import re
@@ -903,6 +903,7 @@ class TalSearcherV3:
                include_contains: bool = True,
                include_tokens: bool = True,
                include_hybrid: bool = True,
+               include_code: bool = True,
                fuzzy_threshold: float = 0.6) -> List[SearchResult]:
         """
         Main cascading search method.
@@ -910,9 +911,10 @@ class TalSearcherV3:
         Search Order:
         1. EXACT - Direct name match (highest priority)
         2. FUZZY - Close matches for typos
-        3. CONTAINS - Substring matching
-        4. TOKEN - Individual word matching
-        5. HYBRID - BM25 + Vector search (semantic)
+        3. CONTAINS - Substring in names
+        4. TOKEN - Individual word matching in names
+        5. CODE - Search within procedure code content (including comments)
+        6. HYBRID - BM25 + Vector search (semantic)
         
         Args:
             query: Search query
@@ -921,6 +923,7 @@ class TalSearcherV3:
             include_contains: Include substring matches
             include_tokens: Include token-based matches
             include_hybrid: Include BM25/vector search
+            include_code: Include code content search
             fuzzy_threshold: Minimum similarity for fuzzy (0-1)
         
         Returns:
@@ -929,43 +932,71 @@ class TalSearcherV3:
         all_results = []
         seen_names = set()
         
-        def add_results(results: List[SearchResult]):
+        def add_results(results: List[SearchResult], boost: float = 1.0):
             """Add results while avoiding duplicates"""
             for r in results:
                 if r.name not in seen_names:
                     seen_names.add(r.name)
+                    r.score *= boost
                     all_results.append(r)
         
-        # 1. EXACT MATCH (always first)
-        exact_results = self.search_exact(query)
-        add_results(exact_results)
+        # Clean up query - remove common question words for better matching
+        query_clean = query.strip()
+        question_words = {'how', 'to', 'what', 'is', 'the', 'a', 'an', 'does', 'do', 'can', 'where', 'when', 'why'}
         
-        # If we have exact matches, return them (user probably found what they wanted)
+        # Handle "code" as a potential command prefix
+        if query_clean.lower().startswith('code '):
+            query_clean = query_clean[5:].strip()
+        
+        query_words = query_clean.split()
+        meaningful_words = [w for w in query_words if w.lower() not in question_words and len(w) >= 2]
+        meaningful_query = ' '.join(meaningful_words) if meaningful_words else query_clean
+        
+        # 1. EXACT MATCH (always first)
+        exact_results = self.search_exact(query_clean)
+        add_results(exact_results, boost=1.0)
+        
+        # Also try meaningful query for exact match
+        if meaningful_query != query_clean:
+            exact_results2 = self.search_exact(meaningful_query)
+            add_results(exact_results2, boost=0.95)
+        
+        # If we have exact matches, return them
         if exact_results:
             return all_results[:top_k]
         
         # 2. FUZZY MATCH (typo correction)
         if include_fuzzy:
-            fuzzy_results = self.search_fuzzy(query, threshold=fuzzy_threshold)
-            add_results(fuzzy_results)
+            fuzzy_results = self.search_fuzzy(meaningful_query, threshold=fuzzy_threshold)
+            add_results(fuzzy_results, boost=0.9)
         
-        # 3. CONTAINS MATCH (substring)
+        # 3. CONTAINS MATCH (substring in names)
         if include_contains:
-            contains_results = self.search_contains(query)
-            add_results(contains_results)
+            contains_results = self.search_contains(meaningful_query)
+            add_results(contains_results, boost=0.85)
         
-        # 4. TOKEN MATCH (individual words)
+        # 4. TOKEN MATCH (individual words in names)
         if include_tokens:
-            token_results = self.search_tokens(query)
-            add_results(token_results)
+            token_results = self.search_tokens(meaningful_query)
+            add_results(token_results, boost=0.8)
         
-        # 5. HYBRID SEARCH (BM25 + Vector)
-        if include_hybrid and not all_results:
-            # Only use hybrid if we haven't found anything yet
-            hybrid_results = self.search_hybrid(query, top_k)
-            add_results(hybrid_results)
+        # 5. CODE CONTENT SEARCH (search within procedure code and comments)
+        if include_code:
+            # Use meaningful query for code search
+            code_results = self.search_in_code(meaningful_query)
+            add_results(code_results, boost=0.75)
+            
+            # Also search comments specifically
+            comment_results = self.search_in_comments(meaningful_query)
+            add_results(comment_results, boost=0.7)
         
-        # Sort by match quality
+        # 6. HYBRID SEARCH (BM25 + Vector)
+        if include_hybrid and len(all_results) < 5:
+            # Only use hybrid if we haven't found much
+            hybrid_results = self.search_hybrid(meaningful_query, top_k)
+            add_results(hybrid_results, boost=0.6)
+        
+        # Sort by match quality and score
         def sort_key(r: SearchResult) -> Tuple[int, float]:
             type_order = {
                 MatchType.EXACT: 0,
@@ -981,7 +1012,7 @@ class TalSearcherV3:
         
         # If still no results, provide suggestions
         if not all_results:
-            suggestions = self.suggest(query)
+            suggestions = self.suggest(meaningful_query)
             if suggestions:
                 print(f"   💡 Did you mean: {', '.join(suggestions[:5])}")
         
@@ -1012,29 +1043,111 @@ class TalSearcherV3:
         results = self.search(query, top_k=limit * 2)
         return [r for r in results if r.result_type == 'struct'][:limit]
     
-    def search_in_code(self, query: str, limit: int = 10) -> List[SearchResult]:
-        """Search within procedure code content"""
-        query_upper = query.strip().upper()
+    def search_in_code(self, query: str, limit: int = 20) -> List[SearchResult]:
+        """Search within procedure code content (including comments)"""
         results = []
         
+        # Handle multi-word queries - search for the phrase
+        query_clean = query.strip()
+        query_upper = query_clean.upper()
+        
+        # Also prepare individual words for fallback
+        query_words = [w.upper() for w in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', query_clean) if len(w) >= 3]
+        
         for proc in self.procedures:
-            code = proc.get('raw_code', proc.get('code', '')).upper()
+            # Search in raw_code (with comments) first, then normalized code
+            code = proc.get('raw_code', proc.get('code', ''))
+            code_upper = code.upper()
             name = proc.get('name', '')
             
-            if query_upper in code:
-                count = code.count(query_upper)
-                score = min(1.0, count / 10)
+            score = 0
+            matched = []
+            
+            # 1. Exact phrase match (highest value)
+            if query_upper in code_upper:
+                count = code_upper.count(query_upper)
+                score += count * 10
+                matched.append(query_clean)
+            
+            # 2. Individual word matches (lower value but still useful)
+            for word in query_words:
+                if word in code_upper:
+                    word_count = code_upper.count(word)
+                    score += word_count * 2
+                    if word not in matched:
+                        matched.append(word)
+            
+            if score > 0:
+                # Find the line where the match occurs for context
+                match_context = ""
+                for line in code.split('\n'):
+                    if query_upper in line.upper() or any(w in line.upper() for w in query_words[:2]):
+                        match_context = line.strip()[:80]
+                        break
                 
                 results.append(SearchResult(
-                    score=score,
+                    score=min(1.0, score / 20),  # Normalize score
                     result_type='procedure',
                     name=name,
                     file=proc.get('file', ''),
                     line=proc.get('start_line', 1),
-                    text=f"Found {count} occurrence(s)",
-                    context=f"Type: {proc.get('proc_type', 'PROC')}",
+                    text=match_context if match_context else f"Found in code",
+                    context=f"Type: {proc.get('proc_type', 'PROC')} | Matches: {score//2}",
                     match_type=MatchType.CONTAINS,
-                    matched_terms=[query_upper],
+                    matched_terms=matched,
+                    data=proc
+                ))
+        
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:limit]
+    
+    def search_in_comments(self, query: str, limit: int = 20) -> List[SearchResult]:
+        """Search specifically in code comments (lines starting with !)"""
+        results = []
+        query_upper = query.strip().upper()
+        query_words = [w.upper() for w in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', query) if len(w) >= 3]
+        
+        for proc in self.procedures:
+            code = proc.get('raw_code', proc.get('code', ''))
+            name = proc.get('name', '')
+            
+            score = 0
+            matched_lines = []
+            
+            for line in code.split('\n'):
+                # Check if it's a comment line
+                line_stripped = line.strip()
+                if line_stripped.startswith('!') or '!' in line:
+                    comment_part = line_stripped
+                    if '!' in line and not line_stripped.startswith('!'):
+                        comment_part = line[line.index('!'):]
+                    
+                    comment_upper = comment_part.upper()
+                    
+                    # Check for phrase match
+                    if query_upper in comment_upper:
+                        score += 10
+                        matched_lines.append(comment_part.strip()[:60])
+                    else:
+                        # Check word matches
+                        for word in query_words:
+                            if word in comment_upper:
+                                score += 2
+                                if len(matched_lines) < 3:
+                                    matched_lines.append(comment_part.strip()[:60])
+                                break
+            
+            if score > 0:
+                results.append(SearchResult(
+                    score=min(1.0, score / 20),
+                    result_type='procedure',
+                    name=name,
+                    file=proc.get('file', ''),
+                    line=proc.get('start_line', 1),
+                    text=matched_lines[0] if matched_lines else "Found in comments",
+                    context=f"Comment matches: {len(matched_lines)}",
+                    match_type=MatchType.CONTAINS,
+                    matched_terms=query_words[:3],
                     data=proc
                 ))
         
