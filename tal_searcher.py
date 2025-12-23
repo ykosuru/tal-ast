@@ -10,8 +10,8 @@ New Features:
 - Token matching (individual word matching)
 - Better suggestions when no results found
 
-Based on tal_searcher_v2.py
-#YK234
+Based on tal_searcher_v2.py by ykosuru
+#YK345
 """
 
 import re
@@ -910,11 +910,12 @@ class TalSearcherV3:
         
         Search Order:
         1. EXACT - Direct name match (highest priority)
-        2. FUZZY - Close matches for typos
-        3. CONTAINS - Substring in names
-        4. TOKEN - Individual word matching in names
-        5. CODE - Search within procedure code content (including comments)
-        6. HYBRID - BM25 + Vector search (semantic)
+        2. CODE PHRASE - Multi-word phrase found in code (for phrase queries)
+        3. FUZZY - Close matches for typos
+        4. CONTAINS - Substring in names
+        5. TOKEN - Individual word matching in names
+        6. CODE WORDS - Individual words in code
+        7. HYBRID - BM25 + Vector search (semantic)
         
         Args:
             query: Search query
@@ -952,6 +953,9 @@ class TalSearcherV3:
         meaningful_words = [w for w in query_words if w.lower() not in question_words and len(w) >= 2]
         meaningful_query = ' '.join(meaningful_words) if meaningful_words else query_clean
         
+        # Detect if this is a multi-word phrase query (like "debit party")
+        is_phrase_query = len(meaningful_words) >= 2
+        
         # 1. EXACT MATCH (always first)
         exact_results = self.search_exact(query_clean)
         add_results(exact_results, boost=1.0)
@@ -959,56 +963,49 @@ class TalSearcherV3:
         # Also try meaningful query for exact match
         if meaningful_query != query_clean:
             exact_results2 = self.search_exact(meaningful_query)
-            add_results(exact_results2, boost=0.95)
+            add_results(exact_results2, boost=0.98)
         
         # If we have exact matches, return them
         if exact_results:
             return all_results[:top_k]
         
-        # 2. FUZZY MATCH (typo correction)
+        # 2. FOR PHRASE QUERIES: Search CODE CONTENT FIRST (prioritize phrase matches)
+        if is_phrase_query and include_code:
+            # Search for the phrase in code - this should find "debit party" in comments
+            phrase_results = self.search_in_code(meaningful_query)
+            # Only add results that actually matched the phrase (not just individual words)
+            phrase_matches = [r for r in phrase_results if meaningful_query.upper() in ' '.join(r.matched_terms).upper() 
+                            or r.score >= 0.5]  # High score means phrase match
+            add_results(phrase_matches, boost=0.95)  # High priority for phrase matches
+        
+        # 3. FUZZY MATCH (typo correction)
         if include_fuzzy:
             fuzzy_results = self.search_fuzzy(meaningful_query, threshold=fuzzy_threshold)
-            add_results(fuzzy_results, boost=0.9)
+            add_results(fuzzy_results, boost=0.85)
         
-        # 3. CONTAINS MATCH (substring in names)
+        # 4. CONTAINS MATCH (substring in names)
         if include_contains:
             contains_results = self.search_contains(meaningful_query)
-            add_results(contains_results, boost=0.85)
+            add_results(contains_results, boost=0.80)
         
-        # 4. TOKEN MATCH (individual words in names)
+        # 5. TOKEN MATCH (individual words in names) - lower priority for phrase queries
         if include_tokens:
             token_results = self.search_tokens(meaningful_query)
-            add_results(token_results, boost=0.8)
+            token_boost = 0.60 if is_phrase_query else 0.75  # Lower for phrase queries
+            add_results(token_results, boost=token_boost)
         
-        # 5. CODE CONTENT SEARCH (search within procedure code and comments)
-        if include_code:
-            # Use meaningful query for code search
+        # 6. CODE WORD SEARCH (remaining code matches - individual words)
+        if include_code and not is_phrase_query:
             code_results = self.search_in_code(meaningful_query)
-            add_results(code_results, boost=0.75)
-            
-            # Also search comments specifically
-            comment_results = self.search_in_comments(meaningful_query)
-            add_results(comment_results, boost=0.7)
+            add_results(code_results, boost=0.70)
         
-        # 6. HYBRID SEARCH (BM25 + Vector)
+        # 7. HYBRID SEARCH (BM25 + Vector)
         if include_hybrid and len(all_results) < 5:
-            # Only use hybrid if we haven't found much
             hybrid_results = self.search_hybrid(meaningful_query, top_k)
-            add_results(hybrid_results, boost=0.6)
+            add_results(hybrid_results, boost=0.50)
         
-        # Sort by match quality and score
-        def sort_key(r: SearchResult) -> Tuple[int, float]:
-            type_order = {
-                MatchType.EXACT: 0,
-                MatchType.FUZZY: 1,
-                MatchType.CONTAINS: 2,
-                MatchType.TOKEN: 3,
-                MatchType.HYBRID: 4,
-                MatchType.PARTIAL: 5
-            }
-            return (type_order.get(r.match_type, 6), -r.score)
-        
-        all_results.sort(key=sort_key)
+        # Sort by score (higher is better)
+        all_results.sort(key=lambda r: -r.score)
         
         # If still no results, provide suggestions
         if not all_results:
@@ -1043,7 +1040,7 @@ class TalSearcherV3:
         results = self.search(query, top_k=limit * 2)
         return [r for r in results if r.result_type == 'struct'][:limit]
     
-    def search_in_code(self, query: str, limit: int = 20) -> List[SearchResult]:
+    def search_in_code(self, query: str, limit: int = 50) -> List[SearchResult]:
         """Search within procedure code content (including comments)"""
         results = []
         
@@ -1054,6 +1051,9 @@ class TalSearcherV3:
         # Also prepare individual words for fallback
         query_words = [w.upper() for w in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', query_clean) if len(w) >= 3]
         
+        # Is this a multi-word phrase?
+        is_phrase = len(query_words) >= 2
+        
         for proc in self.procedures:
             # Search in raw_code (with comments) first, then normalized code
             code = proc.get('raw_code', proc.get('code', ''))
@@ -1062,37 +1062,59 @@ class TalSearcherV3:
             
             score = 0
             matched = []
+            match_context = ""
             
-            # 1. Exact phrase match (highest value)
-            if query_upper in code_upper:
-                count = code_upper.count(query_upper)
-                score += count * 10
+            # 1. Exact phrase match (HIGHEST value for multi-word queries)
+            phrase_count = 0
+            if is_phrase and query_upper in code_upper:
+                phrase_count = code_upper.count(query_upper)
+                score += phrase_count * 20  # High weight for phrase match
                 matched.append(query_clean)
+                
+                # Find the line with the phrase for context
+                for line in code.split('\n'):
+                    if query_upper in line.upper():
+                        match_context = line.strip()[:100]
+                        break
             
-            # 2. Individual word matches (lower value but still useful)
+            # 2. Individual word matches (lower value)
+            word_matches = 0
             for word in query_words:
                 if word in code_upper:
                     word_count = code_upper.count(word)
-                    score += word_count * 2
+                    word_matches += 1
+                    if not is_phrase:  # Only count words if not a phrase query
+                        score += word_count * 2
                     if word not in matched:
                         matched.append(word)
             
+            # For phrase queries, only include if we found the phrase OR most words
+            if is_phrase:
+                if phrase_count == 0 and word_matches < len(query_words):
+                    continue  # Skip if no phrase match and missing words
+                elif phrase_count == 0:
+                    # All words present but not as phrase - lower score
+                    score = word_matches * 3
+            
             if score > 0:
-                # Find the line where the match occurs for context
-                match_context = ""
-                for line in code.split('\n'):
-                    if query_upper in line.upper() or any(w in line.upper() for w in query_words[:2]):
-                        match_context = line.strip()[:80]
-                        break
+                # If we don't have context yet, find a line with any match
+                if not match_context:
+                    for line in code.split('\n'):
+                        if any(w in line.upper() for w in query_words[:2]):
+                            match_context = line.strip()[:100]
+                            break
+                
+                # Normalize score
+                normalized_score = min(1.0, score / 40) if is_phrase else min(1.0, score / 20)
                 
                 results.append(SearchResult(
-                    score=min(1.0, score / 20),  # Normalize score
+                    score=normalized_score,
                     result_type='procedure',
                     name=name,
                     file=proc.get('file', ''),
                     line=proc.get('start_line', 1),
-                    text=match_context if match_context else f"Found in code",
-                    context=f"Type: {proc.get('proc_type', 'PROC')} | Matches: {score//2}",
+                    text=match_context if match_context else "Found in code",
+                    context=f"Type: {proc.get('proc_type', 'PROC')} | Phrase: {phrase_count}, Words: {word_matches}",
                     match_type=MatchType.CONTAINS,
                     matched_terms=matched,
                     data=proc
